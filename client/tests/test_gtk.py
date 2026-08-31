@@ -165,6 +165,22 @@ def test_gui_contacts_add_remove_and_self_guard(gtk_app):
     assert "Carol" not in contacts
 
 
+def test_gui_version_display(gtk_app):
+    app = gtk_app
+    win = app["win"]
+    win.activity.refresh_info()
+    label = win.activity.info_label.get_text()
+    assert "aimlessd/0.2.0" in label
+    assert "client: aimless/0.2.0" in label
+
+    monkey_status = dict(win.supervisor.status())
+    monkey_status.pop("build")
+    win.supervisor.status = lambda: monkey_status
+    win.activity.refresh_info()
+    label = win.activity.info_label.get_text()
+    assert "old build" in label
+
+
 def test_gui_away_status_propagates(gtk_app):
     app = gtk_app
     win = app["win"]

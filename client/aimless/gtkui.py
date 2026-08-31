@@ -255,6 +255,8 @@ class DaemonSupervisor:
                 "pubkey": who.get("key", ""),
                 "peers_up": sum(1 for p in peers if p.get("up")),
                 "peers_total": len(peers),
+                "build": st.get("build", ""),
+                "mtu": st.get("mtu", 0),
             }
         except Exception:
             return None
@@ -827,16 +829,18 @@ class ActivityView(Gtk.Box):
         st = self.app.supervisor.status()
         if not st:
             self.info_label.set_markup("<span foreground='#f38ba8'>●  offline — daemon not reachable</span>")
-        elif st["peers_up"] == 0:
-            self.info_label.set_markup(
-                "<span foreground='#fab387'>●  connecting — no Yggdrasil peers yet</span>\n"
-                f"your address: <b>{st['address']}</b>\n"
-                f"daemon: {st.get('build', '?')}  ·  client: aimless/{client_version}")
-        else:
-            self.info_label.set_markup(
-                f"<span foreground='#a6e3a1'>●  you are online</span>  —  address <b>{st['address']}</b>  ·  "
-                f"peers {st['peers_up']}/{st['peers_total']}\n"
-                f"daemon: {st.get('build', '?')}  ·  client: aimless/{client_version}")
+            return
+        build = st.get("build", "")
+        version_note = ""
+        if not build:
+            version_note = ("\n<span foreground='#f38ba8'>this daemon is an old build — "
+                            "run `aimless stop`, then reopen aimless to update</span>")
+            build = "unknown"
+        state = ("<span foreground='#a6e3a1'>●  you are online</span>" if st["peers_up"] > 0
+                 else "<span foreground='#fab387'>●  connecting — no Yggdrasil peers yet</span>")
+        self.info_label.set_markup(
+            f"{state}  —  address <b>{st['address']}</b>  ·  peers {st['peers_up']}/{st['peers_total']}\n"
+            f"daemon: {build}  ·  client: aimless/{client_version}{version_note}")
 
     def log(self, line):
         stamp = datetime.now().strftime("%H:%M:%S")
@@ -902,9 +906,15 @@ class AimlessWindow(Gtk.Window):
                           lambda *_, v=view: self.stack.set_visible_child_name(v))
 
         options_menu = Gtk.Menu()
-        self.daemon_item = Gtk.MenuItem(label="Daemon status …")
-        self.daemon_item.connect("activate", lambda *_: self.stack.set_visible_child(self.activity))
-        options_menu.append(self.daemon_item)
+        self.daemon_status_item = Gtk.MenuItem()
+        status_label = Gtk.Label()
+        status_label.set_halign(Gtk.Align.START)
+        status_label.set_markup("<span foreground='#9aa0ad'>○  checking daemon …</span>")
+        self.daemon_status_item.add(status_label)
+        self.daemon_status_item.set_sensitive(False)
+        self.daemon_status_item.connect("activate", lambda *_: self.stack.set_visible_child(self.activity))
+        self._daemon_status_label = status_label
+        options_menu.append(self.daemon_status_item)
         stop_item = Gtk.MenuItem(label="Stop aimlessd")
         stop_item.connect("activate", lambda *_: self.on_stop_daemon())
         options_menu.append(stop_item)
@@ -920,6 +930,7 @@ class AimlessWindow(Gtk.Window):
         quit_item.connect("activate", lambda *_: self.close())
         options_menu.append(quit_item)
         options_menu.show_all()
+        options_menu.connect("show", lambda *_: self.refresh_daemon_menu())
         menu_button.set_popup(options_menu)
 
         self.connect("destroy", self.on_destroy)
@@ -976,6 +987,19 @@ class AimlessWindow(Gtk.Window):
             except Exception:
                 pass
         return True
+
+    def refresh_daemon_menu(self):
+        st = self.supervisor.status()
+        if not st:
+            self._daemon_status_label.set_markup(
+                "<span foreground='#f38ba8'>○  daemon not reachable — will restart automatically</span>")
+        elif st["peers_up"] == 0:
+            self._daemon_status_label.set_markup(
+                f"<span foreground='#fab387'>●  daemon up — connecting… ({st['address']})</span>")
+        else:
+            self._daemon_status_label.set_markup(
+                f"<span foreground='#a6e3a1'>✓  daemon up — online</span>  "
+                f"<span size='small'>{st['address']} · {st.get('build', 'old build — restart via aimless stop')}</span>")
 
     def poll_presence(self):
         try:
