@@ -24,7 +24,7 @@ Serverless chat with an AIM heart. Bitmessage's architecture (decentralized, end
 | Piece | Language | Role |
 |---|---|---|
 | `daemon/` | Go | `aimlessd` — embedded yggdrasil core (no TUN), packet transport, journals, retry/ACK, presence probing, local JSON API on a Unix socket |
-| `client/` | Python | `aimless` CLI — identity, contacts, encrypted cache, chat REPL; `gui.py` AIM skin |
+| `client/` | Python | `aimless` CLI — identity, contacts, encrypted history cache; **GTK desktop app** (`aimless gui`) — buddy list, conversations, contacts management, tray, daemon supervisor |
 | `deploy/` | — | Dockerfile + compose (two-node demo) + smoke test |
 
 ## Quick start
@@ -38,22 +38,34 @@ go build -o aimlessd .
 ./aimlessd -datadir ~/.local/share/aimless
 # prints your address (200::/7) and node pubkey
 
-# 2. install the client
+# 2. install the client (GUI needs the GTK stack: sudo apt install python3-gi)
 cd ../client
 pip install .
 
 # 3. create your identity
 aimless init
 
-# 4. share invites, add buddies
+# 4. chat
+aimless gui            # full desktop app — starts the daemon for you if needed,
+                       # buddies, conversations, contacts, tray on close
+
+# or headless:
 aimless invite                     # send this string to a friend
 aimless add "<their invite>" bob   # paste theirs
-
-# 5. chat
-aimless list            # buddy list: online/away + away messages
-aimless chat bob        # REPL; /away <msg>, /back, /quit
-aimless send bob "hi"   # one-shot
+aimless chat bob                   # REPL; /away <msg>, /back, /quit
+aimless list                       # buddy list: online/away + away messages
 ```
+
+## Desktop integration
+
+```sh
+aimless tray       # tray daemon: supervises aimlessd, lives in the notification area,
+                   # click to open Messages, menu to stop the daemon
+aimless autostart  # installs the login autostart entry for the tray
+```
+
+Closing the Messages window hides it to the tray; the daemon keeps receiving while you're gone. `Quit` in the tray menu stops the tray — the daemon itself keeps running unless you explicitly stop it.
+
 
 ## Deployment
 
@@ -98,7 +110,6 @@ cd deploy && python3 smoke.py   # two-node deployment incl. offline delivery
 
 ## Roadmap
 
-- tkinter AIM-skin GUI (buddy list + IM windows, classic palette)
 - LAN multicast discovery ("nearby buddies")
 - DHT screen-name directory (decentralized first-come registration)
 - TOC bridge for real retro clients

@@ -298,11 +298,29 @@ def _handle_event(client, cache, buddy_node, buddy_screen, ev):
 
 def cmd_gui(args):
     try:
-        from . import gui
+        from . import gtkui
     except ImportError as e:
-        print(f"GUI unavailable ({e}) — install tkinter: sudo apt install python3-tk", file=sys.stderr)
+        print(f"GUI unavailable ({e}) — install the GTK stack: sudo apt install python3-gi", file=sys.stderr)
         sys.exit(1)
-    gui.main()
+    gtkui.main()
+
+
+def cmd_tray(args):
+    try:
+        from . import gtkui
+    except ImportError as e:
+        print(f"GUI unavailable ({e}) — install the GTK stack: sudo apt install python3-gi", file=sys.stderr)
+        sys.exit(1)
+    gtkui.run_tray()
+
+
+def cmd_autostart(args):
+    try:
+        from . import gtkui
+    except ImportError as e:
+        print(f"GUI unavailable ({e}) — install the GTK stack: sudo apt install python3-gi", file=sys.stderr)
+        sys.exit(1)
+    print(gtkui.install_autostart())
 
 
 def main():
@@ -334,7 +352,9 @@ def main():
     p_away = sub.add_parser("away", help="set away message (no arg = back)")
     p_away.add_argument("message", nargs="*")
 
-    sub.add_parser("gui", help="launch the AIM-style buddy list GUI")
+    sub.add_parser("gui", help="launch the AIMless GTK app (manages the daemon, tray on close)")
+    sub.add_parser("tray", help="run the tray daemon: supervises aimlessd, lives in the notification area")
+    sub.add_parser("autostart", help="install autostart entry for `aimless tray`")
 
     args = parser.parse_args()
     cmds = {
@@ -347,6 +367,8 @@ def main():
         "chat": cmd_chat,
         "away": cmd_away,
         "gui": cmd_gui,
+        "tray": cmd_tray,
+        "autostart": cmd_autostart,
     }
     cmds[args.command](args)
 
