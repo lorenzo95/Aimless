@@ -25,6 +25,7 @@ from gi.repository import Gtk, GLib, Gdk, Pango
 
 from . import crypto, protocol
 from .daemon import DaemonClient, Client, DaemonError
+from . import __version__ as client_version
 
 APP_NAME = "AIMless"
 CONFIG_DIR = os.environ.get("AIMLESS_CONFIG") or os.path.expanduser("~/.config/aimless")
@@ -232,6 +233,9 @@ class DaemonSupervisor:
         self.sock = sock_path()
         self.child = None
 
+    def binary(self):
+        return daemon_binary()
+
     def is_running(self):
         try:
             DaemonClient(self.sock).close()
@@ -255,15 +259,11 @@ class DaemonSupervisor:
         except Exception:
             return None
 
-    def ensure(self, log=None):
-        if self.is_running():
-            return True
-        binary = daemon_binary()
+    def spawn(self):
+        binary = self.binary()
         if not binary:
             raise RuntimeError(
                 "aimlessd not found — install it (aimless-dist/install.sh) or add it to PATH")
-        if log:
-            log("starting aimlessd …")
         self.child = subprocess.Popen(
             [binary, "-datadir", self.datadir],
             start_new_session=True,
@@ -276,13 +276,21 @@ class DaemonSupervisor:
                 f.write(str(self.child.pid))
         except Exception:
             pass
+        return self.child.pid
+
+    def ensure(self, log=None):
+        if self.is_running():
+            return True
+        if log:
+            log("starting aimlessd …")
+        self.spawn()
         deadline = time.time() + 20
         while time.time() < deadline:
             if self.is_running():
                 if log:
                     log("daemon running")
                 return True
-            if self.child.poll() is not None:
+            if self.child and self.child.poll() is not None:
                 raise RuntimeError("aimlessd exited immediately (check ~/.local/share/aimless)")
             time.sleep(0.2)
         raise RuntimeError("daemon did not come up within 20s")
@@ -822,11 +830,13 @@ class ActivityView(Gtk.Box):
         elif st["peers_up"] == 0:
             self.info_label.set_markup(
                 "<span foreground='#fab387'>●  connecting — no Yggdrasil peers yet</span>\n"
-                f"your address: <b>{st['address']}</b>")
+                f"your address: <b>{st['address']}</b>\n"
+                f"daemon: {st.get('build', '?')}  ·  client: aimless/{client_version}")
         else:
             self.info_label.set_markup(
                 f"<span foreground='#a6e3a1'>●  you are online</span>  —  address <b>{st['address']}</b>  ·  "
-                f"peers {st['peers_up']}/{st['peers_total']}")
+                f"peers {st['peers_up']}/{st['peers_total']}\n"
+                f"daemon: {st.get('build', '?')}  ·  client: aimless/{client_version}")
 
     def log(self, line):
         stamp = datetime.now().strftime("%H:%M:%S")
@@ -914,6 +924,9 @@ class AimlessWindow(Gtk.Window):
 
         self.connect("destroy", self.on_destroy)
         self.refresh_route()
+        self.contacts.refresh()
+
+        self.stack.connect("notify::visible-child-name", self.on_view_changed)
 
         GLib.timeout_add(150, self.drain_events)
         GLib.timeout_add_seconds(3, self.poll_presence)
@@ -924,6 +937,10 @@ class AimlessWindow(Gtk.Window):
                 self.session.client.add_contact(info["node"])
             except DaemonError:
                 pass
+
+    def on_view_changed(self, stack, param):
+        if stack.get_visible_child_name() == "contacts":
+            self.contacts.refresh()
 
     def on_stop_daemon(self):
         self.activity.log("stopping aimlessd …")
@@ -980,10 +997,16 @@ class AimlessWindow(Gtk.Window):
 
     def poll_status(self):
         try:
+            if not self.supervisor.is_running():
+                self.supervisor.spawn()
+                self.activity.log("aimlessd was down — restarted it")
             self.refresh_route()
             self.activity.refresh_info()
-        except Exception:
-            pass
+        except Exception as e:
+            try:
+                self.activity.log(f"daemon supervision error: {e}")
+            except Exception:
+                pass
         return True
 
     def refresh_route(self):
