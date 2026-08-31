@@ -425,22 +425,40 @@ class MessagesView(Gtk.Box):
         paned.pack2(self.stack, True, True)
         self.pack_start(paned, True, True, 0)
 
-        self.rebuild_sidebar()
+        self.sync_sidebar()
 
-    def rebuild_sidebar(self):
-        selected = self.selected["node"] if self.selected else None
-        clear_children(self.thread_list)
-        self.threads = {}
-        contacts = self.app.session.contacts()
-        presence = {}
-        try:
-            presence = {p["key"]: p for p in self.app.session.client.presence()}
-        except DaemonError:
-            pass
-        for petname, info in sorted(contacts.items()):
+    def sync_sidebar(self):
+        for node in list(self.threads):
+            if node not in self.app.session.contacts():
+                thread = self.threads.pop(node)
+                if self.selected is thread:
+                    self.selected = None
+                    self.stack.set_visible_child_name("placeholder")
+                if "row" in thread:
+                    thread["row"].destroy()
+        for petname, info in sorted(self.app.session.contacts().items()):
             node = info["node"]
+            if node in self.threads:
+                thread = self.threads[node]
+                thread["petname"], thread["contact"] = petname, info
+                thread["screen"] = info.get("screen", petname)
+            else:
+                thread = {
+                    "node": node, "petname": petname, "contact": info, "online": False, "away": None,
+                    "preview": "", "unread": 0, "screen": info.get("screen", petname),
+                }
+                self.threads[node] = thread
+                self.append_thread_row(node, thread)
+            self.update_thread_row(node)
+        if self.selected:
+            row = self.selected.get("row")
+            if row:
+                self.thread_list.select_row(row)
+
+    def refresh_presence(self, presence):
+        for node, thread in self.threads.items():
             p = presence.get(node, {})
-            online = p.get("online", False)
+            thread["online"] = p.get("online", False)
             away = None
             if p.get("status_payload"):
                 try:
@@ -449,19 +467,8 @@ class MessagesView(Gtk.Box):
                         away = st["away"]
                 except (ValueError, KeyError):
                     pass
-            cached = self.app.session.cache.msgs(node)
-            preview = cached[-1]["text"] if cached else ""
-            unread = 0
-            thread = {
-                "node": node, "petname": petname, "contact": info, "online": online, "away": away,
-                "preview": preview, "unread": unread, "screen": info.get("screen", petname),
-            }
-            self.threads[node] = thread
-            self.append_thread_row(node, thread)
-        if selected and selected in self.threads:
-            row = self.threads[selected].get("row")
-            if row:
-                self.thread_list.select_row(row)
+            thread["away"] = away
+            self.update_thread_row(node)
 
     def append_thread_row(self, node, thread):
         row = Gtk.ListBoxRow()
@@ -506,7 +513,7 @@ class MessagesView(Gtk.Box):
 
     def update_thread_row(self, node):
         thread = self.threads.get(node)
-        if not thread or "widgets" not in thread:
+        if not thread or "row" not in thread:
             return
         w = thread["widgets"]
         dot_color = "#a6e3a1" if thread["online"] else ("#fab387" if thread["away"] else "#6c7086")
@@ -518,7 +525,8 @@ class MessagesView(Gtk.Box):
             badge.set_markup(f"<b>{thread['unread']}</b>")
             badge.set_halign(Gtk.Align.END)
             badge.get_style_context().add_class("aimless-badge")
-            thread["row"].get_child().get_children()[-1].pack_start(badge, False, False, 0)
+            meta_box = thread["row"].get_child().get_children()[-1]
+            meta_box.pack_start(badge, False, False, 0)
             badge.show()
             w["badge"] = badge
         elif thread["unread"] == 0 and w["badge"]:
@@ -622,7 +630,7 @@ class MessagesView(Gtk.Box):
         node = ev.get("from")
         thread = self.threads.get(node)
         if thread is None:
-            self.rebuild_sidebar()
+            self.sync_sidebar()
             thread = self.threads.get(node)
             if thread is None:
                 return
@@ -630,7 +638,7 @@ class MessagesView(Gtk.Box):
             opened = self.app.session.client.decrypt_recv(ev)
         except (ValueError, KeyError):
             return
-        is_new = self.app.session.cache.add_recv(node, ev.get("seq", 0), opened["ts"], opened["text"])
+        self.app.session.cache.add_recv(node, ev.get("seq", 0), opened["ts"], opened["text"])
         thread["preview"] = opened["text"]
         if self.selected is thread:
             self.append_bubble(False, opened["text"], opened["ts"])
@@ -700,25 +708,16 @@ class ContactsView(Gtk.Box):
             invite = f"(daemon unreachable: {e})"
         self.invite_entry.set_text(invite)
         clear_children(self.buddy_list)
+        self._buddy_rows = {}
         contacts = self.app.session.contacts()
-        presence = {}
-        try:
-            presence = {p["key"]: p for p in self.app.session.client.presence()}
-        except DaemonError:
-            pass
         for petname, info in sorted(contacts.items()):
             row = Gtk.ListBoxRow()
             row.set_selectable(False)
             box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             box.set_border_width(8)
-            p = presence.get(info["node"], {})
-            online = "online" if p.get("online") else "offline"
-            color = "#a6e3a1" if p.get("online") else "#9aa0ad"
             labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
             title = Gtk.Label()
-            title.set_markup(
-                f"<b>{GLib.markup_escape_text(info.get('screen', petname))}</b> "
-                f"<span foreground='{color}' size='small'>{online}</span>")
+            title.set_markup(f"<b>{GLib.markup_escape_text(info.get('screen', petname))}</b>")
             title.set_xalign(0.0)
             labels.pack_start(title, False, False, 0)
             sub = Gtk.Label(label=f"{petname} · {info['node'][:20]}…")
@@ -732,6 +731,24 @@ class ContactsView(Gtk.Box):
             row.add(box)
             self.buddy_list.add(row)
             row.show_all()
+            self._buddy_rows[petname] = title
+        self.refresh_presence(self._last_presence())
+
+    def _last_presence(self):
+        try:
+            return {p["key"]: p for p in self.app.session.client.presence(timeout=3)}
+        except DaemonError:
+            return {}
+
+    def refresh_presence(self, presence):
+        for petname, title in getattr(self, "_buddy_rows", {}).items():
+            node = self.app.session.contacts().get(petname, {}).get("node")
+            p = presence.get(node, {})
+            color = "#a6e3a1" if p.get("online") else "#9aa0ad"
+            state = "online" if p.get("online") else "offline"
+            title.set_markup(
+                f"<b>{GLib.markup_escape_text(self.app.session.contacts().get(petname, {}).get('screen', petname))}</b> "
+                f"<span foreground='{color}' size='small'>{state}</span>")
 
     def on_add(self, *_):
         invite = self.add_invite_entry.get_text().strip()
@@ -752,7 +769,7 @@ class ContactsView(Gtk.Box):
                     allc[k]["node"] = node_hex
                     protocol.save_contacts(contacts_path(), allc)
                     self.add_status.set_text(f"updated routing key for {k}")
-                    self.app.messages.rebuild_sidebar()
+                    self.app.messages.sync_sidebar()
                     return
                 self.add_status.set_text(f"already known as {k}")
                 return
@@ -768,7 +785,7 @@ class ContactsView(Gtk.Box):
         self.add_petname_entry.set_text("")
         self.add_status.set_text(f"added {screen}")
         self.refresh()
-        self.app.messages.rebuild_sidebar()
+        self.app.messages.sync_sidebar()
 
     def on_remove(self, btn, petname):
         allc = protocol.load_contacts(contacts_path())
@@ -776,7 +793,7 @@ class ContactsView(Gtk.Box):
         protocol.save_contacts(contacts_path(), allc)
         self.add_status.set_text(f"removed {petname}")
         self.refresh()
-        self.app.messages.rebuild_sidebar()
+        self.app.messages.sync_sidebar()
 
 
 class ActivityView(Gtk.Box):
@@ -800,11 +817,16 @@ class ActivityView(Gtk.Box):
 
     def refresh_info(self):
         st = self.app.supervisor.status()
-        if st:
+        if not st:
+            self.info_label.set_markup("<span foreground='#f38ba8'>●  offline — daemon not reachable</span>")
+        elif st["peers_up"] == 0:
             self.info_label.set_markup(
-                f"address: <b>{st['address']}</b>   peers: <b>{st['peers_up']}/{st['peers_total']}</b>")
+                "<span foreground='#fab387'>●  connecting — no Yggdrasil peers yet</span>\n"
+                f"your address: <b>{st['address']}</b>")
         else:
-            self.info_label.set_text("daemon: not running")
+            self.info_label.set_markup(
+                f"<span foreground='#a6e3a1'>●  you are online</span>  —  address <b>{st['address']}</b>  ·  "
+                f"peers {st['peers_up']}/{st['peers_total']}")
 
     def log(self, line):
         stamp = datetime.now().strftime("%H:%M:%S")
@@ -871,7 +893,7 @@ class AimlessWindow(Gtk.Window):
 
         options_menu = Gtk.Menu()
         self.daemon_item = Gtk.MenuItem(label="Daemon status …")
-        self.daemon_item.set_sensitive(False)
+        self.daemon_item.connect("activate", lambda *_: self.stack.set_visible_child(self.activity))
         options_menu.append(self.daemon_item)
         stop_item = Gtk.MenuItem(label="Stop aimlessd")
         stop_item.connect("activate", lambda *_: self.on_stop_daemon())
@@ -922,33 +944,59 @@ class AimlessWindow(Gtk.Window):
         self.activity.log("away: " + away if away else "available")
 
     def drain_events(self):
-        while True:
-            ev = self.session.daemon.next_event(timeout=0)
-            if ev is None:
-                break
-            if ev.get("op") == "recv":
-                self.messages.incoming(ev)
-            elif ev.get("op") == "acked":
-                self.activity.log(f"delivered: seq {ev.get('seq')} → {str(ev.get('to'))[:16]}…")
+        try:
+            while True:
+                ev = self.session.daemon.next_event(timeout=0)
+                if ev is None:
+                    break
+                if ev.get("op") == "recv":
+                    self.messages.incoming(ev)
+                elif ev.get("op") == "acked":
+                    self.activity.log(f"delivered: seq {ev.get('seq')} → {str(ev.get('to'))[:16]}…")
+        except Exception as e:
+            try:
+                self.activity.log(f"event error: {e}")
+            except Exception:
+                pass
         return True
 
     def poll_presence(self):
-        self.messages.rebuild_sidebar()
-        self.contacts.refresh()
-        self.activity.refresh_info()
+        try:
+            presence = {p["key"]: p for p in self.session.client.presence(timeout=3)}
+            self.messages.refresh_presence(presence)
+            self.contacts.refresh_presence(presence)
+        except DaemonError:
+            presence = {}
+            for t in self.messages.threads.values():
+                t["online"] = False
+            self.messages.refresh_presence(presence)
+        except Exception:
+            pass
+        try:
+            self.activity.refresh_info()
+        except Exception:
+            pass
         return True
 
     def poll_status(self):
-        self.refresh_route()
+        try:
+            self.refresh_route()
+            self.activity.refresh_info()
+        except Exception:
+            pass
         return True
 
     def refresh_route(self):
         st = self.supervisor.status()
-        if st:
-            self.route_label.set_text(
-                f"Yggdrasil: {st['address']}  ·  peers {st['peers_up']}/{st['peers_total']}")
+        if not st:
+            self.route_label.set_markup("<span foreground='#f38ba8'>●  offline — daemon not reachable</span>")
+        elif st["peers_up"] == 0:
+            self.route_label.set_markup(
+                "<span foreground='#fab387'>●  connecting — no Yggdrasil peers yet</span>")
         else:
-            self.route_label.set_text("daemon: not reachable")
+            self.route_label.set_markup(
+                f"<span foreground='#a6e3a1'>●  online</span>  —  {st['address']}  ·  "
+                f"peers {st['peers_up']}/{st['peers_total']}")
 
     def on_delete(self, *_):
         self.save_geometry()

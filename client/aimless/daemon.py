@@ -114,8 +114,8 @@ class Client:
     def history(self, buddy_node_hex: str, after_seq: int) -> list:
         return self.daemon.request("history", **{"from": buddy_node_hex, "seq": after_seq})
 
-    def presence(self) -> list:
-        return self.daemon.request("presence").get("presence", [])
+    def presence(self, timeout: float = 10.0) -> list:
+        return self.daemon.request("presence", timeout=timeout).get("presence", [])
 
     def decrypt_recv(self, event: dict) -> dict:
         from . import protocol
