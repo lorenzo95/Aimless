@@ -200,7 +200,12 @@ def test_gui_away_banner(gtk_app):
     win.set_away("gone fishing")
 
     def banner_and_propagated():
-        if not (win.away_banner.get_visible() and "gone fishing" in win.away_label.get_text()):
+        if not win.away_banner.get_visible():
+            return False
+        icon_visible = win.away_icon.get_visible()
+        label_visible = win.away_label.get_visible()
+        height_ok = win.away_banner.get_allocated_height() >= 24
+        if not (icon_visible and label_visible and height_ok):
             return False
         for p in bob.presence():
             if p["key"] == a_node and p.get("status_payload"):

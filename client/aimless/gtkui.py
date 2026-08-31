@@ -986,19 +986,6 @@ class AimlessWindow(Gtk.Window):
         menu_button.set_image(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON))
         header_bar.pack_end(menu_button)
 
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        root.pack_start(self.stack, True, True, 0)
-
-        route_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
-        route_bar.set_border_width(6)
-        route_bar.get_style_context().add_class("aimless-route-bar")
-        self.route_label = Gtk.Label(label="daemon: starting …")
-        route_bar.pack_start(Gtk.Image.new_from_icon_name(
-            first_icon("network-wireless-signal-excellent-symbolic", "applications-internet"), Gtk.IconSize.MENU),
-            False, False, 0)
-        route_bar.pack_start(self.route_label, False, False, 0)
-        root.pack_start(route_bar, False, False, 0)
-
         self.away_banner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         self.away_banner.set_border_width(8)
         self.away_banner.get_style_context().add_class("aimless-away-banner")
@@ -1013,7 +1000,21 @@ class AimlessWindow(Gtk.Window):
         away_back.connect("clicked", lambda *_: self.set_away(None))
         self.away_banner.pack_start(away_back, False, False, 0)
         self.away_banner.set_no_show_all(True)
+        self.away_banner.hide()
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         root.pack_start(self.away_banner, False, False, 0)
+        root.pack_start(self.stack, True, True, 0)
+
+        route_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        route_bar.set_border_width(6)
+        route_bar.get_style_context().add_class("aimless-route-bar")
+        self.route_label = Gtk.Label(label="daemon: starting …")
+        route_bar.pack_start(Gtk.Image.new_from_icon_name(
+            first_icon("network-wireless-signal-excellent-symbolic", "applications-internet"), Gtk.IconSize.MENU),
+            False, False, 0)
+        route_bar.pack_start(self.route_label, False, False, 0)
+        root.pack_start(route_bar, False, False, 0)
 
         self.add(root)
 
@@ -1098,6 +1099,8 @@ class AimlessWindow(Gtk.Window):
             self.away_label.set_markup(
                 f"<b>Away</b> — {GLib.markup_escape_text(away)}  "
                 f"<span size='small'>(buddies see this as your away message)</span>")
+            for child in self.away_banner.get_children():
+                child.show()
             self.away_banner.show()
         else:
             self.away_banner.hide()
