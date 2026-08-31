@@ -236,8 +236,15 @@ def daemon_binary():
     found = shutil.which("aimlessd")
     if found:
         return found
-    local = os.path.expanduser("~/.local/bin/aimlessd")
-    return local if os.path.exists(local) else None
+    candidates = [
+        os.path.expanduser("~/.local/bin/aimlessd"),
+        os.path.join(os.getcwd(), "aimlessd"),
+        os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "aimlessd"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
 
 
 class DaemonSupervisor:

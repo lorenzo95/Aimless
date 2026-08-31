@@ -10,7 +10,6 @@ mkdir -p "$STAGE"
 
 echo "building daemon …"
 (cd "$ROOT/daemon" && go build -trimpath -ldflags "-s -w" -o "$STAGE/aimlessd" .)
-
 echo "staging client …"
 cp -r "$ROOT/client/aimless" "$STAGE/aimless"
 cp "$ROOT/client/pyproject.toml" "$STAGE/pyproject.toml"
@@ -78,4 +77,25 @@ README
 
 tar -C "$OUT" -czf "$OUT/aimless-dist.tar.gz" aimless-dist
 rm -rf "$STAGE"
+
+echo "building release artifacts …"
+cp "$STAGE_OUT_PLACEHOLDER" /dev/null 2>/dev/null || true
+go build -trimpath -ldflags "-s -w" -o "$OUT/aimlessd-linux-amd64" "$ROOT/daemon" 2>/dev/null || \
+  (cd "$ROOT/daemon" && go build -trimpath -ldflags "-s -w" -o "$OUT/aimlessd-linux-amd64" .)
+python3 - <<PYEOF
+import os, shutil, subprocess, sys, tempfile
+root = "$ROOT"
+out = "$OUT"
+stage = tempfile.mkdtemp(prefix="aimless-pyz-")
+shutil.copytree(os.path.join(root, "client", "aimless"), os.path.join(stage, "aimless"))
+for junk in ("__pycache__",):
+    p = os.path.join(stage, "aimless", junk)
+    if os.path.isdir(p):
+        shutil.rmtree(p)
+subprocess.run([sys.executable, "-m", "zipapp", stage, "-o", os.path.join(out, "aimless.pyz"),
+                "-p", "/usr/bin/env python3", "-m", "aimless.cli:main"], check=True)
+shutil.rmtree(stage)
+print("zipapp built")
+PYEOF
+echo "release artifacts: $OUT/aimlessd-linux-amd64 $OUT/aimless.pyz"
 echo "packaged: $OUT/aimless-dist.tar.gz"

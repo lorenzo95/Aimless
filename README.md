@@ -11,6 +11,27 @@ Serverless chat with an AIM heart. Bitmessage's architecture (decentralized, end
    in RAM only                journals on disk                  journals on disk          in RAM only
 ```
 
+## Download and run
+
+No installer. Two files, wget them into a folder and run:
+
+```sh
+mkdir aimless && cd aimless
+wget https://raw.githubusercontent.com/lorenzo95/Aimless/main/dist/aimlessd-linux-amd64
+wget https://raw.githubusercontent.com/lorenzo95/Aimless/main/dist/aimless.pyz
+chmod +x aimlessd-linux-amd64 aimless.pyz
+
+aimlessd-linux-amd64 &        # 1. the daemon joins the Yggdrasil mesh
+./aimless.pyz init            # 2. one-time: identity (passphrase + screen name)
+./aimless.pyz                 # 3. tray + messages window
+```
+
+That's it. Closing the window closes just the window — the tray keeps the daemon receiving. Tray click reopens the window (no re-typing your passphrase while the same daemon instance lives). Tray `Quit — shuts down AIMless` stops the window, the daemon, and the unlock.
+
+Requires: Linux, python3 + `pip install pynacl` (client), `python3-gi` (distro package, for the GTK window). The daemon itself has zero dependencies — it's a static binary.
+
+Build from source instead: see [Development](#development) below.
+
 ## Security model
 
 - **Identity** = client Ed25519 keypair (PyNaCl). Your invite string contains your client key (what buddies encrypt to) and your daemon's node key (where to route). The Yggdrasil address is derived from the node key — permanent, unspoofable.
@@ -24,10 +45,10 @@ Serverless chat with an AIM heart. Bitmessage's architecture (decentralized, end
 | Piece | Language | Role |
 |---|---|---|
 | `daemon/` | Go | `aimlessd` — embedded yggdrasil core (no TUN), packet transport, journals, retry/ACK, presence probing, local JSON API on a Unix socket |
-| `client/` | Python | `aimless` CLI — identity, contacts, encrypted history cache; **GTK desktop app** (`aimless gui`) — buddy list, conversations, contacts management, tray, daemon supervisor |
-| `deploy/` | — | Dockerfile + compose (two-node demo) + smoke test |
+| `client/` | Python | `aimless` CLI — identity, contacts, encrypted history cache; **GTK desktop app** (`aimless gui`) — buddy list, conversations, contacts management, tray |
+| `deploy/` | — | Dockerfile + compose (two-node demo) + smoke test + release packager |
 
-## Quick start
+## Quick start (from source)
 
 Two terminals on one machine (or two machines; each user runs their own daemon):
 
@@ -64,12 +85,10 @@ aimless list                       # buddy list: online/away + away messages
 
 ```sh
 aimless tray       # tray daemon: supervises aimlessd, lives in the notification area,
-                   # click to open Messages, menu to stop the daemon
-aimless autostart  # installs the login autostart entry for the tray
+                   # click to open Messages, Quit shuts down the whole stack
+aimless autostart  # installs the login autostart entry for the full stack
+aimless stop       # shut everything down from the CLI
 ```
-
-Closing the Messages window hides it to the tray; the daemon keeps receiving while you're gone. `Quit` in the tray menu stops the tray — the daemon itself keeps running unless you explicitly stop it.
-
 
 ## Deployment
 
@@ -77,6 +96,7 @@ Closing the Messages window hides it to the tray; the daemon keeps receiving whi
 cd deploy
 python3 smoke.py       # two-node docker compose demo incl. offline delivery
                        # (falls back to local daemons if docker is unavailable)
+./package.sh           # builds dist/aimless-dist.tar.gz + wget-able release artifacts
 ```
 
 `docker-compose.yml` runs two daemons on an internal network; unix sockets surface through the bind mounts (`data-a/`, `data-b/`).
@@ -87,6 +107,45 @@ python3 smoke.py       # two-node docker compose demo incl. offline delivery
 - **Buddy offline** — the sender's daemon journals every message and retries (default every 2s, and instantly when the buddy's path comes back). Delivered messages are ACKed; the journal drains.
 - **History** — the receiving daemon keeps the last N (default 50) messages per buddy in an encrypted-at-rest store and replays them to clients with an explicit gap floor. Your client's encrypted cache is the long-term archive.
 - **Presence** — daemons probe watched buddies (default every 15s); any packet from a buddy marks them seen. STATUS blobs carry screen name + away message, encrypted per buddy.
+
+## Packet format
+
+Everything between daemons is a single datagram over ironwood's encrypted `PacketConn` (end-to-end encrypted sessions keyed by the nodes' Ed25519 keys — the source address of every packet is cryptographically authenticated). One datagram = one envelope.
+
+### Envelope (20-byte header + payload, all integers little-endian)
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 0 | 1 | `version` | `1` |
+| 1 | 1 | `type` | `1` MSG · `2` ACK · `3` STATUS · `4` PROBE |
+| 2 | 8 | `seq` | `uint64`, monotonic per sending buddy |
+| 10 | 8 | `ts` | sender clock, unix milliseconds |
+| 18 | 2 | `payload_len` | `uint16`, max 65535 |
+| 20 | n | `payload` | see below |
+
+The Yggdrasil session layer already authenticates the sender's node key and encrypts everything between nodes; the envelope types on top are:
+
+- **MSG** — `payload` is a NaCl sealed box made by the *sender's client* to the recipient's Curve25519 key. The daemon cannot read it. Delivered messages are ACKed (see below); the sender's journal retries until then.
+- **ACK** — `payload` empty, `seq` echoes the confirmed MSG. Not journaled; a probe ACK is intentionally indistinguishable from noise to the journal (probe seqs are never in it).
+- **STATUS** — `payload` is a sealed box containing the sender's screen name and away message, re-sent with every presence probe. The receiving daemon stores only the latest opaque blob per buddy.
+- **PROBE** — `payload` empty. Presence ping; answered by *any* packet, which is what flips the buddy to "online".
+
+### Inside a MSG payload (decrypted by the recipient's client)
+
+```json
+{"v": 1, "kind": "msg", "from": "<64-hex client pubkey>", "body": "<json>", "sig": "<b64>"}
+```
+
+`body` is the canonical JSON `{"text": …, "ts": …}` and `sig` is the sender's Ed25519 signature over `aimless\x01 + body`. The recipient verifies the signature against the claimed `from` key — sender authenticity is enforced at the client layer, independently of the transport.
+
+### Envelope payloads the daemon can see
+
+| Envelope type | What the daemon knows | What it can't know |
+|---|---|---|
+| MSG | destination address, seq, timestamp, size | message text, sender's screen name |
+| ACK | which seq was confirmed | what the message said |
+| STATUS | source address, timestamp | screen name, away message |
+| PROBE | that the buddy exists | anything else |
 
 ## Local API (Unix socket, newline-JSON)
 
@@ -102,14 +161,13 @@ python3 smoke.py       # two-node docker compose demo incl. offline delivery
 | event `recv` | `{"op":"recv","from":…,"seq":n,"ts":t,"payload":b64}` |
 | event `acked` | `{"op":"acked","to":…,"seq":n}` |
 
-Wire envelope: `version(1) · type(1: MSG/ACK/STATUS/PROBE) · seq(8) · ts(8) · len(2) · payload` — one datagram per message over ironwood's encrypted `PacketConn`.
-
-## Tests
+## Development
 
 ```sh
 cd daemon && go test ./...      # codec, journals, delivery, presence, loopback integration
-cd client && pytest tests/      # crypto, cache, protocol, real-daemon e2e
+cd client && pytest tests/      # crypto, cache, protocol, real-daemon e2e, GTK runtime
 cd deploy && python3 smoke.py   # two-node deployment incl. offline delivery
+./deploy/package.sh             # dist tarball + release artifacts (see Download and run)
 ```
 
 ## Roadmap
