@@ -33,6 +33,7 @@ type apiMessage struct {
 	Op       string          `json:"op"`
 	Address  string          `json:"address,omitempty"`
 	Key      string          `json:"key,omitempty"`
+	Pid      int             `json:"pid,omitempty"`
 	To       string          `json:"to,omitempty"`
 	From     string          `json:"from,omitempty"`
 	Payload  string          `json:"payload,omitempty"`
@@ -120,7 +121,7 @@ func (s *APIServer) handleConn(conn net.Conn) {
 func (s *APIServer) dispatch(conn net.Conn, req apiMessage) {
 	switch req.Op {
 	case "whoami":
-		s.reply(conn, apiMessage{Op: "whoami", Address: s.node.Address.String(), Key: hex.EncodeToString(s.node.Pub)})
+		s.reply(conn, apiMessage{Op: "whoami", Address: s.node.Address.String(), Key: hex.EncodeToString(s.node.Pub), Pid: os.Getpid()})
 	case "status":
 		peers := s.node.Core.GetPeers()
 		out := make([]peerStatus, 0, len(peers))

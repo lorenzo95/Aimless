@@ -236,14 +236,21 @@ def daemon_binary():
     found = shutil.which("aimlessd")
     if found:
         return found
-    candidates = [
-        os.path.expanduser("~/.local/bin/aimlessd"),
-        os.path.join(os.getcwd(), "aimlessd"),
-        os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "aimlessd"),
+    names = ("aimlessd", "aimlessd-linux-amd64")
+    dirs = [
+        os.path.dirname(os.path.abspath(sys.argv[0])),
+        os.getcwd(),
+        os.path.expanduser("~/.local/bin"),
     ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
+    seen = set()
+    for d in dirs:
+        if not d or d in seen:
+            continue
+        seen.add(d)
+        for name in names:
+            p = os.path.join(d, name)
+            if os.path.exists(p):
+                return p
     return None
 
 
@@ -285,7 +292,8 @@ class DaemonSupervisor:
         binary = self.binary()
         if not binary:
             raise RuntimeError(
-                "aimlessd not found — install it (aimless-dist/install.sh) or add it to PATH")
+                "aimlessd not found — put aimlessd-linux-amd64 (or aimlessd) next to "
+                "aimless.pyz, or add it to PATH")
         self.child = subprocess.Popen(
             [binary, "-datadir", self.datadir],
             start_new_session=True,
@@ -318,13 +326,14 @@ class DaemonSupervisor:
         raise RuntimeError("daemon did not come up within 20s")
 
     def stop(self):
-        pid = read_pid(AIMLESSD_PID_FILE)
+        pid = daemon_pid_from_socket()
+        if pid is None:
+            pid = read_pid(AIMLESSD_PID_FILE)
         if pid is None and self.child:
             pid = self.child.pid
         if pid is None:
-            found = subprocess.run(["pgrep", "-x", "aimlessd"], capture_output=True, text=True)
-            pids = [int(p) for p in found.stdout.split() if p.isdigit()]
-            pid = pids[0] if pids else None
+            info = daemon_proc_info()
+            pid = info[0] if info else None
         if pid:
             try:
                 os.kill(pid, signal.SIGTERM)
@@ -1294,20 +1303,48 @@ def run_app():
 
 
 def daemon_proc_info():
-    """(pid, proc-start-tick) of the running aimlessd, or None."""
+    """(pid, proc-start-tick) of the aimlessd serving our datadir, or None."""
+    target = data_dir()
+    pids = []
     try:
-        out = subprocess.run(["pgrep", "-x", "aimlessd"], capture_output=True, text=True).stdout.split()
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/cmdline", "rb") as f:
+                    cmdline = f.read().decode(errors="replace").split("\x00")
+            except Exception:
+                continue
+            if not cmdline or os.path.basename(cmdline[0]) != "aimlessd":
+                continue
+            if "-datadir" in cmdline:
+                if target not in cmdline:
+                    continue
+            elif target != os.path.expanduser("~/.local/share/aimless"):
+                continue
+            pids.append(int(entry))
     except Exception:
         return None
-    for pid_s in out:
+    if not pids:
+        return None
+    for pid in pids:
         try:
-            pid = int(pid_s)
             with open(f"/proc/{pid}/stat") as f:
                 fields = f.read().rsplit(")", 1)[1].split()
             return pid, fields[19]
         except Exception:
             continue
     return None
+
+
+def daemon_pid_from_socket():
+    try:
+        d = DaemonClient(sock_path())
+        who = d.request("whoami", timeout=3)
+        d.close()
+        return int(who.get("pid", 0)) or None
+    except Exception:
+        return None
 
 
 def write_session(passphrase):
