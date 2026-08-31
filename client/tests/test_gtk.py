@@ -140,8 +140,9 @@ def test_gui_contacts_add_remove_and_self_guard(gtk_app):
 
     contacts_view = win.contacts
     contacts_view.refresh()
+    assert _pump(win, lambda: contacts_view.invite_entry.get_text().startswith("aimless1:")), \
+        "invite never loaded"
     invite = contacts_view.invite_entry.get_text()
-    assert invite.startswith("aimless1:")
     assert app["a_node"] in invite
 
     carol_identity = crypto.new_identity()
@@ -168,15 +169,15 @@ def test_gui_contacts_add_remove_and_self_guard(gtk_app):
 def test_gui_version_display(gtk_app):
     app = gtk_app
     win = app["win"]
-    win.activity.refresh_info()
+    st = win.supervisor.status()
+    win.activity.refresh_info(st)
     label = win.activity.info_label.get_text()
     assert "aimlessd/0.2.0" in label
     assert "client: aimless/0.2.0" in label
 
-    monkey_status = dict(win.supervisor.status())
+    monkey_status = dict(st)
     monkey_status.pop("build")
-    win.supervisor.status = lambda: monkey_status
-    win.activity.refresh_info()
+    win.activity.refresh_info(monkey_status)
     label = win.activity.info_label.get_text()
     assert "old build" in label
 

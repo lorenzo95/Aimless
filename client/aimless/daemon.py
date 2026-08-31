@@ -21,25 +21,67 @@ RESPONSE_MAP = {
 class DaemonClient:
     def __init__(self, socket_path: str):
         self.socket_path = socket_path
-        self.sock = socket.socket(socket.AF_UNIX)
-        self.sock.connect(socket_path)
-        self.sockfile = self.sock.makefile("r")
         self.events: "queue.Queue[dict]" = queue.Queue()
         self._raw: "queue.Queue[dict]" = queue.Queue()
         self._stash: list = []
         self._send_lock = threading.Lock()
         self._stop = threading.Event()
+        self._want_reconnect = threading.Event()
+        self._sock = None
+        self._sockfile = None
+        self._generation = 0
+        self._connect()
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
 
-    def _read_loop(self):
+    def _connect(self):
+        self._sock = socket.socket(socket.AF_UNIX)
+        self._sock.connect(self.socket_path)
+        self._sockfile = self._sock.makefile("r")
+        self._generation += 1
+
+    def _close_socket(self):
+        try:
+            if self._sock:
+                self._sock.close()
+        except Exception:
+            pass
+        self._sock = None
+        self._sockfile = None
+
+    def _reader_reconnect(self):
+        self._close_socket()
         while not self._stop.is_set():
             try:
-                line = self.sockfile.readline()
-            except (OSError, ValueError):
-                break
+                self._connect()
+                self._want_reconnect.clear()
+                return True
+            except OSError:
+                if self._stop.wait(0.5):
+                    return False
+        return False
+
+    def _wait_generation_change(self, old_gen: int, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not self._stop.is_set():
+            if self._generation != old_gen:
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _read_loop(self):
+        while not self._stop.is_set():
+            if self._want_reconnect.is_set() or self._sock is None:
+                if not self._reader_reconnect():
+                    break
+                continue
+            try:
+                line = self._sockfile.readline()
+            except (OSError, ValueError, AttributeError):
+                line = ""
             if not line:
-                break
+                self._want_reconnect.set()
+                continue
             try:
                 msg = json.loads(line)
             except json.JSONDecodeError:
@@ -54,16 +96,37 @@ class DaemonClient:
         req.update(fields)
         expected = RESPONSE_MAP.get(op, op)
         with self._send_lock:
-            self.sock.sendall((json.dumps(req) + "\n").encode("utf-8"))
-            end = time.monotonic() + timeout
+            deadline = time.monotonic() + timeout
+            sent_gen = self._generation
+            sent = False
             while True:
-                remaining = end - time.monotonic()
+                if self._sock is None or self._want_reconnect.is_set():
+                    if not self._wait_generation_change(sent_gen, 10.0):
+                        raise DaemonError(f"daemon unreachable ({op})")
+                    deadline = time.monotonic() + timeout
+                    sent = False
+                if not sent:
+                    try:
+                        self._sock.sendall((json.dumps(req) + "\n").encode("utf-8"))
+                        sent = True
+                        sent_gen = self._generation
+                    except (OSError, AttributeError):
+                        self._want_reconnect.set()
+                        if not self._wait_generation_change(sent_gen, 10.0):
+                            raise DaemonError(f"daemon unreachable ({op})")
+                        deadline = time.monotonic() + timeout
+                        sent = False
+                        continue
+                remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise DaemonError(f"timeout waiting for response to {op}")
                 try:
-                    msg = self._raw.get(timeout=remaining)
+                    msg = self._raw.get(timeout=min(0.5, remaining))
                 except queue.Empty:
-                    raise DaemonError(f"timeout waiting for response to {op}")
+                    continue
+                if msg.get("op") in EVENT_OPS:
+                    self.events.put(msg)
+                    continue
                 if msg.get("op") != expected:
                     self._stash.append(msg)
                     continue
@@ -79,10 +142,7 @@ class DaemonClient:
 
     def close(self):
         self._stop.set()
-        try:
-            self.sock.close()
-        except OSError:
-            pass
+        self._close_socket()
 
 
 class Client:

@@ -13,6 +13,7 @@ import signal
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import warnings
 from datetime import datetime
@@ -352,6 +353,20 @@ class Session:
         return protocol.make_invite(self.identity, who["key"], self.self_screen)
 
 
+def run_async(fn, on_done=None, on_error=None):
+    def worker():
+        try:
+            result = fn()
+        except Exception as e:
+            result = e
+            if on_error:
+                GLib.idle_add(lambda: on_error(e) or False)
+        else:
+            if on_done:
+                GLib.idle_add(lambda: on_done(result) or False)
+    threading.Thread(target=worker, daemon=True).start()
+
+
 class MessagesView(Gtk.Box):
     def __init__(self, app):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -359,6 +374,8 @@ class MessagesView(Gtk.Box):
         self.get_style_context().add_class("aimless-chat")
         self.threads = {}
         self.selected = None
+        self._send_in_flight = False
+        self._history_busy = False
 
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
 
@@ -565,7 +582,6 @@ class MessagesView(Gtk.Box):
         thread["unread"] = 0
         self.update_thread_row(node)
 
-        self.load_history(node)
         self.conversation_header.set_markup(
             f"<big><b>{GLib.markup_escape_text(thread['screen'])}</b></big>"
             f"  <span size='small' foreground='#8c8c8c'>{node[:16]}…</span>")
@@ -574,18 +590,48 @@ class MessagesView(Gtk.Box):
             self.append_bubble(m["dir"] == "out", m["text"], m["ts"])
         self.stack.set_visible_child_name("conversation")
         scroll_to_bottom(self.conversation_scroll)
+        self.load_history_async(node)
 
-    def load_history(self, node):
-        try:
-            hist = self.app.session.client.history(node, self.app.session.cache.recv_last(node))
-        except DaemonError:
+    def load_history_async(self, node):
+        if self._history_busy:
             return
+        self._history_busy = True
+
+        def worker():
+            return self.app.session.client.history(node, self.app.session.cache.recv_last(node))
+
+        def done(hist):
+            self._history_busy = False
+            self._history_loaded(node, hist)
+
+        def fail(e):
+            self._history_busy = False
+            self._history_failed(e)
+
+        run_async(worker, on_done=done, on_error=fail)
+
+    def _history_loaded(self, node, hist):
+        if self.selected is None or self.selected["node"] != node:
+            return False
         for m in hist.get("msgs", []):
             try:
                 opened = protocol.open_message(self.app.session.identity, m["payload"])
             except (ValueError, KeyError):
                 continue
             self.app.session.cache.add_recv(node, m["seq"], opened["ts"], opened["text"])
+        oldest = hist.get("oldest", 0)
+        recv_last = self.app.session.cache.recv_last(node)
+        if recv_last and oldest and recv_last + 1 < oldest:
+            self.append_system_note(f"gap — messages before seq {oldest} were dropped by retention")
+        clear_children(self.conversation)
+        for m in sorted(self.app.session.cache.msgs(node), key=lambda m: (m["ts"], m["seq"])):
+            self.append_bubble(m["dir"] == "out", m["text"], m["ts"])
+        scroll_to_bottom(self.conversation_scroll)
+        return False
+
+    def _history_failed(self, e):
+        self.append_system_note(f"history unavailable: {e}")
+        return False
 
     def append_bubble(self, outgoing, text, ts):
         stamp = datetime.fromtimestamp(ts / 1000).strftime("%H:%M") if ts else ""
@@ -617,6 +663,19 @@ class MessagesView(Gtk.Box):
         self.conversation.add(row)
         row.show_all()
 
+    def append_system_note(self, text):
+        row = Gtk.ListBoxRow()
+        row.set_selectable(False)
+        row.set_activatable(False)
+        note = Gtk.Label(label=text)
+        note.set_line_wrap(True)
+        note.set_xalign(0.5)
+        note.get_style_context().add_class("muted")
+        row.add(note)
+        self.conversation.add(row)
+        row.show_all()
+        scroll_to_bottom(self.conversation_scroll)
+
     def on_composer_key(self, widget, event):
         if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and not (event.state & Gdk.ModifierType.SHIFT_MASK):
             self.send_message()
@@ -631,19 +690,33 @@ class MessagesView(Gtk.Box):
         text = buf.get_text(start, end, True).strip()
         if not text:
             return
+        if self._send_in_flight:
+            return
         contact = self.selected["contact"]
         ts = int(time.time() * 1000)
-        try:
-            resp = self.app.session.client.send(contact["pubkey"], contact["node"], text, ts)
-        except DaemonError as e:
-            self.app.activity.log(f"send failed: {e}")
-            return
-        self.app.session.cache.add_sent(contact["node"], resp.get("seq", 0), ts, text)
-        self.selected["preview"] = text
-        self.append_bubble(True, text, ts)
-        self.update_thread_row(contact["node"])
+        self._send_in_flight = True
+        self.send_button.set_sensitive(False)
         buf.set_text("")
-        scroll_to_bottom(self.conversation_scroll)
+
+        def worker():
+            return self.app.session.client.send(contact["pubkey"], contact["node"], text, ts)
+
+        def done(resp):
+            self._send_in_flight = False
+            self.send_button.set_sensitive(True)
+            self.app.session.cache.add_sent(contact["node"], resp.get("seq", 0), ts, text)
+            self.append_bubble(True, text, ts)
+            self.selected["preview"] = text
+            self.update_thread_row(contact["node"])
+            scroll_to_bottom(self.conversation_scroll)
+
+        def fail(e):
+            self._send_in_flight = False
+            self.send_button.set_sensitive(True)
+            self.append_system_note(f"⚠ send failed: {e} — the message was not queued")
+            self.app.activity.log(f"send failed: {e}")
+
+        run_async(worker, on_done=done, on_error=fail)
 
     def incoming(self, ev):
         node = ev.get("from")
@@ -721,11 +794,6 @@ class ContactsView(Gtk.Box):
         self.add_status.set_text("invite copied to clipboard")
 
     def refresh(self):
-        try:
-            invite = self.app.session.my_invite()
-        except DaemonError as e:
-            invite = f"(daemon unreachable: {e})"
-        self.invite_entry.set_text(invite)
         clear_children(self.buddy_list)
         self._buddy_rows = {}
         contacts = self.app.session.contacts()
@@ -751,22 +819,30 @@ class ContactsView(Gtk.Box):
             self.buddy_list.add(row)
             row.show_all()
             self._buddy_rows[petname] = title
-        self.refresh_presence(self._last_presence())
+        self.refresh_presence(getattr(self, "_cached_presence", {}))
 
-    def _last_presence(self):
-        try:
-            return {p["key"]: p for p in self.app.session.client.presence(timeout=3)}
-        except DaemonError:
-            return {}
+        def worker():
+            invite = self.app.session.my_invite()
+            presence = {p["key"]: p for p in self.app.session.client.presence(timeout=3)}
+            return invite, presence
+
+        def done(result):
+            invite, presence = result
+            self._cached_presence = presence
+            self.invite_entry.set_text(invite)
+            self.refresh_presence(presence)
+
+        run_async(worker, on_done=done)
 
     def refresh_presence(self, presence):
+        contacts = self.app.session.contacts()
         for petname, title in getattr(self, "_buddy_rows", {}).items():
-            node = self.app.session.contacts().get(petname, {}).get("node")
-            p = presence.get(node, {})
+            info = contacts.get(petname, {})
+            p = presence.get(info.get("node"), {})
             color = "#a6e3a1" if p.get("online") else "#9aa0ad"
             state = "online" if p.get("online") else "offline"
             title.set_markup(
-                f"<b>{GLib.markup_escape_text(self.app.session.contacts().get(petname, {}).get('screen', petname))}</b> "
+                f"<b>{GLib.markup_escape_text(info.get('screen', petname))}</b> "
                 f"<span foreground='{color}' size='small'>{state}</span>")
 
     def on_add(self, *_):
@@ -795,11 +871,7 @@ class ContactsView(Gtk.Box):
         allc = protocol.load_contacts(contacts_path())
         allc[petname or screen] = {"pubkey": client_hex, "node": node_hex, "screen": screen}
         protocol.save_contacts(contacts_path(), allc)
-        try:
-            self.app.session.client.add_contact(node_hex)
-        except DaemonError as e:
-            self.add_status.set_text(f"warning: watch failed: {e}")
-            return
+        run_async(lambda: self.app.session.client.add_contact(node_hex))
         self.add_invite_entry.set_text("")
         self.add_petname_entry.set_text("")
         self.add_status.set_text(f"added {screen}")
@@ -832,10 +904,9 @@ class ActivityView(Gtk.Box):
         self.log_view.set_right_margin(10)
         scroll.add(self.log_view)
         self.pack_start(scroll, True, True, 0)
-        self.refresh_info()
+        self.info_label.set_markup("<span foreground='#9aa0ad'>○  checking daemon …</span>")
 
-    def refresh_info(self):
-        st = self.app.supervisor.status()
+    def refresh_info(self, st):
         if not st:
             self.info_label.set_markup("<span foreground='#f38ba8'>●  offline — daemon not reachable</span>")
             return
@@ -946,8 +1017,11 @@ class AimlessWindow(Gtk.Window):
         menu_button.set_popup(options_menu)
 
         self.connect("destroy", self.on_destroy)
-        self.refresh_route()
+        self._presence_busy = False
+        self._status_busy = False
+        self._daemon_user_stopped = False
         self.contacts.refresh()
+        self.poll_status()
 
         self.stack.connect("notify::visible-child-name", self.on_view_changed)
 
@@ -955,33 +1029,41 @@ class AimlessWindow(Gtk.Window):
         GLib.timeout_add_seconds(3, self.poll_presence)
         GLib.timeout_add_seconds(5, self.poll_status)
 
-        for info in self.session.contacts().values():
-            try:
-                self.session.client.add_contact(info["node"])
-            except DaemonError:
-                pass
+        def watch_all():
+            for info in self.session.contacts().values():
+                try:
+                    self.session.client.add_contact(info["node"])
+                except DaemonError:
+                    pass
+
+        run_async(watch_all)
 
     def on_view_changed(self, stack, param):
         if stack.get_visible_child_name() == "contacts":
             self.contacts.refresh()
-
-    def on_stop_daemon(self):
-        self.activity.log("stopping aimlessd …")
-        self.supervisor.stop()
-        self.refresh_route()
 
     def on_set_away(self, *_):
         away = ask_text(self, "Away message", "Away message (empty = available):")
         self.set_away(away.strip() if away and away.strip() else None)
 
     def set_away(self, away):
-        for info in self.session.contacts().values():
-            try:
-                self.session.client.set_status(info["pubkey"], info["node"], away)
-            except DaemonError as e:
-                self.activity.log(f"setstatus failed for {info.get('screen', '?')}: {e}")
-                return
-        self.activity.log("away: " + away if away else "available")
+        contacts = list(self.session.contacts().values())
+
+        def worker():
+            errors = []
+            for info in contacts:
+                try:
+                    self.session.client.set_status(info["pubkey"], info["node"], away)
+                except Exception as e:
+                    errors.append(f"{info.get('screen', '?')}: {e}")
+            return errors
+
+        def done(errors):
+            if errors:
+                self.activity.log("setstatus failed: " + "; ".join(errors))
+            self.activity.log("away: " + away if away else "available")
+
+        run_async(worker, on_done=done)
 
     def drain_events(self):
         try:
@@ -1001,65 +1083,102 @@ class AimlessWindow(Gtk.Window):
         return True
 
     def refresh_daemon_menu(self):
-        st = self.supervisor.status()
-        running = self.supervisor.is_running()
-        self.daemon_start_item.set_sensitive(not running)
-        self.daemon_stop_item.set_sensitive(running)
-        if not st:
-            self._daemon_status_label.set_markup(
-                "<span foreground='#f38ba8'>○  daemon not running — use Start aimlessd</span>")
-        elif st["peers_up"] == 0:
-            self._daemon_status_label.set_markup(
-                f"<span foreground='#fab387'>●  daemon up — connecting… ({st['address']})</span>")
-        else:
-            self._daemon_status_label.set_markup(
-                f"<span foreground='#a6e3a1'>✓  daemon up — online</span>  "
-                f"<span size='small'>{st['address']} · {st.get('build', 'old build — run aimless stop + update')}</span>")
+        def worker():
+            return self.supervisor.is_running(), self.supervisor.status()
+
+        def done(result):
+            running, st = result
+            self.daemon_start_item.set_sensitive(not running)
+            self.daemon_stop_item.set_sensitive(running)
+            if not st:
+                self._daemon_status_label.set_markup(
+                    "<span foreground='#f38ba8'>○  daemon not running — use Start aimlessd</span>")
+            elif st["peers_up"] == 0:
+                self._daemon_status_label.set_markup(
+                    f"<span foreground='#fab387'>●  daemon up — connecting… ({st['address']})</span>")
+            else:
+                build = st.get("build", "old build — run aimless stop + update")
+                self._daemon_status_label.set_markup(
+                    f"<span foreground='#a6e3a1'>✓  daemon up — online</span>  "
+                    f"<span size='small'>{st['address']} · {build}</span>")
+
+        run_async(worker, on_done=done)
 
     def on_start_daemon(self):
-        try:
+        self.daemon_start_item.set_sensitive(False)
+
+        def worker():
             self.supervisor.ensure(log=self.activity.log)
+
+        def done(_r):
             self.activity.log("aimlessd started")
-        except RuntimeError as e:
+            self.refresh_daemon_menu()
+
+        def fail(e):
             self.activity.log(f"start failed: {e}")
-        self.refresh_daemon_menu()
-        self.refresh_route()
+            self.refresh_daemon_menu()
+
+        run_async(worker, on_done=done, on_error=fail)
 
     def on_stop_daemon(self):
-        self.activity.log("stopping aimlessd …")
-        self.supervisor.stop()
-        self.activity.log("aimlessd stopped")
-        self.refresh_daemon_menu()
-        self.refresh_route()
+        self.daemon_stop_item.set_sensitive(False)
+        self._daemon_user_stopped = True
+
+        def worker():
+            self.supervisor.stop()
+
+        def done(_r):
+            self.activity.log("aimlessd stopped")
+            self.refresh_daemon_menu()
+            self.refresh_route(None)
+
+        run_async(worker, on_done=done)
 
     def poll_presence(self):
-        try:
-            presence = {p["key"]: p for p in self.session.client.presence(timeout=3)}
+        if self._presence_busy:
+            return True
+        self._presence_busy = True
+
+        def worker():
+            return {p["key"]: p for p in self.session.client.presence(timeout=3)}
+
+        def done(presence):
+            self._presence_busy = False
             self.messages.refresh_presence(presence)
             self.contacts.refresh_presence(presence)
-        except DaemonError:
+
+        def fail(_e):
+            self._presence_busy = False
             presence = {}
             for t in self.messages.threads.values():
                 t["online"] = False
             self.messages.refresh_presence(presence)
-        except Exception:
-            pass
-        try:
-            self.activity.refresh_info()
-        except Exception:
-            pass
+
+        run_async(worker, on_done=done, on_error=fail)
         return True
 
     def poll_status(self):
-        try:
-            self.refresh_route()
-            self.activity.refresh_info()
-        except Exception:
-            pass
+        if self._status_busy:
+            return True
+        self._status_busy = True
+
+        def worker():
+            running = self.supervisor.is_running()
+            return running, self.supervisor.status()
+
+        def done(result):
+            self._status_busy = False
+            running, st = result
+            self.activity.refresh_info(st)
+            self.refresh_route(st)
+
+        def fail(_e):
+            self._status_busy = False
+
+        run_async(worker, on_done=done, on_error=fail)
         return True
 
-    def refresh_route(self):
-        st = self.supervisor.status()
+    def refresh_route(self, st):
         if not st:
             self.route_label.set_markup("<span foreground='#f38ba8'>●  offline — daemon not reachable</span>")
         elif st["peers_up"] == 0:
