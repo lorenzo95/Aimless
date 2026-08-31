@@ -1,0 +1,19 @@
+[project]
+name = "aimless-client"
+version = "0.1.0"
+description = "aimless — serverless chat with an AIM heart"
+requires-python = ">=3.10"
+dependencies = ["pynacl>=1.5"]
+
+[project.scripts]
+aimless = "aimless.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["aimless"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]

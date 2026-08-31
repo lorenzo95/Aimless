@@ -1,0 +1,20 @@
+services:
+  nodea:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["-peers", "none", "-listen", "tcp://0.0.0.0:9001", "-retry", "500ms", "-probe", "500ms"]
+    volumes:
+      - ./data-a:/data
+    restart: unless-stopped
+
+  nodeb:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["-peers", "tcp://nodea:9001", "-retry", "500ms", "-probe", "500ms"]
+    depends_on:
+      - nodea
+    volumes:
+      - ./data-b:/data
+    restart: unless-stopped
