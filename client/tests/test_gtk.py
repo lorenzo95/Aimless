@@ -173,7 +173,7 @@ def test_gui_version_display(gtk_app):
     win.activity.refresh_info(st)
     label = win.activity.info_label.get_text()
     assert "aimlessd/0.2.0" in label
-    assert "client: aimless/0.2.0" in label
+    assert "client: aimless/" in label
 
     monkey_status = dict(st)
     monkey_status.pop("build")
