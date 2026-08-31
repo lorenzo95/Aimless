@@ -15,6 +15,8 @@ def test_stop_all_kills_spawned_daemon(tmp_path, monkeypatch):
     monkeypatch.setenv("AIMLESS_SOCK", str(home / "api.sock"))
     monkeypatch.setattr(gtkui, "TRAY_PID_FILE", str(home / "tray.pid"))
     monkeypatch.setattr(gtkui, "AIMLESSD_PID_FILE", str(home / "aimlessd.pid"))
+    monkeypatch.setattr(gtkui, "GUI_PID_FILE", str(home / "gui.pid"))
+    monkeypatch.setattr(gtkui, "SESSION_FILE", str(home / "session.json"))
 
     supervisor = gtkui.DaemonSupervisor()
     supervisor.ensure(log=print)
@@ -35,6 +37,8 @@ def test_stop_all_stale_tray_pid_is_tolerated(tmp_path, monkeypatch):
     monkeypatch.setenv("AIMLESS_SOCK", str(home / "api.sock"))
     monkeypatch.setattr(gtkui, "TRAY_PID_FILE", str(home / "tray.pid"))
     monkeypatch.setattr(gtkui, "AIMLESSD_PID_FILE", str(home / "aimlessd.pid"))
+    monkeypatch.setattr(gtkui, "GUI_PID_FILE", str(home / "gui.pid"))
+    monkeypatch.setattr(gtkui, "SESSION_FILE", str(home / "session.json"))
 
     stale = tmp_path / "tray.pid"
     stale.write_text("999999999")
@@ -50,6 +54,8 @@ def test_stop_without_pidfile_uses_pgrep(tmp_path, monkeypatch):
     monkeypatch.setenv("AIMLESS_SOCK", str(home / "api.sock"))
     monkeypatch.setattr(gtkui, "TRAY_PID_FILE", str(home / "tray.pid"))
     monkeypatch.setattr(gtkui, "AIMLESSD_PID_FILE", str(home / "aimlessd.pid"))
+    monkeypatch.setattr(gtkui, "GUI_PID_FILE", str(home / "gui.pid"))
+    monkeypatch.setattr(gtkui, "SESSION_FILE", str(home / "session.json"))
 
     binary = gtkui.daemon_binary()
     assert binary, "aimlessd binary must be built for this test"

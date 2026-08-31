@@ -45,9 +45,13 @@ pip install .
 # 3. create your identity
 aimless init
 
-# 4. chat
-aimless gui            # full desktop app — starts the daemon for you if needed,
-                       # buddies, conversations, contacts, tray on close
+# 4. run everything — tray + daemon + messages window
+aimless
+
+# the tray owns the daemon: closing the messages window closes just the window,
+# clicking the tray icon reopens it (no re-typing your passphrase while the
+# same daemon instance is alive), and tray > Quit shuts the whole stack down.
+# after a daemon restart you unlock once more.
 
 # or headless:
 aimless invite                     # send this string to a friend

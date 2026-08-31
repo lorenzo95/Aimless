@@ -12,7 +12,7 @@ import (
 	"sync"
 )
 
-const buildVersion = "aimlessd/0.2.0"
+const buildVersion = "aimlessd/0.2.2"
 
 type peerStatus struct {
 	URI     string `json:"uri"`

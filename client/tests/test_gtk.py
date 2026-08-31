@@ -37,8 +37,15 @@ def gtk_app(tmp_path, monkeypatch, two_nodes):
     sock_a, sock_b = two_nodes
     home = tmp_path / "home"
     home.mkdir()
+    config = tmp_path / "config"
+    config.mkdir()
     monkeypatch.setenv("AIMLESS_HOME", str(home))
     monkeypatch.setenv("AIMLESS_SOCK", sock_a)
+    monkeypatch.setattr(gtkui, "CONFIG_DIR", str(config))
+    monkeypatch.setattr(gtkui, "GUI_PID_FILE", str(config / "gui.pid"))
+    monkeypatch.setattr(gtkui, "SESSION_FILE", str(config / "session.json"))
+    monkeypatch.setattr(gtkui, "TRAY_PID_FILE", str(config / "tray.pid"))
+    monkeypatch.setattr(gtkui, "AIMLESSD_PID_FILE", str(config / "aimlessd.pid"))
 
     alice_identity = crypto.new_identity()
     crypto.save_identity(str(home / "identity.json"), alice_identity, "testpass")
@@ -172,7 +179,7 @@ def test_gui_version_display(gtk_app):
     st = win.supervisor.status()
     win.activity.refresh_info(st)
     label = win.activity.info_label.get_text()
-    assert "aimlessd/0.2.0" in label
+    assert "aimlessd/0.2.2" in label
     assert "client: aimless/" in label
 
     monkey_status = dict(st)

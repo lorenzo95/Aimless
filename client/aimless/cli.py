@@ -336,8 +336,12 @@ def cmd_stop(args):
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(prog="aimless", description="aimless — serverless chat with an AIM heart")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        prog="aimless",
+        description="aimless — serverless chat with an AIM heart\n\n"
+                    "run `aimless` with no arguments to start everything: tray + daemon + messages window",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("init", help="create identity")
 
@@ -362,12 +366,15 @@ def main():
     p_away = sub.add_parser("away", help="set away message (no arg = back)")
     p_away.add_argument("message", nargs="*")
 
-    sub.add_parser("gui", help="launch the AIMless GTK app (manages the daemon, tray on close)")
+    sub.add_parser("gui", help="open just the messages window (attaches to the running daemon)")
     sub.add_parser("tray", help="run the tray daemon: supervises aimlessd, lives in the notification area")
-    sub.add_parser("autostart", help="install autostart entry for `aimless tray`")
-    sub.add_parser("stop", help="stop the tray supervisor and aimlessd")
+    sub.add_parser("autostart", help="install login autostart for the full `aimless` stack")
+    sub.add_parser("stop", help="shut down everything: tray, gui, daemon")
 
     args = parser.parse_args()
+    if args.command is None:
+        from . import gtkui
+        sys.exit(gtkui.run_tray(open_gui=True))
     cmds = {
         "init": cmd_init,
         "invite": cmd_invite,
