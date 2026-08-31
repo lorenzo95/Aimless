@@ -34,7 +34,8 @@ TRAY_PID_FILE = os.path.join(CONFIG_DIR, "tray.pid")
 AIMLESSD_PID_FILE = os.path.join(CONFIG_DIR, "aimlessd.pid")
 GUI_PID_FILE = os.path.join(CONFIG_DIR, "gui.pid")
 SESSION_FILE = os.path.join(CONFIG_DIR, "session.json")
-PREFS_FILE = os.path.join(CONFIG_DIR, "gtk.json")
+def prefs_file():
+    return os.path.join(CONFIG_DIR, "gtk.json")
 UI_CMD = [sys.executable, "-m", "aimless.cli", "gui"]
 
 
@@ -164,6 +165,15 @@ menuitem:hover { background-color: #33363f; }
     color: #c8cdd8;
 }
 
+.aimless-away-banner {
+    background-color: #3a3020;
+    border-top: 1px solid #5a4a28;
+    border-bottom: 1px solid #5a4a28;
+    color: #f5d78e;
+}
+
+.aimless-away-banner image { color: #f5d36b; }
+
 .aimless-route-bar {
     background-color: #16181f;
     border-top: 1px solid #2a2d37;
@@ -178,7 +188,7 @@ menuitem:hover { background-color: #33363f; }
 
 def load_prefs():
     try:
-        with open(PREFS_FILE) as f:
+        with open(prefs_file()) as f:
             return json.load(f)
     except Exception:
         return {}
@@ -186,7 +196,7 @@ def load_prefs():
 
 def save_prefs(prefs):
     os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(PREFS_FILE, "w") as f:
+    with open(prefs_file(), "w") as f:
         json.dump(prefs, f, indent=2)
 
 
@@ -359,13 +369,22 @@ def run_async(fn, on_done=None, on_error=None):
     def worker():
         try:
             result = fn()
-        except Exception as e:
-            result = e
+        except Exception as exc:
+            err = exc
+
+            def deliver_error():
+                on_error(err)
+                return False
+
             if on_error:
-                GLib.idle_add(lambda: on_error(e) or False)
+                GLib.idle_add(deliver_error)
         else:
             if on_done:
-                GLib.idle_add(lambda: on_done(result) or False)
+                def deliver_done():
+                    on_done(result)
+                    return False
+
+                GLib.idle_add(deliver_done)
     threading.Thread(target=worker, daemon=True).start()
 
 
@@ -979,6 +998,23 @@ class AimlessWindow(Gtk.Window):
             False, False, 0)
         route_bar.pack_start(self.route_label, False, False, 0)
         root.pack_start(route_bar, False, False, 0)
+
+        self.away_banner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.away_banner.set_border_width(8)
+        self.away_banner.get_style_context().add_class("aimless-away-banner")
+        self.away_icon = Gtk.Image.new_from_icon_name("weather-clear-night-symbolic", Gtk.IconSize.MENU)
+        self.away_banner.pack_start(self.away_icon, False, False, 0)
+        self.away_label = Gtk.Label(label="")
+        self.away_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.away_label.set_xalign(0.0)
+        self.away_banner.pack_start(self.away_label, True, True, 0)
+        away_back = Gtk.Button(label="I'm back")
+        away_back.set_relief(Gtk.ReliefStyle.NONE)
+        away_back.connect("clicked", lambda *_: self.set_away(None))
+        self.away_banner.pack_start(away_back, False, False, 0)
+        self.away_banner.set_no_show_all(True)
+        root.pack_start(self.away_banner, False, False, 0)
+
         self.add(root)
 
         accel = Gtk.AccelGroup()
@@ -1005,6 +1041,9 @@ class AimlessWindow(Gtk.Window):
         self._presence_busy = False
         self._status_busy = False
         self._daemon_user_stopped = False
+        saved_away = self.prefs.get("away", "")
+        if saved_away:
+            self._apply_away_banner(saved_away)
         self.contacts.refresh()
         self.poll_status()
 
@@ -1033,6 +1072,9 @@ class AimlessWindow(Gtk.Window):
 
     def set_away(self, away):
         contacts = list(self.session.contacts().values())
+        self._apply_away_banner(away)
+        self.prefs["away"] = away or ""
+        save_prefs(self.prefs)
 
         def worker():
             errors = []
@@ -1049,6 +1091,16 @@ class AimlessWindow(Gtk.Window):
             self.activity.log("away: " + away if away else "available")
 
         run_async(worker, on_done=done)
+
+    def _apply_away_banner(self, away):
+        if away:
+            self.away_icon.set_from_icon_name("weather-clear-night-symbolic", Gtk.IconSize.MENU)
+            self.away_label.set_markup(
+                f"<b>Away</b> — {GLib.markup_escape_text(away)}  "
+                f"<span size='small'>(buddies see this as your away message)</span>")
+            self.away_banner.show()
+        else:
+            self.away_banner.hide()
 
     def drain_events(self):
         try:
@@ -1425,8 +1477,6 @@ def spawn_tray():
         return None
 
 
-TRAY_CLICK_FOCUSES = True
-
 
 def run_tray(open_gui=False):
     import fcntl
@@ -1494,6 +1544,10 @@ def run_tray(open_gui=False):
             pid_fh.close()
         except Exception:
             pass
+        try:
+            os.remove(TRAY_PID_FILE)
+        except OSError:
+            pass
         loop.quit()
         return GLib.SOURCE_REMOVE
 
@@ -1527,17 +1581,30 @@ def install_autostart():
 
 
 def quit_everything():
-    """Shut the whole stack down: tray icon, GUI windows, daemon, unlock state."""
-    clear_session()
+    """Shut the whole stack down: supervisor CLI process, tray icon, GUI, daemon, unlock state."""
+    sup_pid = read_pid(TRAY_PID_FILE)
+    if sup_pid and sup_pid != os.getpid():
+        try:
+            os.kill(sup_pid, signal.SIGTERM)
+        except OSError:
+            pass
+        deadline = time.time() + 3
+        while time.time() < deadline and read_pid(TRAY_PID_FILE) == sup_pid:
+            time.sleep(0.1)
     gui_pid = gui_pid_alive()
     if gui_pid:
         try:
             os.kill(gui_pid, signal.SIGTERM)
         except OSError:
             pass
+    clear_session()
     DaemonSupervisor().stop()
     try:
         os.remove(GUI_PID_FILE)
+    except OSError:
+        pass
+    try:
+        os.remove(TRAY_PID_FILE)
     except OSError:
         pass
 

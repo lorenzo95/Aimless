@@ -189,6 +189,43 @@ def test_gui_version_display(gtk_app):
     assert "old build" in label
 
 
+def test_gui_away_banner(gtk_app):
+    app = gtk_app
+    win = app["win"]
+    bob = app["bob"]
+    a_node = app["a_node"]
+
+    assert not win.away_banner.get_visible()
+
+    win.set_away("gone fishing")
+
+    def banner_and_propagated():
+        if not (win.away_banner.get_visible() and "gone fishing" in win.away_label.get_text()):
+            return False
+        for p in bob.presence():
+            if p["key"] == a_node and p.get("status_payload"):
+                st = protocol.open_status(app["bob_identity"], p["status_payload"])
+                if st.get("away") == "gone fishing":
+                    return True
+        return False
+    assert _pump(win, banner_and_propagated, timeout=30), "away banner or propagation failed"
+
+    back_btn = win.away_banner.get_children()[-1]
+    assert isinstance(back_btn, Gtk.Button)
+    back_btn.clicked()
+
+    def cleared_and_propagated():
+        if win.away_banner.get_visible():
+            return False
+        for p in bob.presence():
+            if p["key"] == a_node and p.get("status_payload"):
+                st = protocol.open_status(app["bob_identity"], p["status_payload"])
+                if st.get("away") is None:
+                    return True
+        return False
+    assert _pump(win, cleared_and_propagated, timeout=30), "banner never cleared or available never propagated"
+
+
 def test_gui_away_status_propagates(gtk_app):
     app = gtk_app
     win = app["win"]
