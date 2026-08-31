@@ -298,22 +298,31 @@ class DaemonSupervisor:
         raise RuntimeError("daemon did not come up within 20s")
 
     def stop(self):
-        pid = None
-        try:
-            with open(AIMLESSD_PID_FILE) as f:
-                pid = int(f.read().strip())
-        except Exception:
-            pid = self.child.pid if self.child else None
+        pid = read_pid(AIMLESSD_PID_FILE)
+        if pid is None and self.child:
+            pid = self.child.pid
+        if pid is None:
+            found = subprocess.run(["pgrep", "-x", "aimlessd"], capture_output=True, text=True)
+            pids = [int(p) for p in found.stdout.split() if p.isdigit()]
+            pid = pids[0] if pids else None
         if pid:
             try:
                 os.kill(pid, signal.SIGTERM)
             except OSError:
                 pass
-        deadline = time.time() + 10
+        deadline = time.time() + 5
+        stopped = False
         while time.time() < deadline:
             if not self.is_running():
+                stopped = True
                 break
             time.sleep(0.2)
+        if not stopped and pid:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            time.sleep(0.5)
         try:
             os.remove(AIMLESSD_PID_FILE)
         except OSError:
@@ -915,9 +924,12 @@ class AimlessWindow(Gtk.Window):
         self.daemon_status_item.connect("activate", lambda *_: self.stack.set_visible_child(self.activity))
         self._daemon_status_label = status_label
         options_menu.append(self.daemon_status_item)
-        stop_item = Gtk.MenuItem(label="Stop aimlessd")
-        stop_item.connect("activate", lambda *_: self.on_stop_daemon())
-        options_menu.append(stop_item)
+        self.daemon_start_item = Gtk.MenuItem(label="Start aimlessd")
+        self.daemon_start_item.connect("activate", lambda *_: self.on_start_daemon())
+        options_menu.append(self.daemon_start_item)
+        self.daemon_stop_item = Gtk.MenuItem(label="Stop aimlessd")
+        self.daemon_stop_item.connect("activate", lambda *_: self.on_stop_daemon())
+        options_menu.append(self.daemon_stop_item)
         options_menu.append(Gtk.SeparatorMenuItem())
         away_item = Gtk.MenuItem(label="Set away …")
         away_item.connect("activate", self.on_set_away)
@@ -990,16 +1002,35 @@ class AimlessWindow(Gtk.Window):
 
     def refresh_daemon_menu(self):
         st = self.supervisor.status()
+        running = self.supervisor.is_running()
+        self.daemon_start_item.set_sensitive(not running)
+        self.daemon_stop_item.set_sensitive(running)
         if not st:
             self._daemon_status_label.set_markup(
-                "<span foreground='#f38ba8'>○  daemon not reachable — will restart automatically</span>")
+                "<span foreground='#f38ba8'>○  daemon not running — use Start aimlessd</span>")
         elif st["peers_up"] == 0:
             self._daemon_status_label.set_markup(
                 f"<span foreground='#fab387'>●  daemon up — connecting… ({st['address']})</span>")
         else:
             self._daemon_status_label.set_markup(
                 f"<span foreground='#a6e3a1'>✓  daemon up — online</span>  "
-                f"<span size='small'>{st['address']} · {st.get('build', 'old build — restart via aimless stop')}</span>")
+                f"<span size='small'>{st['address']} · {st.get('build', 'old build — run aimless stop + update')}</span>")
+
+    def on_start_daemon(self):
+        try:
+            self.supervisor.ensure(log=self.activity.log)
+            self.activity.log("aimlessd started")
+        except RuntimeError as e:
+            self.activity.log(f"start failed: {e}")
+        self.refresh_daemon_menu()
+        self.refresh_route()
+
+    def on_stop_daemon(self):
+        self.activity.log("stopping aimlessd …")
+        self.supervisor.stop()
+        self.activity.log("aimlessd stopped")
+        self.refresh_daemon_menu()
+        self.refresh_route()
 
     def poll_presence(self):
         try:
@@ -1021,16 +1052,10 @@ class AimlessWindow(Gtk.Window):
 
     def poll_status(self):
         try:
-            if not self.supervisor.is_running():
-                self.supervisor.spawn()
-                self.activity.log("aimlessd was down — restarted it")
             self.refresh_route()
             self.activity.refresh_info()
-        except Exception as e:
-            try:
-                self.activity.log(f"daemon supervision error: {e}")
-            except Exception:
-                pass
+        except Exception:
+            pass
         return True
 
     def refresh_route(self):
@@ -1195,8 +1220,12 @@ def _stop(*_):
 mi_stop.connect('activate', _stop)
 menu.append(mi_stop)
 menu.append(Gtk.SeparatorMenuItem())
-mi_quit = Gtk.MenuItem(label='Quit tray')
-mi_quit.connect('activate', Gtk.main_quit)
+mi_quit = Gtk.MenuItem(label='Quit — also stops the daemon')
+def _quit(*_):
+    from aimless.gtkui import DaemonSupervisor
+    DaemonSupervisor().stop()
+    Gtk.main_quit()
+mi_quit.connect('activate', _quit)
 menu.append(mi_quit)
 menu.show_all()
 
@@ -1268,12 +1297,16 @@ def run_tray():
     loop = GLib.MainLoop()
 
     def cleanup(*_):
-        print("[aimless tray] shutting down (daemon keeps running)")
+        print("[aimless tray] shutting down — stopping aimlessd")
         if tray_proc:
             try:
                 tray_proc.terminate()
             except Exception:
                 pass
+        try:
+            supervisor.stop()
+        except Exception:
+            pass
         try:
             pid_fh.close()
         except Exception:
