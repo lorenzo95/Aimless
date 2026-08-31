@@ -21,14 +21,16 @@ wget https://raw.githubusercontent.com/lorenzo95/Aimless/main/dist/aimlessd-linu
 wget https://raw.githubusercontent.com/lorenzo95/Aimless/main/dist/aimless.pyz
 chmod +x aimlessd-linux-amd64 aimless.pyz
 
-aimlessd-linux-amd64 &        # 1. the daemon joins the Yggdrasil mesh
-./aimless.pyz init            # 2. one-time: identity (passphrase + screen name)
-./aimless.pyz                 # 3. tray + messages window
+./aimlessd-linux-amd64 &        # 1. the daemon joins the Yggdrasil mesh
+./aimless.pyz init              # 2. one-time: identity (passphrase + screen name)
+./aimless.pyz                   # 3. tray + messages window
 ```
 
-That's it. Closing the window closes just the window — the tray keeps the daemon receiving. Tray click reopens the window (no re-typing your passphrase while the same daemon instance lives). Tray `Quit — shuts down AIMless` stops the window, the daemon, and the unlock.
+Note the `./` — Linux does not search the current directory.
 
 Requires: Linux, python3 + `pip install pynacl` (client), `python3-gi` (distro package, for the GTK window). The daemon itself has zero dependencies — it's a static binary.
+
+If you previously installed an older aimless via pip, uninstall it so the old `aimless` command can't shadow the current app: `pip uninstall aimless-client`. Always run `./aimless.pyz` from the folder you wget'd it into — the pyz pins its own code regardless of what's in site-packages.
 
 Build from source instead: see [Development](#development) below.
 

@@ -92,8 +92,15 @@ for junk in ("__pycache__",):
     p = os.path.join(stage, "aimless", junk)
     if os.path.isdir(p):
         shutil.rmtree(p)
+main_src = '''import os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from aimless.cli import main
+sys.exit(main())
+'''
+with open(os.path.join(stage, "__main__.py"), "w") as f:
+    f.write(main_src)
 subprocess.run([sys.executable, "-m", "zipapp", stage, "-o", os.path.join(out, "aimless.pyz"),
-                "-p", "/usr/bin/env python3", "-m", "aimless.cli:main"], check=True)
+                "-p", "/usr/bin/env python3"], check=True)
 shutil.rmtree(stage)
 print("zipapp built")
 PYEOF
