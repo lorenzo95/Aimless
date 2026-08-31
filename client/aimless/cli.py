@@ -323,6 +323,16 @@ def cmd_autostart(args):
     print(gtkui.install_autostart())
 
 
+def cmd_stop(args):
+    try:
+        from . import gtkui
+    except ImportError as e:
+        print(f"GUI unavailable ({e}) — install the GTK stack: sudo apt install python3-gi", file=sys.stderr)
+        sys.exit(1)
+    stopped = gtkui.stop_all()
+    print("stopped: " + (", ".join(stopped) if stopped else "nothing was running"))
+
+
 def main():
     import argparse
 
@@ -355,6 +365,7 @@ def main():
     sub.add_parser("gui", help="launch the AIMless GTK app (manages the daemon, tray on close)")
     sub.add_parser("tray", help="run the tray daemon: supervises aimlessd, lives in the notification area")
     sub.add_parser("autostart", help="install autostart entry for `aimless tray`")
+    sub.add_parser("stop", help="stop the tray supervisor and aimlessd")
 
     args = parser.parse_args()
     cmds = {
@@ -369,6 +380,7 @@ def main():
         "gui": cmd_gui,
         "tray": cmd_tray,
         "autostart": cmd_autostart,
+        "stop": cmd_stop,
     }
     cmds[args.command](args)
 

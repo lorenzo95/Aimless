@@ -1201,7 +1201,8 @@ def run_tray():
     try:
         fcntl.flock(pid_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        print("[aimless tray] already running, exiting")
+        pid = read_pid(TRAY_PID_FILE)
+        print(f"[aimless tray] already running (pid {pid}) — stop it with: aimless stop")
         return 0
     pid_fh.seek(0)
     pid_fh.truncate()
@@ -1259,6 +1260,29 @@ def install_autostart():
     with open(desktop_path, "w") as f:
         f.write(content)
     return desktop_path
+
+
+def stop_all():
+    stopped = []
+    sup_pid = read_pid(TRAY_PID_FILE)
+    if sup_pid:
+        try:
+            os.kill(sup_pid, signal.SIGTERM)
+            stopped.append(f"tray supervisor (pid {sup_pid})")
+        except OSError:
+            pass
+    try:
+        os.remove(TRAY_PID_FILE)
+    except OSError:
+        pass
+    supervisor = DaemonSupervisor()
+    if supervisor.is_running():
+        supervisor.stop()
+        stopped.append("aimlessd")
+    subprocess.run(["pkill", "-x", "aimlessd"], capture_output=True)
+    subprocess.run(["pkill", "-f", "aimless.cli tray"], capture_output=True)
+    subprocess.run(["pkill", "-f", "aimless.cli gui"], capture_output=True)
+    return stopped
 
 
 def main():
