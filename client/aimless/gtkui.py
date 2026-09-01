@@ -1412,6 +1412,10 @@ def gui_pid_alive():
         return None
 
 
+def gui_log_path():
+    return os.path.join(CONFIG_DIR, "gui.log")
+
+
 def focus_or_launch_gui():
     pid = gui_pid_alive()
     if pid:
@@ -1420,8 +1424,13 @@ def focus_or_launch_gui():
             return
         except OSError:
             pass
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        log_fh = open(gui_log_path(), "a")
+    except Exception:
+        log_fh = subprocess.DEVNULL
     subprocess.Popen(UI_CMD, start_new_session=True,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                     stdout=log_fh, stderr=log_fh)
 
 
 def read_pid(path):

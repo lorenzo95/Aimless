@@ -17,4 +17,6 @@ tests/test_crypto.py
 tests/test_e2e.py
 tests/test_gtk.py
 tests/test_protocol.py
+tests/test_reconnect.py
+tests/test_session.py
 tests/test_stop.py

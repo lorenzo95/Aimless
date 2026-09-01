@@ -300,7 +300,14 @@ def cmd_gui(args):
     try:
         from . import gtkui
     except ImportError as e:
-        print(f"GUI unavailable ({e}) — install the GTK stack: sudo apt install python3-gi", file=sys.stderr)
+        msg = (f"GUI unavailable: {e}\n"
+               f"install the GTK stack:  sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0")
+        print(msg, file=sys.stderr)
+        try:
+            with open(os.path.join(client_dir(), "gui.log"), "a") as f:
+                f.write(msg + "\n")
+        except OSError:
+            pass
         sys.exit(1)
     gtkui.main()
 
