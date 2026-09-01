@@ -15,7 +15,7 @@ venv/
 __pycache__/
 *.pyc
 .pytest_cache/
-dist/
+dist/aimless-dist.tar.gz
 .pytest_cache/
 egg-info/
 daemon/daemon
