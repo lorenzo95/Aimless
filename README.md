@@ -14,6 +14,7 @@ chmod +x aimlessd-linux-amd64 aimless.pyz
 
 ./aimless.pyz init    # once: passphrase + screen name
 ./aimless.pyz         # tray + daemon + messages window
+./aimless.pyz autostart   # optional: start the whole stack at login
 ```
 
 That's the whole setup. The tray owns the daemon: closing the window closes just the window, clicking the tray icon reopens it, and tray `Quit` shuts everything down. `./aimless.pyz --version` tells you which build you're running.

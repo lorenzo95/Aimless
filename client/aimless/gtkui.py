@@ -1641,9 +1641,20 @@ def run_tray(open_gui=False):
 
 
 def install_autostart():
-    autostart_dir = os.path.expanduser("~/.config/autostart")
+    autostart_dir = os.path.join(os.path.dirname(CONFIG_DIR), "autostart")
     desktop_path = os.path.join(autostart_dir, "aimless-tray.desktop")
+
     aimless_bin = shutil.which("aimless") or os.path.expanduser("~/.local/bin/aimless")
+    if not os.path.exists(aimless_bin):
+        for d in (os.path.dirname(os.path.abspath(sys.argv[0])), os.getcwd(),
+                  os.path.expanduser("~/.local/bin")):
+            pyz = os.path.join(d, "aimless.pyz")
+            if os.path.exists(pyz):
+                aimless_bin = f"{sys.executable} {pyz}"
+                break
+    if not os.path.exists(aimless_bin.split(" ")[0]) and " " not in aimless_bin:
+        return None
+
     content = (
         "[Desktop Entry]\n"
         "Type=Application\n"
