@@ -13,23 +13,23 @@ Serverless chat with an AIM heart. Bitmessage's architecture (decentralized, end
 
 ## Download and run
 
-No installer. Two files, wget them into a folder and run:
+No installer. Two files, wget them into a folder and run. The filenames carry the release version — **a fresh release is always a fresh URL**, so a downloaded file can never be a stale cached copy:
 
 ```sh
 mkdir aimless && cd aimless
-wget https://raw.githubusercontent.com/lorenzo95/Aimless/main/dist/aimlessd-linux-amd64
-wget https://raw.githubusercontent.com/lorenzo95/Aimless/main/dist/aimless.pyz
-chmod +x aimlessd-linux-amd64 aimless.pyz
+wget https://raw.githubusercontent.com/lorenzo95/Aimless/main/dist/aimlessd-0.3.1-linux-amd64
+wget https://raw.githubusercontent.com/lorenzo95/Aimless/main/dist/aimless-0.3.1.pyz
+chmod +x aimlessd-0.3.1-linux-amd64 aimless-0.3.1.pyz
 
-./aimlessd-linux-amd64 &        # 1. the daemon joins the Yggdrasil mesh
-./aimless.pyz init              # 2. one-time: identity (passphrase + screen name)
-./aimless.pyz --version         #    should print: aimless 0.2.8
-./aimless.pyz                   # 3. tray + messages window
+./aimlessd-0.3.1-linux-amd64 &        # 1. the daemon joins the Yggdrasil mesh
+./aimless-0.3.1.pyz init              # 2. one-time: identity (passphrase + screen name)
+./aimless-0.3.1.pyz --version         #    should print: aimless 0.3.1
+./aimless-0.3.1.pyz                   # 3. tray + messages window
 ```
 
 Note the `./` — Linux does not search the current directory.
 
-Requires: Linux, python3 + `pip install pynacl` (client), `python3-gi` (distro package, for the GTK window). The daemon itself has zero dependencies — it's a static binary.
+Requires: Linux, python3 + `pip install pynacl` (client), `python3-gi` + `gir1.2-gtk-3.0` (distro packages, for the GTK window). The daemon itself has zero dependencies — it's a static binary.
 
 If you previously installed an older aimless via pip, **uninstall it** — its `aimless` command still contains the old tkinter GUI and will shadow the current app:
 
@@ -37,7 +37,7 @@ If you previously installed an older aimless via pip, **uninstall it** — its `
 pip uninstall aimless-client
 ```
 
-Check what you're running: `./aimless.pyz --version` → `aimless 0.2.8`. The window title bar and the Activity tab show the same versions. If `--version` says something else, you downloaded a stale file — use the commit-pinned URL shown in the release notes.
+Check what you're running: `./aimless-0.3.1.pyz --version` → `aimless 0.3.1`. The window title bar and the Activity tab show the same versions.
 
 Build from source instead: see [Development](#development) below.
 

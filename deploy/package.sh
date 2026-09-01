@@ -79,9 +79,11 @@ tar -C "$OUT" -czf "$OUT/aimless-dist.tar.gz" aimless-dist
 rm -rf "$STAGE"
 
 echo "building release artifacts …"
-cp "$STAGE_OUT_PLACEHOLDER" /dev/null 2>/dev/null || true
-go build -trimpath -ldflags "-s -w" -o "$OUT/aimlessd-linux-amd64" "$ROOT/daemon" 2>/dev/null || \
-  (cd "$ROOT/daemon" && go build -trimpath -ldflags "-s -w" -o "$OUT/aimlessd-linux-amd64" .)
+VERSION="$(grep -oP '(?<=__version__ = ")[^"]+' "$ROOT/client/aimless/__init__.py")"
+DAEMON_ART="aimlessd-$VERSION-linux-amd64"
+PYZ_ART="aimless-$VERSION.pyz"
+go build -trimpath -ldflags "-s -w" -o "$OUT/$DAEMON_ART" "$ROOT/daemon" 2>/dev/null || \
+  (cd "$ROOT/daemon" && go build -trimpath -ldflags "-s -w" -o "$OUT/$DAEMON_ART" .)
 python3 - <<PYEOF
 import os, shutil, subprocess, sys, tempfile
 root = "$ROOT"
@@ -99,10 +101,10 @@ sys.exit(main())
 '''
 with open(os.path.join(stage, "__main__.py"), "w") as f:
     f.write(main_src)
-subprocess.run([sys.executable, "-m", "zipapp", stage, "-o", os.path.join(out, "aimless.pyz"),
+subprocess.run([sys.executable, "-m", "zipapp", stage, "-o", os.path.join(out, "$PYZ_ART"),
                 "-p", "/usr/bin/env python3"], check=True)
 shutil.rmtree(stage)
 print("zipapp built")
 PYEOF
-echo "release artifacts: $OUT/aimlessd-linux-amd64 $OUT/aimless.pyz"
+echo "release artifacts: $OUT/$DAEMON_ART $OUT/$PYZ_ART"
 echo "packaged: $OUT/aimless-dist.tar.gz"
