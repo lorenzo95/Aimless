@@ -7,8 +7,8 @@ Serverless chat with an AIM heart. Bitmessage's architecture (decentralized, end
 ```sh
 mkdir -p ~/.local/bin && cd ~/.local/bin
 
-wget https://raw.githubusercontent.com/lorenzo95/Aimless/main/dist/aimlessd-0.3.1-linux-amd64
-wget https://raw.githubusercontent.com/lorenzo95/Aimless/main/dist/aimless-0.3.1.pyz
+wget https://raw.githubusercontent.com/lorenzo95/Aimless/main/dist/aimlessd-linux-amd64
+wget https://raw.githubusercontent.com/lorenzo95/Aimless/main/dist/aimless.pyz
 
 chmod +x aimlessd-linux-amd64 aimless.pyz
 

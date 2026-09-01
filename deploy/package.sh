@@ -79,9 +79,8 @@ tar -C "$OUT" -czf "$OUT/aimless-dist.tar.gz" aimless-dist
 rm -rf "$STAGE"
 
 echo "building release artifacts …"
-VERSION="$(grep -oP '(?<=__version__ = ")[^"]+' "$ROOT/client/aimless/__init__.py")"
-DAEMON_ART="aimlessd-$VERSION-linux-amd64"
-PYZ_ART="aimless-$VERSION.pyz"
+DAEMON_ART="aimlessd-linux-amd64"
+PYZ_ART="aimless.pyz"
 go build -trimpath -ldflags "-s -w" -o "$OUT/$DAEMON_ART" "$ROOT/daemon" 2>/dev/null || \
   (cd "$ROOT/daemon" && go build -trimpath -ldflags "-s -w" -o "$OUT/$DAEMON_ART" .)
 python3 - <<PYEOF

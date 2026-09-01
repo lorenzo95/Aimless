@@ -244,9 +244,6 @@ def cache_path():
 
 
 def daemon_binary():
-    found = shutil.which("aimlessd")
-    if found:
-        return found
     names = ("aimlessd", "aimlessd-linux-amd64")
     dirs = [
         os.path.dirname(os.path.abspath(sys.argv[0])),
@@ -262,7 +259,8 @@ def daemon_binary():
             p = os.path.join(d, name)
             if os.path.exists(p):
                 return p
-    return None
+    found = shutil.which("aimlessd")
+    return found
 
 
 class DaemonSupervisor:
