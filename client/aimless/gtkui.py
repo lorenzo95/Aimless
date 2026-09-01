@@ -1644,23 +1644,26 @@ def install_autostart():
     autostart_dir = os.path.join(os.path.dirname(CONFIG_DIR), "autostart")
     desktop_path = os.path.join(autostart_dir, "aimless-tray.desktop")
 
+    exec_line = None
     aimless_bin = shutil.which("aimless") or os.path.expanduser("~/.local/bin/aimless")
-    if not os.path.exists(aimless_bin):
+    if os.path.exists(aimless_bin):
+        exec_line = f"{aimless_bin} tray"
+    else:
         for d in (os.path.dirname(os.path.abspath(sys.argv[0])), os.getcwd(),
                   os.path.expanduser("~/.local/bin")):
             pyz = os.path.join(d, "aimless.pyz")
             if os.path.exists(pyz):
-                aimless_bin = f"{sys.executable} {pyz}"
+                exec_line = f"{sys.executable} {pyz} tray"
                 break
-    if not os.path.exists(aimless_bin.split(" ")[0]) and " " not in aimless_bin:
+    if not exec_line:
         return None
 
     content = (
         "[Desktop Entry]\n"
         "Type=Application\n"
         "Name=AIMless\n"
-        "Comment=AIMless tray + daemon supervisor\n"
-        f"Exec={aimless_bin}\n"
+        "Comment=AIMless tray + daemon — messages are received in the background\n"
+        f"Exec={exec_line}\n"
         "Icon=user-available\n"
         "Categories=Network;InstantMessaging;\n"
         "X-GNOME-Autostart-enabled=true\n"
