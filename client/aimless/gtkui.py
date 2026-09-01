@@ -67,7 +67,15 @@ headerbar {
     min-height: 40px;
 }
 
-.aimless-window { background-color: #191b22; }
+.aimless-window {
+    background-image: none;
+    background-color: #191b22;
+    color: #e8eaf0;
+}
+
+.aimless-window label { color: #e8eaf0; }
+
+.aimless-window .muted { color: #9aa0ad; }
 
 .aimless-window button {
     background-image: none;
@@ -110,7 +118,7 @@ menu { background-color: #1e212b; color: #dfe3ec; border: 1px solid #3a3e4a; bor
 menuitem { color: #dfe3ec; }
 menuitem:hover { background-color: #33363f; }
 
-.muted { opacity: 0.62; font-size: 90%; }
+.muted { color: #9aa0ad; font-size: 90%; }
 
 .aimless-sidebar scrolledwindow,
 .aimless-sidebar list,
@@ -118,6 +126,9 @@ menuitem:hover { background-color: #33363f; }
 
 .aimless-sidebar row:hover { background-color: #262a35; }
 .aimless-sidebar row:selected { background-color: #323748; }
+.aimless-sidebar row label { color: #dfe3ec; }
+
+.aimless-chat row label { color: #e8eaf0; }
 
 .aimless-chat,
 .aimless-chat stack,
@@ -1316,7 +1327,8 @@ def daemon_proc_info():
                     cmdline = f.read().decode(errors="replace").split("\x00")
             except Exception:
                 continue
-            if not cmdline or os.path.basename(cmdline[0]) != "aimlessd":
+            name = os.path.basename(cmdline[0])
+            if not name.startswith("aimlessd"):
                 continue
             if "-datadir" in cmdline:
                 if target not in cmdline:
@@ -1416,7 +1428,9 @@ def gui_log_path():
     return os.path.join(CONFIG_DIR, "gui.log")
 
 
-def focus_or_launch_gui():
+def focus_or_launch_gui(ui_cmd=None):
+    if ui_cmd is None:
+        ui_cmd = UI_CMD
     pid = gui_pid_alive()
     if pid:
         try:
@@ -1429,7 +1443,7 @@ def focus_or_launch_gui():
         log_fh = open(gui_log_path(), "a")
     except Exception:
         log_fh = subprocess.DEVNULL
-    subprocess.Popen(UI_CMD, start_new_session=True,
+    subprocess.Popen(ui_cmd, start_new_session=True,
                      stdout=log_fh, stderr=log_fh)
 
 
@@ -1468,10 +1482,14 @@ from gi.repository import Gtk, GLib
 
 pid_file  = {pid_file!r}
 ui_cmd    = {ui_cmd!r}
+pyz_path  = {pyz_path!r}
+
+if pyz_path:
+    sys.path.insert(0, pyz_path)
+from aimless.gtkui import focus_or_launch_gui, quit_everything
 
 def open_ui(*_):
-    from aimless.gtkui import focus_or_launch_gui
-    focus_or_launch_gui()
+    focus_or_launch_gui(ui_cmd)
 
 def on_activate(icon, *_):
     open_ui()
@@ -1486,7 +1504,6 @@ menu.append(mi_open)
 menu.append(Gtk.SeparatorMenuItem())
 mi_quit = Gtk.MenuItem(label='Quit — shuts down AIMless')
 def _quit(*_):
-    from aimless.gtkui import quit_everything
     quit_everything()
     Gtk.main_quit()
 mi_quit.connect('activate', _quit)
@@ -1516,10 +1533,13 @@ Gtk.main()
 """
 
 
-def spawn_tray():
+def spawn_tray(pyz_path=None, ui_cmd=None):
+    if ui_cmd is None:
+        ui_cmd = UI_CMD
     code = TRAY_SCRIPT_TEMPLATE.format(
         pid_file=TRAY_PID_FILE,
-        ui_cmd=UI_CMD,
+        pyz_path=pyz_path or "",
+        ui_cmd=ui_cmd,
         icon_name=first_icon("user-available-symbolic", "phone"),
     )
     try:
@@ -1560,9 +1580,16 @@ def run_tray(open_gui=False):
         print(f"[aimless tray] {e}")
         return 1
 
-    tray_proc = spawn_tray()
+    script_path = os.path.abspath(sys.argv[0])
+    pyz_path = script_path if script_path.endswith(".pyz") else None
+    if pyz_path:
+        ui_cmd = [sys.executable, pyz_path, "gui"]
+    else:
+        ui_cmd = [sys.executable, "-m", "aimless.cli", "gui"]
+
+    tray_proc = spawn_tray(pyz_path=pyz_path, ui_cmd=ui_cmd)
     if open_gui:
-        focus_or_launch_gui()
+        focus_or_launch_gui(ui_cmd=ui_cmd)
     loop = GLib.MainLoop()
     state = {"shutting_down": False}
 

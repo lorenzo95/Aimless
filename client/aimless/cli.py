@@ -299,9 +299,12 @@ def _handle_event(client, cache, buddy_node, buddy_screen, ev):
 def cmd_gui(args):
     try:
         from . import gtkui
-    except ImportError as e:
-        msg = (f"GUI unavailable: {e}\n"
-               f"install the GTK stack:  sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0")
+    except (ImportError, ValueError) as e:
+        hint = "install the GTK stack: sudo apt install python3-gi gir1.2-gtk-3.0"
+        if "Namespace" in str(e):
+            hint = "the Gtk introspection data is missing: sudo apt install gir1.2-gtk-3.0"
+        msg = (f"GUI unavailable: {e}\n{hint}\n"
+               f"(also needs a display — check `echo $DISPLAY`; over ssh use ssh -X)")
         print(msg, file=sys.stderr)
         try:
             with open(os.path.join(client_dir(), "gui.log"), "a") as f:
