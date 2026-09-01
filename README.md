@@ -23,6 +23,7 @@ chmod +x aimlessd-linux-amd64 aimless.pyz
 
 ./aimlessd-linux-amd64 &        # 1. the daemon joins the Yggdrasil mesh
 ./aimless.pyz init              # 2. one-time: identity (passphrase + screen name)
+./aimless.pyz --version         #    should print: aimless 0.2.8
 ./aimless.pyz                   # 3. tray + messages window
 ```
 
@@ -30,7 +31,13 @@ Note the `./` — Linux does not search the current directory.
 
 Requires: Linux, python3 + `pip install pynacl` (client), `python3-gi` (distro package, for the GTK window). The daemon itself has zero dependencies — it's a static binary.
 
-If you previously installed an older aimless via pip, uninstall it so the old `aimless` command can't shadow the current app: `pip uninstall aimless-client`. Always run `./aimless.pyz` from the folder you wget'd it into — the pyz pins its own code regardless of what's in site-packages.
+If you previously installed an older aimless via pip, **uninstall it** — its `aimless` command still contains the old tkinter GUI and will shadow the current app:
+
+```sh
+pip uninstall aimless-client
+```
+
+Check what you're running: `./aimless.pyz --version` → `aimless 0.2.8`. The window title bar and the Activity tab show the same versions. If `--version` says something else, you downloaded a stale file — use the commit-pinned URL shown in the release notes.
 
 Build from source instead: see [Development](#development) below.
 
