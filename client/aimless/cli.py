@@ -335,12 +335,14 @@ def cmd_stop(args):
 
 def main():
     import argparse
+    from . import __version__
 
     parser = argparse.ArgumentParser(
         prog="aimless",
         description="aimless — serverless chat with an AIM heart\n\n"
                     "run `aimless` with no arguments to start everything: tray + daemon + messages window",
         formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--version", action="version", version=f"aimless {__version__}")
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("init", help="create identity")

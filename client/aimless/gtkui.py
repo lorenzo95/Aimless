@@ -980,6 +980,7 @@ class AimlessWindow(Gtk.Window):
         header_bar = Gtk.HeaderBar()
         header_bar.set_show_close_button(True)
         header_bar.set_title(APP_NAME)
+        header_bar.set_subtitle(f"v{client_version}")
         self.set_titlebar(header_bar)
 
         self.stack = Gtk.Stack()
