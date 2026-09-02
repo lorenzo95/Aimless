@@ -190,6 +190,10 @@ class Cache:
         c["scan_last"] = {}
         self._flush()
 
+    def remove_conversation(self, conv_id: str) -> None:
+        self._data["conversations"].pop(conv_id, None)
+        self._flush()
+
     def is_muted(self, node: str) -> bool:
         return node in self._data["muted"]
 

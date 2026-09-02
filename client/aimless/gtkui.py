@@ -421,6 +421,31 @@ def _room_dots_markup(members, presence_by_node, exclude):
     return "".join(parts)
 
 
+def _sidebar_title_markup(thread, self_node):
+    """Sidebar row title. Rooms: one liveness dot + online count (scales to any room
+    size); per-member dots live in the conversation header instead. DMs: single dot."""
+    esc = GLib.markup_escape_text
+    if thread.get("is_room"):
+        pb = thread.get("presence_by_node", {})
+        others = [n for n in thread.get("members", {}) if n != self_node]
+        online = sum(1 for n in others if pb.get(n, {}).get("online"))
+        dot_color = "#a6e3a1" if online else "#6c7086"
+        return (f"<span foreground='{dot_color}'>●</span>  "
+                f"<span size='small' foreground='#8c8c8c'>{online}/{len(others)}</span>  "
+                f"<b>{esc(thread['screen'])}</b>")
+    dot_color = "#a6e3a1" if thread["online"] else ("#fab387" if thread["away"] else "#6c7086")
+    return f"<span foreground='{dot_color}'>●</span>  <b>{esc(thread['screen'])}</b>"
+
+
+def _room_header_markup(thread, self_node):
+    dots = _room_dots_markup(thread.get("members", {}), thread.get("presence_by_node", {}), self_node)
+    others = [n for n in thread.get("members", {}) if n != self_node]
+    pb = thread.get("presence_by_node", {})
+    online = sum(1 for n in others if pb.get(n, {}).get("online"))
+    return (f"<big><b>{GLib.markup_escape_text(thread['screen'])}</b></big>  {dots}  "
+            f"<span size='small' foreground='#8c8c8c'>{online}/{len(others)} online</span>")
+
+
 def run_async(fn, on_done=None, on_error=None):
     def worker():
         try:
@@ -514,6 +539,13 @@ class MessagesView(Gtk.Box):
         self.clear_btn.get_style_context().add_class("muted")
         self.clear_btn.connect("clicked", self.on_clear_history)
         header_box.pack_end(self.clear_btn, False, False, 0)
+        self.delete_btn = Gtk.Button(label="Delete room…")
+        self.delete_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self.delete_btn.set_valign(Gtk.Align.START)
+        self.delete_btn.get_style_context().add_class("muted")
+        self.delete_btn.set_no_show_all(True)
+        self.delete_btn.connect("clicked", self.on_delete_room)
+        header_box.pack_end(self.delete_btn, False, False, 0)
         conversation_box.pack_start(header_box, False, False, 0)
         conversation_box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
 
@@ -683,20 +715,17 @@ class MessagesView(Gtk.Box):
                         pass
                 thread["away"] = away
             self.update_thread_row(conv)
+        sel = self.selected
+        if sel is not None and sel.get("is_room"):
+            self.conversation_header.set_markup(_room_header_markup(sel, self.app.session.self_node))
 
     def append_thread_row(self, node, thread):
         row = Gtk.ListBoxRow()
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         box.set_border_width(10)
 
-        if thread.get("is_room"):
-            initial = _room_dots_markup(thread["members"], thread.get("presence_by_node", {}),
-                                        self.app.session.self_node)
-        else:
-            dot_color = "#a6e3a1" if thread["online"] else ("#fab387" if thread["away"] else "#6c7086")
-            initial = f"<span foreground='{dot_color}'>●</span>"
         title = Gtk.Label()
-        title.set_markup(f"{initial}  <b>{GLib.markup_escape_text(thread['screen'])}</b>")
+        title.set_markup(_sidebar_title_markup(thread, self.app.session.self_node))
         title.set_xalign(0.0)
         title.set_ellipsize(Pango.EllipsizeMode.END)
         title.set_use_markup(True)
@@ -734,14 +763,7 @@ class MessagesView(Gtk.Box):
         if not thread or "row" not in thread:
             return
         w = thread["widgets"]
-        if thread.get("is_room"):
-            dots = _room_dots_markup(thread["members"], thread.get("presence_by_node", {}),
-                                     self.app.session.self_node)
-            w["title"].set_markup(f"{dots}  <b>{GLib.markup_escape_text(thread['screen'])}</b>")
-        else:
-            dot_color = "#a6e3a1" if thread["online"] else ("#fab387" if thread["away"] else "#6c7086")
-            w["title"].set_markup(
-                f"<span foreground='{dot_color}'>●</span>  <b>{GLib.markup_escape_text(thread['screen'])}</b>")
+        w["title"].set_markup(_sidebar_title_markup(thread, self.app.session.self_node))
         w["subtitle"].set_text(thread["away"] if thread["away"] else thread["preview"])
         if thread["unread"] > 0 and not w["badge"]:
             badge = Gtk.Label()
@@ -760,6 +782,7 @@ class MessagesView(Gtk.Box):
         if row is None:
             self.stack.set_visible_child_name("placeholder")
             self.selected = None
+            self.delete_btn.hide()
             return
         conv = next((c for c, t in self.threads.items() if t.get("row") is row), None)
         if conv is None:
@@ -770,10 +793,10 @@ class MessagesView(Gtk.Box):
         self.update_thread_row(conv)
 
         if thread.get("is_room"):
-            self.conversation_header.set_markup(
-                f"<big><b>{GLib.markup_escape_text(thread['screen'])}</b></big>"
-                f"  <span size='small' foreground='#8c8c8c'>room</span>")
+            self.conversation_header.set_markup(_room_header_markup(thread, self.app.session.self_node))
+            self.delete_btn.show()
         else:
+            self.delete_btn.hide()
             self.conversation_header.set_markup(
                 f"<big><b>{GLib.markup_escape_text(thread['screen'])}</b></big>"
                 f"  <span size='small' foreground='#8c8c8c'>{conv[:16]}…</span>")
@@ -915,6 +938,36 @@ class MessagesView(Gtk.Box):
         resp = dlg.run()
         dlg.destroy()
         return resp == Gtk.ResponseType.OK
+
+    def _confirm_delete(self, title):
+        dlg = Gtk.MessageDialog(transient_for=self.get_toplevel(), modal=True,
+                                message_type=Gtk.MessageType.WARNING,
+                                text=f"Delete the room {title}?",
+                                buttons=Gtk.ButtonsType.OK_CANCEL)
+        dlg.format_secondary_text(
+            "Messages are removed from this device. The room will reappear "
+            "if someone sends to it again.")
+        dlg.set_default_response(Gtk.ResponseType.CANCEL)
+        resp = dlg.run()
+        dlg.destroy()
+        return resp == Gtk.ResponseType.OK
+
+    def on_delete_room(self, *_):
+        thread = self.selected
+        if thread is None or not thread.get("is_room"):
+            return
+        if not self._confirm_delete(thread["screen"]):
+            return
+        conv = thread["conv"]
+        self.app.session.cache.remove_conversation(conv)
+        gone = self.threads.pop(conv, None)
+        if gone and "row" in gone:
+            gone["row"].destroy()
+        if self.selected is thread:
+            self.selected = None
+            self.stack.set_visible_child_name("placeholder")
+            self.delete_btn.hide()
+        self.app.activity.log(f"deleted room {thread['screen']}")
 
     def on_clear_history(self, *_):
         if self.selected is None:

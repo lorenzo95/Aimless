@@ -1,3 +1,4 @@
+import re
 import time
 
 import pytest
@@ -595,3 +596,90 @@ def test_room_dots_markup():
     assert (greens, oranges, grays) == (1, 1, 1), markup
     # self is excluded
     assert _room_dots_markup({"me": {"screen": "Me"}}, {}, exclude="me") == ""
+
+
+def test_sidebar_room_markup_uses_count():
+    from aimless.gtkui import _sidebar_title_markup
+    members = {f"n{i}": {"node": f"n{i}", "pubkey": "pk", "screen": f"P{i}"} for i in range(10)}
+    members["me"] = {"node": "me", "pubkey": "pk", "screen": "Me"}
+    thread = {"is_room": True, "screen": "P0, P1 +8", "members": members, "online": True, "away": None,
+              "presence_by_node": {f"n{i}": {"online": True, "away": None} for i in range(6)}}
+    markup = _sidebar_title_markup(thread, "me")
+    assert markup.count("●") == 1, "sidebar must show ONE dot at any room size"
+    assert "6/10" in markup
+
+    dm = {"is_room": False, "screen": "Bob", "online": True, "away": None}
+    dm_markup = _sidebar_title_markup(dm, "me")
+    assert dm_markup.count("●") == 1
+    assert not re.search(r"\d/\d", dm_markup), "DM rows must not show a count"
+
+    dead = dict(thread, online=False,
+                presence_by_node={f"n{i}": {"online": False, "away": None} for i in range(10)})
+    assert "0/10" in _sidebar_title_markup(dead, "me")
+
+
+def test_room_header_markup_and_live_update(gtk_app):
+    from aimless.gtkui import _room_header_markup
+    app = gtk_app
+    win = app["win"]
+    b_node = app["b_node"]
+
+    chosen = [{"node": b_node, "pubkey": app["bob"].pubkey_hex, "screen": "Bob"},
+              {"node": "cd" * 32, "pubkey": "aa" * 32, "screen": "Carol"}]
+    win.messages.create_room(chosen)
+    conv = next(k for k, t in win.messages.threads.items() if t.get("is_room"))
+    win.messages.thread_list.select_row(win.messages.threads[conv]["row"])
+
+    # live update path: presence poll re-renders the header without a reselect.
+    # carol's away arrives as a sealed status payload (what the daemon actually carries)
+    carol_identity = crypto.new_identity()
+    carol_away = protocol.seal_status(carol_identity, app["session"].client.pubkey_hex,
+                                      "Carol", "gone", int(time.time() * 1000))
+    win.messages.refresh_presence({b_node: {"online": True},
+                                   "cd" * 32: {"online": False, "status_payload": carol_away}})
+    header = win.messages.conversation_header.get_label()
+    assert header.count("●") == 2, "header shows one dot per member"
+    assert "#a6e3a1" in header and "#fab387" in header, "away member is orange"
+    assert "1/2 online" in header
+
+    win.messages.refresh_presence({b_node: {"online": False}, "cd" * 32: {"online": False}})
+    assert "0/2 online" in win.messages.conversation_header.get_label()
+
+    # DM selection hides the delete button
+    win.messages.thread_list.select_row(win.messages.threads[b_node]["row"])
+    assert not win.messages.delete_btn.get_visible()
+
+
+def test_delete_room_and_reappear(gtk_app, monkeypatch):
+    app = gtk_app
+    win = app["win"]
+    bob = app["bob"]
+    a_node = app["a_node"]
+    b_node = app["b_node"]
+
+    carol_key = crypto.new_identity()
+    chosen = [{"node": b_node, "pubkey": bob.pubkey_hex, "screen": "Bob"},
+              {"node": "cd" * 32, "pubkey": bytes(carol_key.verify_key).hex(), "screen": "Carol"}]
+    win.messages.create_room(chosen)
+    conv = next(k for k, t in win.messages.threads.items() if t.get("is_room"))
+    thread = win.messages.threads[conv]
+    win.messages.thread_list.select_row(thread["row"])
+    assert win.messages.delete_btn.get_visible(), "delete button must show for rooms"
+
+    monkeypatch.setattr(win.messages, "_confirm_delete", lambda t: True)
+    win.messages.on_delete_room()
+
+    assert conv not in win.messages.threads
+    assert win.session.cache.rooms() == []
+    assert not win.messages.delete_btn.get_visible()
+
+    # a member messaging the room brings it back, with the message routed in
+    members = [{"node": a_node, "pubkey": app["session"].client.pubkey_hex, "screen": "Alice"},
+               {"node": b_node, "pubkey": bob.pubkey_hex, "screen": "Bob"},
+               {"node": "cd" * 32, "pubkey": bytes(carol_key.verify_key).hex(), "screen": "Carol"}]
+    bob.send_room(members, conv, "room is back", int(time.time() * 1000))
+
+    def room_back():
+        return conv in win.messages.threads and \
+            [m["text"] for m in win.session.cache.msgs(conv)] == ["room is back"]
+    assert _pump(win, room_back, timeout=30), "deleted room did not reappear on new message"
