@@ -4,7 +4,7 @@ import pytest
 
 gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk
+from gi.repository import Gtk, Gdk
 
 import test_e2e
 from test_e2e import two_nodes  # noqa: F401
@@ -42,9 +42,7 @@ def gtk_app(tmp_path, monkeypatch, two_nodes):
     monkeypatch.setenv("AIMLESS_HOME", str(home))
     monkeypatch.setenv("AIMLESS_SOCK", sock_a)
     monkeypatch.setattr(gtkui, "CONFIG_DIR", str(config))
-    monkeypatch.setattr(gtkui, "GUI_PID_FILE", str(config / "gui.pid"))
-    monkeypatch.setattr(gtkui, "SESSION_FILE", str(config / "session.json"))
-    monkeypatch.setattr(gtkui, "TRAY_PID_FILE", str(config / "tray.pid"))
+    monkeypatch.setattr(gtkui, "APP_PID_FILE", str(config / "app.pid"))
     monkeypatch.setattr(gtkui, "AIMLESSD_PID_FILE", str(config / "aimlessd.pid"))
 
     alice_identity = crypto.new_identity()
@@ -302,3 +300,28 @@ def test_gui_full_stack_real_poll_and_click(gtk_app):
         assert delivered(), "message never landed via real presence path"
     finally:
         win.poll_status = orig
+
+
+def test_close_hides_to_tray_and_window_survives(gtk_app):
+    win = gtk_app["win"]
+
+    class _StubTray:
+        have_tray = True
+
+    class _StubApp:
+        tray = _StubTray()
+
+        @staticmethod
+        def log(msg):
+            pass
+
+    win.app_ref = _StubApp()
+    stopped = win.emit("delete-event", Gdk.Event())
+    assert stopped is True, "delete-event should be swallowed when a tray icon exists"
+    assert not win.get_visible(), "window should hide instead of closing"
+
+    win.deiconify()
+    win.present()
+    assert win.get_visible(), "window should come back"
+
+    win.app_ref = None

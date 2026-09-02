@@ -1,5 +1,4 @@
 import os
-import sys
 
 import pytest
 
@@ -79,37 +78,51 @@ def test_corrupt_cache_session_recovery(tmp_path, monkeypatch):
     assert os.path.exists(str(cache) + ".bad")
 
 
-def test_tray_template_compiles(tmp_path):
-    import py_compile, tempfile
-    code = gtkui.TRAY_SCRIPT_TEMPLATE.format(
-        pid_file=str(tmp_path / "tray.pid"),
-        pyz_path="/fake/aimless.pyz",
-        ui_cmd=[sys.executable, "/fake/aimless.pyz", "gui"],
-        log_file=str(tmp_path / "tray.log"),
-        icon_name="user-available-symbolic",
-    )
-    f = tmp_path / "tray_code.py"
-    f.write_text(code)
-    py_compile.compile(str(f), doraise=True)
+def test_app_lock_single_instance(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    config.mkdir()
+    monkeypatch.setattr(gtkui, "CONFIG_DIR", str(config))
+    monkeypatch.setattr(gtkui, "APP_PID_FILE", str(config / "app.pid"))
+
+    fh, holder = gtkui.acquire_app_lock()
+    assert fh is not None and holder is None
+    assert open(gtkui.APP_PID_FILE).read() == str(os.getpid())
+
+    fh2, holder2 = gtkui.acquire_app_lock()
+    assert fh2 is None and holder2 == os.getpid()
+
+    fh.close()
+    fh3, holder3 = gtkui.acquire_app_lock()
+    assert fh3 is not None and holder3 is None
+    fh3.close()
 
 
-def test_tray_script_runs_and_logs(tmp_path):
-    import subprocess, sys, time
-    log = tmp_path / "tray.log"
-    code = gtkui.TRAY_SCRIPT_TEMPLATE.format(
-        pid_file=str(tmp_path / "tray.pid"),
-        pyz_path=os.getcwd(),
-        ui_cmd=[sys.executable, "-c", "pass"],
-        log_file=str(log),
-        icon_name="user-available-symbolic",
-    )
-    p = subprocess.Popen([sys.executable, "-c", code],
-                         stderr=subprocess.PIPE, text=True)
-    time.sleep(4)
-    if p.poll() is not None:
-        err = p.stderr.read()
-        raise AssertionError(f"tray script exited early: {err}")
-    p.terminate()
-    p.wait()
-    assert log.exists(), "tray never wrote its log (died before _log)"
-    assert "tray started" in log.read_text()
+def test_app_restarts_dead_daemon(tmp_path, monkeypatch):
+    import time
+    from aimless.daemon import DaemonClient
+
+    home = tmp_path / "home"
+    home.mkdir()
+    config = tmp_path / "config"
+    config.mkdir()
+    monkeypatch.setenv("AIMLESS_HOME", str(home))
+    monkeypatch.setenv("AIMLESS_SOCK", str(home / "api.sock"))
+    monkeypatch.setattr(gtkui, "CONFIG_DIR", str(config))
+
+    app = gtkui.AimlessApp()
+    app.supervisor.ensure()
+    assert app.supervisor.is_running()
+
+    who = DaemonClient(str(home / "api.sock")).request("whoami", timeout=5)
+    os.kill(int(who["pid"]), 9)
+    deadline = time.time() + 10
+    while time.time() < deadline and app.supervisor.is_running():
+        time.sleep(0.1)
+    assert not app.supervisor.is_running(), "killed daemon still looks alive"
+
+    app.poll()
+    deadline = time.time() + 30
+    while time.time() < deadline and not app.supervisor.is_running():
+        time.sleep(0.2)
+    assert app.supervisor.is_running(), "poll did not restart the daemon"
+    app.supervisor.stop()

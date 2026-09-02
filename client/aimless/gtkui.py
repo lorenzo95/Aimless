@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """gtkui.py — aimless GTK desktop app.
 
+One process: messages window + tray icon + the aimlessd daemon.
+
 Modes:
-  aimless gui        messages window (manages the aimlessd daemon for you)
-  aimless tray       tray daemon: supervises aimlessd, lives in the notification area
-  aimless autostart  install autostart entry for `aimless tray`
+  aimless            everything: tray icon, daemon, messages window
+  aimless tray       starts hidden — tray icon only, window opens on first click (autostart)
+  aimless gui        same as running aimless with no arguments
+  aimless autostart  install login autostart entry for `aimless tray`
 """
 
 import json
@@ -31,13 +34,10 @@ from . import __version__ as client_version
 
 APP_NAME = "AIMless"
 CONFIG_DIR = os.environ.get("AIMLESS_CONFIG") or os.path.expanduser("~/.config/aimless")
-TRAY_PID_FILE = os.path.join(CONFIG_DIR, "tray.pid")
+APP_PID_FILE = os.path.join(CONFIG_DIR, "app.pid")
 AIMLESSD_PID_FILE = os.path.join(CONFIG_DIR, "aimlessd.pid")
-GUI_PID_FILE = os.path.join(CONFIG_DIR, "gui.pid")
-SESSION_FILE = os.path.join(CONFIG_DIR, "session.json")
 def prefs_file():
     return os.path.join(CONFIG_DIR, "gtk.json")
-UI_CMD = [sys.executable, "-m", "aimless.cli", "gui"]
 
 
 def data_dir():
@@ -347,8 +347,7 @@ class DaemonSupervisor:
         if pid is None and self.child:
             pid = self.child.pid
         if pid is None:
-            info = daemon_proc_info()
-            pid = info[0] if info else None
+            pid = daemon_pid_from_procs()
         if pid:
             try:
                 os.kill(pid, signal.SIGTERM)
@@ -991,10 +990,11 @@ class ActivityView(Gtk.Box):
 
 
 class AimlessWindow(Gtk.Window):
-    def __init__(self, session, supervisor):
+    def __init__(self, session, supervisor, app_ref=None):
         super().__init__(title=APP_NAME)
         self.session = session
         self.supervisor = supervisor
+        self.app_ref = app_ref
         self.get_style_context().add_class("aimless-window")
         self.set_default_icon_name(first_icon("user-available-symbolic", "phone", "applications-internet"))
         self.prefs = load_prefs()
@@ -1223,12 +1223,17 @@ class AimlessWindow(Gtk.Window):
 
     def on_delete(self, *_):
         self.save_geometry()
+        if self.app_ref is not None and self.app_ref.tray is not None and self.app_ref.tray.have_tray:
+            self.hide()
+            return True
         return False
 
     def on_destroy(self, *_):
         self.save_geometry()
-        remove_gui_pid()
-        Gtk.main_quit()
+        if self.app_ref is not None:
+            self.app_ref.quit()
+        else:
+            Gtk.main_quit()
 
     def save_geometry(self):
         w, h = self.get_size()
@@ -1240,6 +1245,7 @@ class AimlessWindow(Gtk.Window):
 def ask_passphrase(parent):
     dlg = Gtk.Dialog(title="AIMless — passphrase", transient_for=parent, modal=True)
     dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Unlock", Gtk.ResponseType.OK)
+    dlg.set_default_response(Gtk.ResponseType.OK)
     dlg.set_default_size(360, 100)
     box = dlg.get_content_area()
     box.set_spacing(8)
@@ -1259,12 +1265,13 @@ def ask_passphrase(parent):
 def ask_text(parent, title, label):
     dlg = Gtk.Dialog(title=title, transient_for=parent, modal=True)
     dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "OK", Gtk.ResponseType.OK)
+    dlg.set_default_response(Gtk.ResponseType.OK)
     dlg.set_default_size(420, 100)
     box = dlg.get_content_area()
     box.set_spacing(8)
     box.set_border_width(10)
     box.add(Gtk.Label(label=label))
-    entry = Gtk.Entry()
+    entry = Gtk.Entry(activates_default=True)
     box.add(entry)
     dlg.show_all()
     resp = dlg.run()
@@ -1295,79 +1302,265 @@ def _make_thread_hook(gui_log):
     return hook
 
 
-def run_app():
-    gui_log = logging.log_fn(gui_log_path())
-    sys.excepthook = _make_excepthook(gui_log)
-    threading.excepthook = _make_thread_hook(gui_log)
+def app_log_path():
+    return os.path.join(CONFIG_DIR, "app.log")
 
-    provider = Gtk.CssProvider()
-    provider.load_from_data(CSS.encode())
-    Gtk.StyleContext.add_provider_for_screen(
-        Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
-    supervisor = DaemonSupervisor()
+def pid_alive(pid):
     try:
-        supervisor.ensure()
-    except RuntimeError as e:
-        err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE, text=str(e))
-        err.run()
-        err.destroy()
-        return 1
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
-    session = None
-    passphrase = read_valid_session()
-    if passphrase:
+
+def acquire_app_lock():
+    """Single-instance guard. Returns (fh, None) when the lock was taken — hold the file
+    handle for the process lifetime — or (None, holder_pid) when another instance runs."""
+    import fcntl
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        fh = open(APP_PID_FILE, "a+")
+    except OSError:
+        return None, -1
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None, read_pid(APP_PID_FILE) or -1
+    fh.seek(0)
+    fh.truncate()
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh, None
+
+
+class TrayIcon:
+    def __init__(self, app):
+        self.app = app
+        self.have_tray = False
+        self.menu = Gtk.Menu()
+        mi_open = Gtk.MenuItem(label="Open AIMless")
+        mi_open.connect("activate", self.on_open)
+        self.menu.append(mi_open)
+        self.menu.append(Gtk.SeparatorMenuItem())
+        mi_quit = Gtk.MenuItem(label="Quit — shuts down AIMless")
+        mi_quit.connect("activate", self.on_quit)
+        self.menu.append(mi_quit)
+        self.menu.show_all()
         try:
-            session = Session(passphrase)
-        except ValueError:
-            passphrase = None
-        except OSError as e:
-            session = None
-            gui_log(f"daemon unreachable during unlock ({e}) — retrying")
-    if not passphrase:
-        for attempt in range(3):
-            passphrase = ask_passphrase(None)
-            if not passphrase:
-                return 1
-            try:
-                session = Session(passphrase)
-                write_session(passphrase)
-                break
-            except ValueError:
-                err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.OK,
-                                        text="wrong passphrase or corrupted identity — try again")
-                err.run()
-                err.destroy()
-            except OSError as e:
-                err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE,
-                                        text=f"daemon not reachable: {e}\nretry after starting aimless")
-                err.run()
-                err.destroy()
-                return 1
-        else:
+            self.icon = Gtk.StatusIcon()
+            self.icon.set_from_icon_name(first_icon("user-available-symbolic", "phone"))
+            self.icon.set_title(APP_NAME)
+            self.icon.set_tooltip_text(f"{APP_NAME} — running\nLeft-click to open Messages")
+            self.icon.connect("activate", self.on_open)
+            self.icon.connect("popup-menu", self.on_popup)
+            self.icon.set_visible(True)
+            self.have_tray = True
+        except Exception as e:
+            app.log(f"tray icon unavailable ({e!r}) — running as a plain window app")
+
+    def on_open(self, *_):
+        try:
+            self.app.open_window()
+        except Exception as e:
+            self.app.log(f"open failed: {e!r}")
+
+    def on_quit(self, *_):
+        try:
+            self.app.quit()
+        except Exception as e:
+            self.app.log(f"shutdown error: {e!r}")
+
+    def on_popup(self, icon, button, t):
+        self.menu.popup(None, None, Gtk.StatusIcon.position_menu, icon, button, t)
+
+
+class AimlessApp:
+    """One process: messages window + tray icon + the aimlessd daemon."""
+
+    def __init__(self):
+        self.log = logging.log_fn(app_log_path())
+        self.supervisor = DaemonSupervisor()
+        self.session = None
+        self.passphrase = None
+        self.window = None
+        self.tray = None
+        self.lock_fh = None
+        self.quitting = False
+        self._unlocking = False
+
+    def start(self, open_window):
+        rc = self._setup(open_window)
+        if rc is not None:
+            return rc
+        Gtk.main()
+        return 0
+
+    def _setup(self, open_window):
+        sys.excepthook = _make_excepthook(self.log)
+        threading.excepthook = _make_thread_hook(self.log)
+
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS.encode())
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        self.lock_fh, holder = acquire_app_lock()
+        if self.lock_fh is None:
+            self.log(f"another instance is running (pid {holder}) — presenting its window")
+            if holder and holder > 0:
+                try:
+                    os.kill(holder, signal.SIGUSR1)
+                except OSError:
+                    pass
+            return 0
+
+        try:
+            self.supervisor.ensure(log=self.log)
+        except RuntimeError as e:
+            err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE, text=str(e))
+            err.run()
+            err.destroy()
             return 1
 
-    if session.cache_recovered:
-        gui_log(f"cache recovery: {session.cache_recovered}")
+        self.tray = TrayIcon(self)
+        if open_window or not self.tray.have_tray:
+            self.open_window()
 
-    win = AimlessWindow(session, supervisor)
-    write_gui_pid()
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, self.on_open_signal)
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, self.quit)
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, self.quit)
+        GLib.timeout_add_seconds(5, self.poll)
+        self.log(f"app started (pid {os.getpid()}, tray={self.tray.have_tray})")
+        return None
 
-    def _focus(*_):
-        win.deiconify()
-        win.present()
+    def on_open_signal(self, *_):
+        self.open_window()
         return GLib.SOURCE_REMOVE
 
-    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, _focus)
-    win.show_all()
-    Gtk.main()
-    return 0
+    def open_window(self):
+        if self.window:
+            self.window.deiconify()
+            self.window.present()
+            return
+        if self._unlocking:
+            return
+        self._unlocking = True
+        try:
+            self._open_window_unlocked()
+        finally:
+            self._unlocking = False
+
+    def _open_window_unlocked(self):
+        session = None
+        passphrase = self.passphrase
+        if passphrase:
+            try:
+                session = Session(passphrase)
+            except ValueError:
+                passphrase = None
+            except OSError as e:
+                session = None
+                self.log(f"daemon unreachable during unlock ({e}) — retrying")
+        if not passphrase:
+            for _attempt in range(3):
+                passphrase = ask_passphrase(None)
+                if not passphrase:
+                    return
+                try:
+                    session = Session(passphrase)
+                    break
+                except ValueError:
+                    err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.OK,
+                                            text="wrong passphrase or corrupted identity — try again")
+                    err.run()
+                    err.destroy()
+                except OSError as e:
+                    err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE,
+                                            text=f"daemon not reachable: {e}\nretry after starting aimless")
+                    err.run()
+                    err.destroy()
+                    return
+            else:
+                return
+        self.passphrase = passphrase
+        if session.cache_recovered:
+            self.log(f"cache recovery: {session.cache_recovered}")
+        self.session = session
+        self.window = AimlessWindow(session, self.supervisor, app_ref=self)
+        self.window.show_all()
+
+    def poll(self):
+        if not self.quitting and not self.supervisor.is_running():
+            self.log("aimlessd died — restarting")
+            try:
+                self.supervisor.ensure(log=self.log)
+            except RuntimeError as e:
+                self.log(f"restart failed: {e}")
+                return GLib.SOURCE_CONTINUE
+            self.rewatch()
+        return GLib.SOURCE_CONTINUE
+
+    def rewatch(self):
+        if not self.session:
+            return
+        contacts = list(self.session.contacts().values())
+
+        def worker():
+            for info in contacts:
+                try:
+                    self.session.client.add_contact(info["node"])
+                except Exception:
+                    pass
+
+        run_async(worker)
+
+    def quit(self, *_):
+        if self.quitting:
+            return GLib.SOURCE_REMOVE
+        self.quitting = True
+        self.log("shutting down — stopping aimlessd")
+        if self.window:
+            try:
+                self.window.save_geometry()
+            except Exception:
+                pass
+        try:
+            self.supervisor.stop()
+        except Exception:
+            pass
+        if self.lock_fh:
+            try:
+                self.lock_fh.close()
+            except Exception:
+                pass
+        try:
+            os.remove(APP_PID_FILE)
+        except OSError:
+            pass
+        Gtk.main_quit()
+        return GLib.SOURCE_REMOVE
 
 
-def daemon_proc_info():
-    """(pid, proc-start-tick) of the aimlessd serving our datadir, or None."""
+def run_app(open_window=True):
+    app = AimlessApp()
+    return app.start(open_window=open_window)
+
+def daemon_pid_from_socket():
+    try:
+        d = DaemonClient(sock_path())
+        who = d.request("whoami", timeout=3)
+        d.close()
+        return int(who.get("pid", 0)) or None
+    except Exception:
+        return None
+
+
+def daemon_pid_from_procs():
+    """Last-resort stop() fallback: an aimlessd process using our datadir
+    (covers daemons still booting, whose API socket is not up yet)."""
     target = data_dir()
-    pids = []
     try:
         for entry in os.listdir("/proc"):
             if not entry.isdigit():
@@ -1381,120 +1574,13 @@ def daemon_proc_info():
             if not name.startswith("aimlessd"):
                 continue
             if "-datadir" in cmdline:
-                if target not in cmdline:
-                    continue
-            elif target != os.path.expanduser("~/.local/share/aimless"):
-                continue
-            pids.append(int(entry))
+                if target in cmdline:
+                    return int(entry)
+            elif target == os.path.expanduser("~/.local/share/aimless"):
+                return int(entry)
     except Exception:
-        return None
-    if not pids:
-        return None
-    for pid in pids:
-        try:
-            with open(f"/proc/{pid}/stat") as f:
-                fields = f.read().rsplit(")", 1)[1].split()
-            return pid, fields[19]
-        except Exception:
-            continue
+        pass
     return None
-
-
-def daemon_pid_from_socket():
-    try:
-        d = DaemonClient(sock_path())
-        who = d.request("whoami", timeout=3)
-        d.close()
-        return int(who.get("pid", 0)) or None
-    except Exception:
-        return None
-
-
-def write_session(passphrase):
-    info = daemon_proc_info()
-    if not info:
-        return
-    try:
-        os.makedirs(CONFIG_DIR, exist_ok=True)
-        data = json.dumps({"pid": info[0], "start": info[1], "passphrase": passphrase})
-        fd = os.open(SESSION_FILE + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(data)
-        os.replace(SESSION_FILE + ".tmp", SESSION_FILE)
-    except Exception:
-        pass
-
-
-def read_valid_session():
-    """Returns the cached passphrase only if the same daemon instance is still running."""
-    try:
-        with open(SESSION_FILE) as f:
-            data = json.load(f)
-    except Exception:
-        return None
-    info = daemon_proc_info()
-    if info and info[0] == data.get("pid") and info[1] == data.get("start"):
-        return data.get("passphrase")
-    return None
-
-
-def clear_session():
-    try:
-        os.remove(SESSION_FILE)
-    except OSError:
-        pass
-
-
-def write_gui_pid():
-    try:
-        os.makedirs(CONFIG_DIR, exist_ok=True)
-        with open(GUI_PID_FILE, "w") as f:
-            f.write(str(os.getpid()))
-    except Exception:
-        pass
-
-
-def remove_gui_pid():
-    try:
-        with open(GUI_PID_FILE) as f:
-            if int(f.read().strip()) == os.getpid():
-                os.remove(GUI_PID_FILE)
-    except Exception:
-        pass
-
-
-def gui_pid_alive():
-    pid = read_pid(GUI_PID_FILE)
-    if not pid:
-        return None
-    try:
-        os.kill(pid, 0)
-        return pid
-    except OSError:
-        return None
-
-
-def gui_log_path():
-    return os.path.join(CONFIG_DIR, "gui.log")
-
-
-def focus_or_launch_gui(ui_cmd=None):
-    if ui_cmd is None:
-        ui_cmd = UI_CMD
-    pid = gui_pid_alive()
-    if pid:
-        try:
-            os.kill(pid, signal.SIGUSR1)
-            return
-        except OSError:
-            pass
-    try:
-        os.makedirs(CONFIG_DIR, exist_ok=True)
-        log_fh = open(gui_log_path(), "a")
-    except Exception:
-        log_fh = subprocess.DEVNULL
-    subprocess.Popen(ui_cmd, start_new_session=True,
-                     stdout=log_fh, stderr=log_fh)
 
 
 def read_pid(path):
@@ -1505,265 +1591,6 @@ def read_pid(path):
         return None
 
 
-def tray_alive():
-    import fcntl
-    try:
-        os.makedirs(CONFIG_DIR, exist_ok=True)
-        fh = open(TRAY_PID_FILE, "a+")
-        try:
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return None
-        except OSError:
-            try:
-                with open(TRAY_PID_FILE) as f:
-                    return int(f.read().strip())
-            except Exception:
-                return -1
-        finally:
-            fh.close()
-    except Exception:
-        return None
-
-
-TRAY_SCRIPT_TEMPLATE = r"""
-import gi, sys, os, signal, subprocess, time, traceback, threading
-gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, GLib
-
-pid_file  = {pid_file!r}
-ui_cmd    = {ui_cmd!r}
-pyz_path  = {pyz_path!r}
-log_file  = {log_file!r}
-
-def _log(msg):
-    try:
-        with open(log_file, 'a') as f:
-            f.write('[%s] %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), msg))
-    except Exception:
-        pass
-
-def _excepthook(et, ev, tb):
-    _log('uncaught: ' + ''.join(traceback.format_exception(et, ev, tb)))
-sys.excepthook = _excepthook
-def _thread_hook(args):
-    _log('thread crash: ' + ''.join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
-threading.excepthook = _thread_hook
-
-if pyz_path:
-    sys.path.insert(0, pyz_path)
-from aimless.gtkui import focus_or_launch_gui, quit_everything
-
-def open_ui(*_):
-    try:
-        focus_or_launch_gui(ui_cmd)
-        _log('open requested')
-    except Exception as e:
-        _log('open failed: %r' % e)
-
-def on_activate(icon, *_):
-    open_ui()
-
-def on_popup(icon, button, t):
-    menu.popup(None, None, Gtk.StatusIcon.position_menu, icon, button, t)
-
-menu = Gtk.Menu()
-mi_open = Gtk.MenuItem(label='Open AIMless')
-mi_open.connect('activate', open_ui)
-menu.append(mi_open)
-menu.append(Gtk.SeparatorMenuItem())
-mi_quit = Gtk.MenuItem(label='Quit — shuts down AIMless')
-def _quit(*_):
-    _log('quit: shutting down gui + daemon')
-    try:
-        quit_everything()
-    except Exception as e:
-        _log('shutdown error: %r' % e)
-    Gtk.main_quit()
-mi_quit.connect('activate', _quit)
-menu.append(mi_quit)
-menu.show_all()
-
-try:
-    icon = Gtk.StatusIcon()
-    icon.set_from_icon_name({icon_name!r})
-    icon.set_title('AIMless')
-    icon.set_tooltip_text('AIMless — running\\nLeft-click to open Messages')
-    icon.connect('activate', on_activate)
-    icon.connect('popup-menu', on_popup)
-    icon.set_visible(True)
-except Exception as e:
-    _log('icon failed: %r' % e)
-    sys.exit(1)
-
-sup_pid = None
-try:
-    with open(pid_file) as f:
-        sup_pid = int(f.read().strip())
-except Exception:
-    pass
-misses = 0
-
-def _heartbeat():
-    global misses
-    if sup_pid is None:
-        _log('no supervisor pid — exiting')
-        Gtk.main_quit()
-        return False
-    try:
-        os.kill(sup_pid, 0)
-        misses = 0
-        return True
-    except OSError:
-        misses += 1
-    _log('heartbeat: supervisor not responding (%d)' % misses)
-    if misses >= 2:
-        _log('supervisor confirmed dead — tray exiting')
-        Gtk.main_quit()
-        return False
-    return True
-GLib.timeout_add_seconds(10, _heartbeat)
-
-def _selfcheck():
-    _log('tray alive')
-    if not icon.get_visible():
-        _log('warning: icon not visible')
-    return True
-GLib.timeout_add_seconds(300, _selfcheck)
-
-_log('tray started (supervisor pid %s)' % sup_pid)
-try:
-    Gtk.main()
-except Exception:
-    _log('mainloop crashed: ' + traceback.format_exc())
-"""
-
-
-def spawn_tray(pyz_path=None, ui_cmd=None):
-    if ui_cmd is None:
-        ui_cmd = UI_CMD
-    tray_log = os.path.join(CONFIG_DIR, "tray.log")
-    code = TRAY_SCRIPT_TEMPLATE.format(
-        pid_file=TRAY_PID_FILE,
-        pyz_path=pyz_path or "",
-        ui_cmd=ui_cmd,
-        log_file=tray_log,
-        icon_name=first_icon("user-available-symbolic", "phone"),
-    )
-    try:
-        return subprocess.Popen(
-            [sys.executable, "-c", code],
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception as e:
-        print(f"[aimless tray] unavailable: {e}")
-        return None
-
-
-
-def run_tray(open_gui=False):
-    import fcntl
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    sup_log = logging.log_fn(os.path.join(CONFIG_DIR, "supervisor.log"))
-
-    def say(s):
-        print(f"[aimless tray] {s}")
-        sup_log(s)
-
-    pid_fh = open(TRAY_PID_FILE, "a+")
-    try:
-        fcntl.flock(pid_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        pid = read_pid(TRAY_PID_FILE)
-        say(f"already running (pid {pid})")
-        if open_gui:
-            focus_or_launch_gui()
-        return 0
-    pid_fh.seek(0)
-    pid_fh.truncate()
-    pid_fh.write(str(os.getpid()))
-    pid_fh.flush()
-    say(f"PID {os.getpid()} — supervising aimlessd")
-
-    supervisor = DaemonSupervisor()
-    try:
-        supervisor.ensure(log=say)
-    except RuntimeError as e:
-        say(f"{e}")
-        return 1
-
-    script_path = os.path.abspath(sys.argv[0])
-    pyz_path = script_path if script_path.endswith(".pyz") else None
-    if pyz_path:
-        ui_cmd = [sys.executable, pyz_path, "gui"]
-    else:
-        ui_cmd = [sys.executable, "-m", "aimless.cli", "gui"]
-
-    tray_proc = spawn_tray(pyz_path=pyz_path, ui_cmd=ui_cmd)
-    if open_gui:
-        focus_or_launch_gui(ui_cmd=ui_cmd)
-    loop = GLib.MainLoop()
-    state = {"shutting_down": False}
-
-    def supervise():
-        nonlocal tray_proc
-        if state["shutting_down"]:
-            return GLib.SOURCE_REMOVE
-        if not supervisor.is_running():
-            say("aimlessd died — restarting (unlock required again)")
-            clear_session()
-            try:
-                supervisor.ensure(log=say)
-            except RuntimeError as e:
-                say(f"restart failed: {e}")
-        if tray_proc and tray_proc.poll() is not None:
-            say("tray icon subprocess died — respawning (see tray.log)")
-            tail = ""
-            try:
-                with open(os.path.join(CONFIG_DIR, "tray.log")) as f:
-                    tail = "".join(f.read().splitlines(True)[-3:])
-            except OSError:
-                pass
-            say("tray.log tail: " + tail.replace("\n", " | "))
-            tray_proc = spawn_tray(pyz_path=pyz_path, ui_cmd=ui_cmd)
-        return GLib.SOURCE_CONTINUE
-
-    def cleanup(*_):
-        state["shutting_down"] = True
-        say("shutting down — stopping aimlessd")
-        if tray_proc:
-            try:
-                tray_proc.terminate()
-            except Exception:
-                pass
-        gui_pid = gui_pid_alive()
-        if gui_pid:
-            try:
-                os.kill(gui_pid, signal.SIGTERM)
-            except OSError:
-                pass
-        clear_session()
-        try:
-            supervisor.stop()
-        except Exception:
-            pass
-        try:
-            pid_fh.close()
-        except Exception:
-            pass
-        try:
-            os.remove(TRAY_PID_FILE)
-        except OSError:
-            pass
-        loop.quit()
-        return GLib.SOURCE_REMOVE
-
-    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, cleanup)
-    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, cleanup)
-    GLib.timeout_add_seconds(5, supervise)
-    loop.run()
-    return 0
 
 
 def install_autostart():
@@ -1802,63 +1629,37 @@ def install_autostart():
     return desktop_path
 
 
-def quit_everything():
-    """Shut the whole stack down: supervisor CLI process, tray icon, GUI, daemon, unlock state."""
-    sup_pid = read_pid(TRAY_PID_FILE)
-    if sup_pid and sup_pid != os.getpid():
-        try:
-            os.kill(sup_pid, signal.SIGTERM)
-        except OSError:
-            pass
-        deadline = time.time() + 3
-        while time.time() < deadline and read_pid(TRAY_PID_FILE) == sup_pid:
-            time.sleep(0.1)
-    gui_pid = gui_pid_alive()
-    if gui_pid:
-        try:
-            os.kill(gui_pid, signal.SIGTERM)
-        except OSError:
-            pass
-    clear_session()
-    DaemonSupervisor().stop()
-    try:
-        os.remove(GUI_PID_FILE)
-    except OSError:
-        pass
-    try:
-        os.remove(TRAY_PID_FILE)
-    except OSError:
-        pass
-
-
 def stop_all():
     stopped = []
-    sup_pid = read_pid(TRAY_PID_FILE)
-    if sup_pid:
+    pid = read_pid(APP_PID_FILE)
+    if pid and pid != os.getpid() and pid_alive(pid):
         try:
-            os.kill(sup_pid, signal.SIGTERM)
-            stopped.append(f"tray supervisor (pid {sup_pid})")
+            os.kill(pid, signal.SIGTERM)
+            stopped.append(f"app (pid {pid})")
         except OSError:
             pass
-    try:
-        os.remove(TRAY_PID_FILE)
-    except OSError:
-        pass
+        deadline = time.time() + 10
+        while time.time() < deadline and pid_alive(pid):
+            time.sleep(0.1)
+    legacy_sup = read_pid(os.path.join(CONFIG_DIR, "tray.pid"))
+    if legacy_sup and legacy_sup != pid and pid_alive(legacy_sup):
+        try:
+            os.kill(legacy_sup, signal.SIGTERM)
+            stopped.append(f"tray supervisor (pid {legacy_sup})")
+        except OSError:
+            pass
+    for legacy in ("tray.pid", "gui.pid", "session.json"):
+        try:
+            os.remove(os.path.join(CONFIG_DIR, legacy))
+        except OSError:
+            pass
     supervisor = DaemonSupervisor()
     if supervisor.is_running():
         supervisor.stop()
         stopped.append("aimlessd")
-    gui_pid = gui_pid_alive()
-    if gui_pid:
-        try:
-            os.kill(gui_pid, signal.SIGTERM)
-            stopped.append(f"gui (pid {gui_pid})")
-        except OSError:
-            pass
     subprocess.run(["pkill", "-x", "aimlessd"], capture_output=True)
-    subprocess.run(["pkill", "-f", "aimless.cli tray"], capture_output=True)
     subprocess.run(["pkill", "-f", "aimless.cli gui"], capture_output=True)
-    clear_session()
+    subprocess.run(["pkill", "-f", "aimless.cli tray"], capture_output=True)
     return stopped
 
 
@@ -1866,10 +1667,8 @@ def main():
     args = sys.argv[1:]
     if "autostart" in args:
         print(install_autostart())
-    elif "tray" in args:
-        sys.exit(run_tray())
     else:
-        sys.exit(run_app())
+        sys.exit(run_app(open_window="tray" not in args))
 
 
 if __name__ == "__main__":

@@ -306,13 +306,14 @@ def cmd_gui(args):
         msg = (f"GUI unavailable: {e}\n{hint}\n"
                f"(also needs a display — check `echo $DISPLAY`; over ssh use ssh -X)")
         print(msg, file=sys.stderr)
+        config_dir = os.environ.get("AIMLESS_CONFIG") or os.path.expanduser("~/.config/aimless")
         try:
-            with open(os.path.join(client_dir(), "gui.log"), "a") as f:
+            with open(os.path.join(config_dir, "app.log"), "a") as f:
                 f.write(msg + "\n")
         except OSError:
             pass
         sys.exit(1)
-    gtkui.main()
+    sys.exit(gtkui.run_app(open_window=True))
 
 
 def cmd_tray(args):
@@ -321,7 +322,7 @@ def cmd_tray(args):
     except ImportError as e:
         print(f"GUI unavailable ({e}) — install the GTK stack: sudo apt install python3-gi", file=sys.stderr)
         sys.exit(1)
-    gtkui.run_tray()
+    sys.exit(gtkui.run_app(open_window=False))
 
 
 def cmd_autostart(args):
@@ -378,15 +379,15 @@ def main():
     p_away = sub.add_parser("away", help="set away message (no arg = back)")
     p_away.add_argument("message", nargs="*")
 
-    sub.add_parser("gui", help="open just the messages window (attaches to the running daemon)")
-    sub.add_parser("tray", help="run the tray daemon: supervises aimlessd, lives in the notification area")
+    sub.add_parser("gui", help="open the messages window (same as running aimless with no arguments)")
+    sub.add_parser("tray", help="start hidden in the notification area — window opens on first tray click (autostart)")
     sub.add_parser("autostart", help="install login autostart for the full `aimless` stack")
-    sub.add_parser("stop", help="shut down everything: tray, gui, daemon")
+    sub.add_parser("stop", help="shut down the app, tray icon and daemon")
 
     args = parser.parse_args()
     if args.command is None:
         from . import gtkui
-        sys.exit(gtkui.run_tray(open_gui=True))
+        sys.exit(gtkui.run_app(open_window=True))
     cmds = {
         "init": cmd_init,
         "invite": cmd_invite,
