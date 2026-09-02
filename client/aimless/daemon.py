@@ -168,7 +168,8 @@ class Client:
 
     def set_status(self, buddy_client_hex: str, buddy_node_hex: str, away) -> dict:
         from . import protocol
-        payload = protocol.seal_status(self.identity, buddy_client_hex, self.screen_name, away, ts=0)
+        payload = protocol.seal_status(
+            self.identity, buddy_client_hex, self.screen_name, away, ts=int(time.time() * 1000))
         return self.daemon.request("setstatus", to=buddy_node_hex, payload=payload)
 
     def history(self, buddy_node_hex: str, after_seq: int) -> list:

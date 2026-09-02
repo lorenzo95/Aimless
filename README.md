@@ -76,6 +76,8 @@ The Yggdrasil session layer already authenticates the sender's node key and encr
 - **STATUS** — `payload` is a sealed box containing the sender's screen name and away message, re-sent with every presence probe. The receiving daemon stores only the latest opaque blob per buddy.
 - **PROBE** — `payload` empty. Presence ping; answered by *any* packet, which is what flips the buddy to "online".
 
+Status is **announce-and-refresh, never stored**: the sender's app re-announces its current status on startup and every 60s, and the daemon re-sends the latest blob with each probe. That way every side converges from scratch within one probe cycle after any restart, and nobody but the sender ever holds their status. If someone's app is fully quit, they show offline — which is the truth. (Messages, by contrast, are durable store-and-forward.)
+
 ### Inside a MSG payload (decrypted by the recipient's client)
 
 ```json

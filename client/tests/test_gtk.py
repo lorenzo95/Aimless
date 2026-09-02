@@ -70,7 +70,7 @@ def gtk_app(tmp_path, monkeypatch, two_nodes):
     return {
         "win": win, "session": session, "supervisor": supervisor,
         "bob": bob, "bob_identity": bob_identity, "b_node": b_node, "a_node": a_node,
-        "home": home, "sock_b": sock_b,
+        "home": home, "sock_b": sock_b, "sock_a": sock_a, "dir_a": str(tmp_path / "nodeA"),
     }
 
 
@@ -325,3 +325,73 @@ def test_close_hides_to_tray_and_window_survives(gtk_app):
     assert win.get_visible(), "window should come back"
 
     win.app_ref = None
+
+
+def _bob_sees_away(app, expected):
+    """True when bob's presence snapshot shows alice with the expected away (None = available)."""
+    for p in app["bob"].presence():
+        if p["key"] != app["a_node"] or not p.get("status_payload"):
+            continue
+        st = protocol.open_status(app["bob_identity"], p["status_payload"])
+        if st.get("away") == expected:
+            return True
+    return False
+
+
+def test_window_creation_announces_current_status(gtk_app):
+    app = gtk_app
+    assert _pump(app["win"], lambda: _bob_sees_away(app, None), timeout=30), \
+        "window creation never announced the (available) status"
+
+
+def test_reassert_pushes_away_and_available(gtk_app):
+    app = gtk_app
+    win = app["win"]
+
+    win.set_away("brb — lunch")
+    assert _pump(win, lambda: _bob_sees_away(app, "brb — lunch"), timeout=30)
+
+    win.prefs["away"] = ""
+    win._reassert_status()
+    assert _pump(win, lambda: _bob_sees_away(app, None), timeout=30), \
+        "re-assert never healed the stale away (stuck-away bug)"
+
+    win.prefs["away"] = "gone again"
+    win._reassert_status()
+    assert _pump(win, lambda: _bob_sees_away(app, "gone again"), timeout=30)
+
+
+def test_status_survives_own_daemon_restart(gtk_app):
+    import os as _os
+    import subprocess
+
+    app = gtk_app
+    win = app["win"]
+
+    win.set_away("gone fishing")
+    assert _pump(win, lambda: _bob_sees_away(app, "gone fishing"), timeout=30), \
+        "away never reached bob before restart"
+
+    who = DaemonClient(app["sock_a"]).request("whoami")
+    old_pid = int(who["pid"])
+    cmdline = open(f"/proc/{old_pid}/cmdline", "rb").read().decode().split("\x00")
+    port = cmdline[cmdline.index("-listen") + 1].split(":")[-1]
+    _os.kill(old_pid, 9)
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            _os.kill(old_pid, 0)
+            time.sleep(0.1)
+        except OSError:
+            break
+
+    proc = subprocess.Popen(
+        [gtkui.daemon_binary(), "-datadir", app["dir_a"], "-api", app["sock_a"],
+         "-listen", f"tcp://127.0.0.1:{port}", "-peers", "none",
+         "-retry", "300ms", "-probe", "300ms"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        assert _pump(win, lambda: _bob_sees_away(app, "gone fishing"), timeout=30), \
+            "away not re-delivered after own daemon restart (probe piggyback broken)"
+    finally:
+        proc.terminate()

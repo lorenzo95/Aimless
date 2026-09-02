@@ -36,6 +36,7 @@ APP_NAME = "AIMless"
 CONFIG_DIR = os.environ.get("AIMLESS_CONFIG") or os.path.expanduser("~/.config/aimless")
 APP_PID_FILE = os.path.join(CONFIG_DIR, "app.pid")
 AIMLESSD_PID_FILE = os.path.join(CONFIG_DIR, "aimlessd.pid")
+STATUS_REASSERT_SECONDS = 60
 def prefs_file():
     return os.path.join(CONFIG_DIR, "gtk.json")
 
@@ -1104,6 +1105,9 @@ class AimlessWindow(Gtk.Window):
 
         run_async(watch_all)
 
+        self._push_status(self.prefs.get("away") or None)
+        GLib.timeout_add_seconds(STATUS_REASSERT_SECONDS, self._reassert_status)
+
     def on_view_changed(self, stack, param):
         if stack.get_visible_child_name() == "contacts":
             self.contacts.refresh()
@@ -1113,10 +1117,13 @@ class AimlessWindow(Gtk.Window):
         self.set_away(away.strip() if away and away.strip() else None)
 
     def set_away(self, away):
-        contacts = list(self.session.contacts().values())
         self._apply_away_banner(away)
         self.prefs["away"] = away or ""
         save_prefs(self.prefs)
+        self._push_status(away, log_status=True)
+
+    def _push_status(self, away, log_status=False):
+        contacts = list(self.session.contacts().values())
 
         def worker():
             errors = []
@@ -1130,9 +1137,16 @@ class AimlessWindow(Gtk.Window):
         def done(errors):
             if errors:
                 self.activity.log("setstatus failed: " + "; ".join(errors))
-            self.activity.log("away: " + away if away else "available")
+            if log_status:
+                self.activity.log("away: " + away if away else "available")
 
         run_async(worker, on_done=done)
+
+    def _reassert_status(self):
+        """Status is ephemeral daemon RAM on both ends — re-announce the current
+        status so buddies converge after any restart (ours or theirs)."""
+        self._push_status(self.prefs.get("away") or None)
+        return GLib.SOURCE_CONTINUE
 
     def _apply_away_banner(self, away):
         if away:
