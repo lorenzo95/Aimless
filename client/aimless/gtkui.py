@@ -196,6 +196,14 @@ menuitem:hover { background-color: #33363f; }
 .aimless-route-bar image { color: #aab0bd; }
 
 .aimless-contacts frame { border-color: #3a3e4a; }
+
+.aimless-muted {
+    opacity: 0.55;
+}
+
+.aimless-chip {
+    padding: 0px 4px;
+}
 """
 
 
@@ -446,6 +454,22 @@ def _room_header_markup(thread, self_node):
             f"<span size='small' foreground='#8c8c8c'>{online}/{len(others)} online</span>")
 
 
+def _free_petname(contacts, base):
+    petname, i = base, 2
+    while petname in contacts:
+        petname = f"{base} {i}"
+        i += 1
+    return petname
+
+
+def _add_contact_from_roster(node, pubkey, screen):
+    contacts = protocol.load_contacts(contacts_path())
+    petname = _free_petname(contacts, screen or node[:8])
+    contacts[petname] = {"pubkey": pubkey, "node": node, "screen": screen or node[:8]}
+    protocol.save_contacts(contacts_path(), contacts)
+    return petname
+
+
 def run_async(fn, on_done=None, on_error=None):
     def worker():
         try:
@@ -546,7 +570,23 @@ class MessagesView(Gtk.Box):
         self.delete_btn.set_no_show_all(True)
         self.delete_btn.connect("clicked", self.on_delete_room)
         header_box.pack_end(self.delete_btn, False, False, 0)
+        self.mute_btn = Gtk.Button(label="Mute room…")
+        self.mute_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self.mute_btn.set_valign(Gtk.Align.START)
+        self.mute_btn.get_style_context().add_class("muted")
+        self.mute_btn.set_no_show_all(True)
+        self.mute_btn.connect("clicked", self.on_toggle_mute)
+        header_box.pack_end(self.mute_btn, False, False, 0)
         conversation_box.pack_start(header_box, False, False, 0)
+
+        self.member_chips = Gtk.FlowBox()
+        self.member_chips.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.member_chips.set_min_children_per_line(1)
+        self.member_chips.set_max_children_per_line(12)
+        self.member_chips.set_margin_start(8)
+        self.member_chips.set_margin_top(2)
+        self.member_chips.set_no_show_all(True)
+        conversation_box.pack_start(self.member_chips, False, False, 0)
         conversation_box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
 
         self.conversation_scroll = Gtk.ScrolledWindow()
@@ -718,6 +758,7 @@ class MessagesView(Gtk.Box):
         sel = self.selected
         if sel is not None and sel.get("is_room"):
             self.conversation_header.set_markup(_room_header_markup(sel, self.app.session.self_node))
+            self._render_member_chips(sel)
 
     def append_thread_row(self, node, thread):
         row = Gtk.ListBoxRow()
@@ -764,7 +805,16 @@ class MessagesView(Gtk.Box):
             return
         w = thread["widgets"]
         w["title"].set_markup(_sidebar_title_markup(thread, self.app.session.self_node))
-        w["subtitle"].set_text(thread["away"] if thread["away"] else thread["preview"])
+        muted = thread.get("is_room") and self.app.session.cache.is_conversation_muted(node)
+        if muted:
+            w["subtitle"].set_text("muted")
+        else:
+            w["subtitle"].set_text(thread["away"] if thread["away"] else thread["preview"])
+        row_style = thread["row"].get_style_context()
+        if muted:
+            row_style.add_class("aimless-muted")
+        else:
+            row_style.remove_class("aimless-muted")
         if thread["unread"] > 0 and not w["badge"]:
             badge = Gtk.Label()
             badge.set_markup(f"<b>{thread['unread']}</b>")
@@ -783,6 +833,8 @@ class MessagesView(Gtk.Box):
             self.stack.set_visible_child_name("placeholder")
             self.selected = None
             self.delete_btn.hide()
+            self.mute_btn.hide()
+            self._render_member_chips(None)
             return
         conv = next((c for c, t in self.threads.items() if t.get("row") is row), None)
         if conv is None:
@@ -795,8 +847,14 @@ class MessagesView(Gtk.Box):
         if thread.get("is_room"):
             self.conversation_header.set_markup(_room_header_markup(thread, self.app.session.self_node))
             self.delete_btn.show()
+            self.mute_btn.show()
+            self.mute_btn.set_label("Unmute room…" if self.app.session.cache.is_conversation_muted(conv)
+                                    else "Mute room…")
+            self._render_member_chips(thread)
         else:
             self.delete_btn.hide()
+            self.mute_btn.hide()
+            self._render_member_chips(None)
             self.conversation_header.set_markup(
                 f"<big><b>{GLib.markup_escape_text(thread['screen'])}</b></big>"
                 f"  <span size='small' foreground='#8c8c8c'>{conv[:16]}…</span>")
@@ -932,8 +990,8 @@ class MessagesView(Gtk.Box):
                                 text=f"Clear history with {title}?",
                                 buttons=Gtk.ButtonsType.OK_CANCEL)
         dlg.format_secondary_text(
-            "This conversation is emptied and its history re-fetched from the daemon "
-            "next time you open it (messages already dropped by retention stay gone).")
+            "This conversation is emptied here and the existing history is dismissed — "
+            "only messages that arrive after this are shown.")
         dlg.set_default_response(Gtk.ResponseType.CANCEL)
         resp = dlg.run()
         dlg.destroy()
@@ -945,8 +1003,8 @@ class MessagesView(Gtk.Box):
                                 text=f"Delete the room {title}?",
                                 buttons=Gtk.ButtonsType.OK_CANCEL)
         dlg.format_secondary_text(
-            "Messages are removed from this device. The room will reappear "
-            "if someone sends to it again.")
+            "Messages are removed from this device and old history is dismissed — "
+            "if someone sends to the room again, it reappears with only the new messages.")
         dlg.set_default_response(Gtk.ResponseType.CANCEL)
         resp = dlg.run()
         dlg.destroy()
@@ -956,31 +1014,142 @@ class MessagesView(Gtk.Box):
         thread = self.selected
         if thread is None or not thread.get("is_room"):
             return
-        if not self._confirm_delete(thread["screen"]):
+        title = thread["screen"]
+        if not self._confirm_delete(title):
             return
         conv = thread["conv"]
-        self.app.session.cache.remove_conversation(conv)
-        gone = self.threads.pop(conv, None)
-        if gone and "row" in gone:
-            gone["row"].destroy()
-        if self.selected is thread:
-            self.selected = None
-            self.stack.set_visible_child_name("placeholder")
-            self.delete_btn.hide()
-        self.app.activity.log(f"deleted room {thread['screen']}")
+        session = self.app.session
+        nodes = sorted(n for n in thread["members"] if n != session.self_node)
+
+        def worker():
+            return {n: session.client.history(n, 0).get("latest", 0) for n in nodes}
+
+        def done(latests):
+            session.cache.delete_room(conv, latests)
+            gone = self.threads.pop(conv, None)
+            if gone and "row" in gone:
+                gone["row"].destroy()
+            if self.selected is thread:
+                self.selected = None
+                self.stack.set_visible_child_name("placeholder")
+                self.delete_btn.hide()
+                self.mute_btn.hide()
+            self.app.activity.log(f"deleted room {title}")
+
+        def fail(e):
+            self.append_system_note(f"delete failed: {e}")
+            self.app.activity.log(f"delete failed: {e}")
+
+        run_async(worker, on_done=done, on_error=fail)
 
     def on_clear_history(self, *_):
         if self.selected is None:
             return
-        title = self.selected["screen"]
+        thread = self.selected
+        title = thread["screen"]
         if not self._confirm_clear(title):
             return
-        conv = self.selected["conv"]
-        self.app.session.cache.clear_history(conv)
-        self.selected["preview"] = ""
-        clear_children(self.conversation)
+        session = self.app.session
+        conv = thread["conv"]
+        nodes = (sorted(n for n in thread["members"] if n != session.self_node)
+                 if thread.get("is_room") else [conv])
+
+        def worker():
+            return {n: session.client.history(n, 0).get("latest", 0) for n in nodes}
+
+        def done(latests):
+            session.cache.clear_history(conv)
+            for n, latest in latests.items():
+                if latest:
+                    session.cache.set_scan_last(conv, n, latest)
+            thread["preview"] = ""
+            if self.selected is thread:
+                clear_children(self.conversation)
+            self.update_thread_row(conv)
+            self.app.activity.log(f"cleared history with {title}")
+
+        def fail(e):
+            self.append_system_note(f"clear failed: {e}")
+            self.app.activity.log(f"clear failed: {e}")
+
+        run_async(worker, on_done=done, on_error=fail)
+
+    def _confirm_add_member(self, screen):
+        dlg = Gtk.MessageDialog(transient_for=self.get_toplevel(), modal=True,
+                                message_type=Gtk.MessageType.QUESTION,
+                                text=f"Add {screen} as a buddy?",
+                                buttons=Gtk.ButtonsType.OK_CANCEL)
+        dlg.format_secondary_text(
+            "You'll be able to message them directly. Their identity is as claimed by "
+            "whoever added them to this room — invites exchanged directly are stronger.")
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        resp = dlg.run()
+        dlg.destroy()
+        return resp == Gtk.ResponseType.OK
+
+    def _render_member_chips(self, thread):
+        chips = self.member_chips
+        for child in chips.get_children():
+            chips.remove(child)
+        if not thread or not thread.get("is_room"):
+            chips.hide()
+            return
+        session = self.app.session
+        contact_nodes = {info["node"] for info in session.contacts().values()}
+        pb = thread.get("presence_by_node", {})
+        entries = sorted((m.get("screen") or n[:8], n) for n, m in thread["members"].items()
+                         if n != session.self_node)
+        for screen, n in entries:
+            p = pb.get(n, {})
+            color = "#a6e3a1" if p.get("online") else ("#fab387" if p.get("away") else "#6c7086")
+            known = n in contact_nodes
+            btn = Gtk.Button()
+            btn.set_relief(Gtk.ReliefStyle.NONE)
+            lbl = Gtk.Label()
+            lbl.set_markup(f"<span foreground='{color}'>●</span> {GLib.markup_escape_text(screen)}")
+            lbl.set_xalign(0.0)
+            btn.add(lbl)
+            btn.get_style_context().add_class("aimless-chip")
+            btn.set_tooltip_text("Open conversation" if known else "Add as buddy")
+            btn.connect("clicked", self.on_member_chip, n, screen, known)
+            chips.add(btn)
+            btn.show()
+        chips.show()
+
+    def on_member_chip(self, _btn, node, screen, known):
+        if known:
+            dm = self.threads.get(node)
+            if dm and "row" in dm:
+                self.thread_list.select_row(dm["row"])
+            return
+        if not self._confirm_add_member(screen):
+            return
+        info = (self.selected or {}).get("members", {}).get(node)
+        if not info:
+            return
+        petname = _add_contact_from_roster(node, info.get("pubkey"), screen)
+        self.app.session.cache.unmute(node)
+        self.app.contacts.refresh()
+        self.sync_sidebar()
+        self.app.activity.log(f"added {petname} from the room")
+        dm = self.threads.get(node)
+        if dm and "row" in dm:
+            self.thread_list.select_row(dm["row"])
+
+    def on_toggle_mute(self, *_):
+        thread = self.selected
+        if thread is None or not thread.get("is_room"):
+            return
+        conv = thread["conv"]
+        cache = self.app.session.cache
+        if cache.is_conversation_muted(conv):
+            cache.unmute_conversation(conv)
+            self.app.activity.log(f"unmuted {thread['screen']}")
+        else:
+            cache.mute_conversation(conv)
+            self.app.activity.log(f"muted {thread['screen']}")
+        self.mute_btn.set_label("Unmute room…" if cache.is_conversation_muted(conv) else "Mute room…")
         self.update_thread_row(conv)
-        self.load_history_async(conv)
 
     def on_composer_key(self, widget, event):
         if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and not (event.state & Gdk.ModifierType.SHIFT_MASK):
@@ -1057,6 +1226,14 @@ class MessagesView(Gtk.Box):
                                       "screen": m.get("screen", "")}
             if members:
                 session.cache.ensure_room(conv, members)
+        if session.cache.is_conversation_muted(conv):
+            session.cache.add_recv(conv, node, ev.get("seq", 0), opened["ts"], opened["text"])
+            thread = self.threads.get(conv)
+            if self.selected is thread and thread is not None:
+                self.append_bubble(False, opened["text"], opened["ts"],
+                                   sender=self._sender_label(thread, {"sender": node}))
+                scroll_to_bottom(self.conversation_scroll)
+            return
         contact_nodes = {info["node"] for info in session.contacts().values()}
         if node not in contact_nodes:
             if session.cache.is_muted(node):
@@ -1425,15 +1602,7 @@ class AimlessWindow(Gtk.Window):
         finally:
             self._request_open = False
         if accepted:
-            contacts = protocol.load_contacts(contacts_path())
-            petname = req.get("screen") or req["node"][:8]
-            base, i = petname, 2
-            while petname in contacts:
-                petname = f"{base} {i}"
-                i += 1
-            contacts[petname] = {"pubkey": req["pubkey"], "node": req["node"],
-                                 "screen": req.get("screen") or req["node"][:8]}
-            protocol.save_contacts(contacts_path(), contacts)
+            petname = _add_contact_from_roster(req["node"], req["pubkey"], req.get("screen"))
             self.session.cache.unmute(req["node"])
             if req.get("conv"):
                 members = {m["node"]: {"node": m["node"], "pubkey": m["pubkey"],

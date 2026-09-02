@@ -133,11 +133,42 @@ class Cache:
         c = self.conversation(conv_id)
         c["dm"] = False
         c["members"] = members
+        c.pop("deleted", None)
         self._flush()
         return c
 
     def rooms(self) -> list:
-        return [cid for cid, c in self._data["conversations"].items() if not c.get("dm")]
+        return [cid for cid, c in self._data["conversations"].items()
+                if not c.get("dm") and not c.get("deleted")]
+
+    def delete_room(self, conv_id: str, scan_points: dict) -> dict:
+        """Tombstone: the record survives (empty, hidden) with the scan cursor
+        advanced past the backlog, so a resurrecting room starts after it."""
+        c = self.conversation(conv_id)
+        c["dm"] = False
+        c["deleted"] = True
+        c["msgs"] = []
+        c["recv_last"] = {}
+        scan = c.setdefault("scan_last", {})
+        scan.update(scan_points)
+        self._flush()
+        return c
+
+    def is_conversation_muted(self, conv_id: str) -> bool:
+        c = self._data["conversations"].get(conv_id)
+        return bool(c and c.get("muted"))
+
+    def mute_conversation(self, conv_id: str) -> None:
+        c = self.conversation(conv_id)
+        if not c.get("muted"):
+            c["muted"] = True
+            self._flush()
+
+    def unmute_conversation(self, conv_id: str) -> None:
+        c = self._data["conversations"].get(conv_id)
+        if c and c.get("muted"):
+            c["muted"] = False
+            self._flush()
 
     def members(self, conv_id: str) -> dict:
         return dict(self.conversation(conv_id)["members"])

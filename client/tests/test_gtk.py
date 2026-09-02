@@ -565,21 +565,35 @@ def test_room_history_excludes_dm_history(gtk_app):
     assert "first room msg" not in dm_texts
 
 
-def test_clear_history_refetches_clean(gtk_app, monkeypatch):
+def test_clear_dismisses_backlog(gtk_app, monkeypatch):
+    """Bug regression: clearing must not resurrect received messages via refetch."""
     app = gtk_app
     win = app["win"]
+    bob = app["bob"]
     b_node = app["b_node"]
 
     ts = int(time.time() * 1000)
-    win.session.cache.add_recv(b_node, b_node, 1, ts, "kept msg")
-    monkeypatch.setattr(win.messages, "_confirm_clear", lambda title: True)
+    bob.send(app["session"].client.pubkey_hex, app["a_node"], "received dm", ts)
+    assert _pump(win, lambda: [m["text"] for m in win.session.cache.msgs(b_node)] == ["received dm"],
+                 timeout=30), "setup: dm never stored"
 
+    monkeypatch.setattr(win.messages, "_confirm_clear", lambda title: True)
     win.messages.selected = win.messages.threads[b_node]
     win.messages.on_clear_history()
 
-    assert win.session.cache.msgs(b_node) == []
-    assert win.session.cache.scan_last(b_node, b_node) == 0
-    assert win.session.cache.recv_last(b_node, b_node) == 0
+    def cleared_and_dismissed():
+        return win.session.cache.msgs(b_node) == [] and \
+            win.session.cache.scan_last(b_node, b_node) >= 1
+    assert _pump(win, cleared_and_dismissed, timeout=30), "clear did not dismiss the backlog"
+
+    # reopening the thread must not pull the dismissed history back
+    win.messages.thread_list.select_row(win.messages.threads[b_node]["row"])
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        while Gtk.events_pending():
+            Gtk.main_iteration_do(False)
+        time.sleep(0.02)
+    assert win.session.cache.msgs(b_node) == [], "cleared DM history came back"
 
 
 def test_room_dots_markup():
@@ -669,8 +683,9 @@ def test_delete_room_and_reappear(gtk_app, monkeypatch):
     monkeypatch.setattr(win.messages, "_confirm_delete", lambda t: True)
     win.messages.on_delete_room()
 
-    assert conv not in win.messages.threads
-    assert win.session.cache.rooms() == []
+    def deleted():
+        return conv not in win.messages.threads and win.session.cache.rooms() == []
+    assert _pump(win, deleted, timeout=30)
     assert not win.messages.delete_btn.get_visible()
 
     # a member messaging the room brings it back, with the message routed in
@@ -683,3 +698,178 @@ def test_delete_room_and_reappear(gtk_app, monkeypatch):
         return conv in win.messages.threads and \
             [m["text"] for m in win.session.cache.msgs(conv)] == ["room is back"]
     assert _pump(win, room_back, timeout=30), "deleted room did not reappear on new message"
+
+
+def test_delete_room_only_new_on_reappear(gtk_app, monkeypatch):
+    """Bug regression: a deleted room that comes back must contain only new messages."""
+    app = gtk_app
+    win = app["win"]
+    bob = app["bob"]
+    a_node = app["a_node"]
+    b_node = app["b_node"]
+    ts = int(time.time() * 1000)
+    carol_key = crypto.new_identity()
+    members = [{"node": a_node, "pubkey": app["session"].client.pubkey_hex, "screen": "Alice"},
+               {"node": b_node, "pubkey": bob.pubkey_hex, "screen": "Bob"},
+               {"node": "cd" * 32, "pubkey": bytes(carol_key.verify_key).hex(), "screen": "Carol"}]
+    win.messages.create_room(members[1:])
+    conv = next(k for k, t in win.messages.threads.items() if t.get("is_room"))
+
+    bob.send_room(members, conv, "old one", ts)
+    bob.send_room(members, conv, "old two", ts + 1)
+
+    def old_stored():
+        return [m["text"] for m in win.session.cache.msgs(conv)] == ["old one", "old two"]
+    assert _pump(win, old_stored, timeout=30)
+
+    monkeypatch.setattr(win.messages, "_confirm_delete", lambda t: True)
+    win.messages.selected = win.messages.threads[conv]
+    win.messages.on_delete_room()
+
+    # removal is async (the dismiss cursor is fetched from the daemon first)
+    def deleted():
+        return conv not in win.messages.threads and win.session.cache.rooms() == []
+    assert _pump(win, deleted, timeout=30)
+    assert win.session.cache.scan_last(conv, b_node) >= 2, "tombstone must advance past backlog"
+
+    bob.send_room(members, conv, "the new one", ts + 2)
+
+    def reappeared():
+        return conv in win.messages.threads and \
+            [m["text"] for m in win.session.cache.msgs(conv)] == ["the new one"]
+    assert _pump(win, reappeared, timeout=30), "room should reappear with only the new message"
+
+
+def test_clear_failure_aborts(gtk_app, monkeypatch):
+    app = gtk_app
+    win = app["win"]
+    bob = app["bob"]
+    b_node = app["b_node"]
+    ts = int(time.time() * 1000)
+    bob.send(app["session"].client.pubkey_hex, app["a_node"], "keep me", ts)
+    assert _pump(win, lambda: bool(win.session.cache.msgs(b_node)), timeout=30)
+
+    def boom(n, seq):
+        raise RuntimeError("daemon down")
+    monkeypatch.setattr(win.session.client, "history", boom)
+    monkeypatch.setattr(win.messages, "_confirm_clear", lambda t: True)
+    win.messages.selected = win.messages.threads[b_node]
+    win.messages.on_clear_history()
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        while Gtk.events_pending():
+            Gtk.main_iteration_do(False)
+        time.sleep(0.02)
+    assert [m["text"] for m in win.session.cache.msgs(b_node)] == ["keep me"], \
+        "failed clear must not wipe"
+    texts = all_texts(win.messages.conversation)
+    assert any("clear failed" in t for t in texts)
+
+
+def test_room_tombstone_and_mute_units():
+    import os
+    import tempfile
+    path = tempfile.mktemp(suffix=".enc")
+    c = crypto.Cache(path, "pw")
+    members = {"n1": {"node": "n1", "pubkey": "pk", "screen": "One"}}
+    c.ensure_room("rr", members)
+    c.add_recv("rr", "n1", 4, 100, "hello")
+    assert "rr" in c.rooms()
+
+    c.delete_room("rr", {"n1": 9})
+    assert c.rooms() == []
+    assert c.msgs("rr") == []
+    assert c.scan_last("rr", "n1") == 9
+
+    c.ensure_room("rr", members)
+    assert "rr" in c.rooms()
+    assert c.scan_last("rr", "n1") == 9, "resurrection must keep the dismissed cursor"
+
+    assert c.is_conversation_muted("nope") is False
+    assert "nope" not in c._data["conversations"], "mute check must not create records"
+    c.mute_conversation("rr")
+    assert c.is_conversation_muted("rr")
+    c.unmute_conversation("rr")
+    assert c.is_conversation_muted("rr") is False
+    os.remove(path)
+
+
+def test_member_chips_add_and_jump(gtk_app, monkeypatch):
+    app = gtk_app
+    win = app["win"]
+    bob = app["bob"]
+    b_node = app["b_node"]
+    carol_key = crypto.new_identity()
+    carol_node = "cd" * 32
+    chosen = [{"node": b_node, "pubkey": bob.pubkey_hex, "screen": "Bob"},
+              {"node": carol_node, "pubkey": bytes(carol_key.verify_key).hex(), "screen": "Carol"}]
+    win.messages.create_room(chosen)
+    conv = next(k for k, t in win.messages.threads.items() if t.get("is_room"))
+    win.messages.thread_list.select_row(win.messages.threads[conv]["row"])
+
+    assert win.messages.member_chips.get_visible(), "chips hidden for a selected room"
+    assert len(win.messages.member_chips.get_children()) == 2
+
+    win.messages.on_member_chip(None, b_node, "Bob", known=True)
+    assert win.messages.selected is win.messages.threads[b_node], "buddy chip should open the DM"
+
+    win.messages.thread_list.select_row(win.messages.threads[conv]["row"])
+    monkeypatch.setattr(win.messages, "_confirm_add_member", lambda s: True)
+    win.messages.on_member_chip(None, carol_node, "Carol", known=False)
+
+    contacts = protocol.load_contacts(str(app["home"] / "client-contacts.json"))
+    assert "Carol" in contacts and contacts["Carol"]["node"] == carol_node
+    assert carol_node in win.messages.threads, "added member should get a DM thread"
+    assert win.messages.selected is win.messages.threads[carol_node], "should jump to the new DM"
+
+
+def test_mute_room_silences_and_recovers(gtk_app):
+    app = gtk_app
+    win = app["win"]
+    bob = app["bob"]
+    a_node = app["a_node"]
+    b_node = app["b_node"]
+    carol_key = crypto.new_identity()
+    members = [{"node": a_node, "pubkey": app["session"].client.pubkey_hex, "screen": "Alice"},
+               {"node": b_node, "pubkey": bob.pubkey_hex, "screen": "Bob"},
+               {"node": "cd" * 32, "pubkey": bytes(carol_key.verify_key).hex(), "screen": "Carol"}]
+    chosen = members[1:]
+    win.messages.create_room(chosen)
+    conv = next(k for k, t in win.messages.threads.items() if t.get("is_room"))
+    win.messages.thread_list.select_row(win.messages.threads[conv]["row"])
+
+    win.messages.on_toggle_mute()
+    assert win.session.cache.is_conversation_muted(conv)
+    assert "Unmute room…" in win.messages.mute_btn.get_label()
+    assert win.messages.threads[conv]["row"].get_style_context().has_class("aimless-muted")
+
+    ts = int(time.time() * 1000)
+    bob.send_room(members, conv, "quiet msg", ts)
+
+    def stored_quiet():
+        return [m["text"] for m in win.session.cache.msgs(conv)] == ["quiet msg"]
+    assert _pump(win, stored_quiet, timeout=30)
+    assert win.messages.threads[conv]["unread"] == 0, "muted room must not count unread"
+    assert win.messages.threads[conv]["preview"] == "", "muted room must not update preview"
+
+    # an unknown member chatting in the muted room must not trigger a request popup
+    stranger = "99" * 32
+    payload = protocol.seal_message(
+        win.session.identity, app["session"].client.pubkey_hex, "hi from stranger", ts + 5,
+        screen="Newbie", conv=conv,
+        members=members + [{"node": stranger, "pubkey": "ee" * 32, "screen": "Newbie"}])
+    win.messages.incoming({"op": "recv", "from": stranger, "seq": 7, "payload": payload})
+    assert not win.session.cache.pending(), "muted room must not pop requests"
+    assert "hi from stranger" in [m["text"] for m in win.session.cache.msgs(conv)]
+
+    # unmute → badges and previews resume
+    win.messages.on_toggle_mute()
+    assert not win.session.cache.is_conversation_muted(conv)
+    win.messages.thread_list.select_row(None)  # unread only counts when not viewing
+    bob.send_room(members, conv, "loud msg", ts + 10)
+
+    def loud():
+        t = win.messages.threads.get(conv)
+        return t and t["unread"] == 1 and t["preview"] == "loud msg"
+    assert _pump(win, loud, timeout=30)
