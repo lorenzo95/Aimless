@@ -290,11 +290,11 @@ class DaemonSupervisor:
             return False
 
     def status(self):
+        d = None
         try:
             d = DaemonClient(self.sock)
             who = d.request("whoami", timeout=5)
             st = d.request("status", timeout=5)
-            d.close()
             peers = st.get("peers", [])
             return {
                 "address": who.get("address", ""),
@@ -306,6 +306,9 @@ class DaemonSupervisor:
             }
         except Exception:
             return None
+        finally:
+            if d is not None:
+                d.close()
 
     def spawn(self):
         binary = self.binary()
@@ -324,6 +327,8 @@ class DaemonSupervisor:
             stdout=daemon_log,
             stderr=daemon_log,
         )
+        if daemon_log is not subprocess.DEVNULL:
+            daemon_log.close()  # the child inherited its own copy
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
             with open(AIMLESSD_PID_FILE, "w") as f:
@@ -2075,13 +2080,16 @@ def run_app(open_window=True):
     return app.start(open_window=open_window)
 
 def daemon_pid_from_socket():
+    d = None
     try:
         d = DaemonClient(sock_path())
         who = d.request("whoami", timeout=3)
-        d.close()
         return int(who.get("pid", 0)) or None
     except Exception:
         return None
+    finally:
+        if d is not None:
+            d.close()
 
 
 def daemon_pid_from_procs():

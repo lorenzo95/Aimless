@@ -75,3 +75,46 @@ def test_stop_without_pidfile_stops_daemon_via_socket(tmp_path, monkeypatch):
         time.sleep(0.2)
     assert proc.poll() is not None, "daemon survived stop without a pidfile"
     assert not supervisor.is_running()
+
+
+def test_client_close_releases_fds_and_threads(tmp_path, monkeypatch):
+    """Regression: close() leaked one fd + one blocked reader thread per client
+    (makefile reader pinned the socket fd; socket.close() defers while _io_refs>0).
+    That exhausted the fd limit after ~30 min and flooded the terminal with EMFILE."""
+    import os
+    import subprocess
+    import threading
+    import time
+
+    from aimless.daemon import DaemonClient
+
+    home = _iso(tmp_path, monkeypatch)
+    binary = gtkui.daemon_binary()
+    assert binary, "aimlessd binary must be built for this test"
+    proc = subprocess.Popen(
+        [binary, "-datadir", str(home), "-api", str(home / "api.sock"), "-peers", "none"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        sock = str(home / "api.sock")
+        deadline = time.time() + 30
+        while time.time() < deadline and not os.path.exists(sock):
+            time.sleep(0.1)
+
+        def fds():
+            return len(os.listdir("/proc/self/fd"))
+
+        base_fds, base_threads = fds(), threading.active_count()
+        for _ in range(50):
+            DaemonClient(sock).close()
+        time.sleep(1.0)  # let released reader threads exit
+
+        assert fds() <= base_fds + 3, f"fd leak: {base_fds} -> {fds()}"
+        assert threading.active_count() <= base_threads + 3, \
+            f"thread leak: {base_threads} -> {threading.active_count()}"
+
+        dc = DaemonClient(sock)
+        assert "key" in dc.request("whoami")
+        dc.close()
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)

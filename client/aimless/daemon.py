@@ -30,7 +30,11 @@ class DaemonClient:
         self._sock = None
         self._sockfile = None
         self._generation = 0
-        self._connect()
+        try:
+            self._connect()
+        except Exception:
+            self._close_socket()
+            raise
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
 
@@ -41,13 +45,18 @@ class DaemonClient:
         self._generation += 1
 
     def _close_socket(self):
-        try:
-            if self._sock:
-                self._sock.close()
-        except Exception:
-            pass
-        self._sock = None
-        self._sockfile = None
+        # socket.close() alone does NOT free the fd while a makefile() reader is
+        # alive (_io_refs); shutdown() also unblocks a reader thread stuck in readline.
+        sock, self._sock, self._sockfile = self._sock, None, None
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except Exception:
+                pass
 
     def _reader_reconnect(self):
         self._close_socket()
