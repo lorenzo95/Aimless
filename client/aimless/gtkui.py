@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import traceback
 import time
 import warnings
 from datetime import datetime
@@ -24,7 +25,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GLib, Gdk, Pango
 
-from . import crypto, protocol
+from . import crypto, protocol, logging
 from .daemon import DaemonClient, Client, DaemonError
 from . import __version__ as client_version
 
@@ -303,11 +304,16 @@ class DaemonSupervisor:
             raise RuntimeError(
                 "aimlessd not found — put aimlessd-linux-amd64 (or aimlessd) next to "
                 "aimless.pyz, or add it to PATH")
+        try:
+            os.makedirs(self.datadir, exist_ok=True)
+            daemon_log = open(os.path.join(self.datadir, "daemon.log"), "ab")
+        except OSError:
+            daemon_log = subprocess.DEVNULL
         self.child = subprocess.Popen(
             [binary, "-datadir", self.datadir],
             start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=daemon_log,
+            stderr=daemon_log,
         )
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -370,7 +376,16 @@ class DaemonSupervisor:
 class Session:
     def __init__(self, passphrase):
         self.identity = crypto.load_identity(identity_path(), passphrase)
-        self.cache = crypto.Cache(cache_path(), passphrase)
+        self.cache_recovered = None
+        try:
+            self.cache = crypto.Cache(cache_path(), passphrase)
+        except Exception as e:
+            try:
+                os.replace(cache_path(), cache_path() + ".bad")
+            except OSError:
+                pass
+            self.cache_recovered = f"corrupted cache recovered as .bad ({e})"
+            self.cache = crypto.Cache(cache_path(), passphrase)
         self.daemon = DaemonClient(sock_path())
         contacts = protocol.load_contacts(contacts_path())
         self.self_screen = contacts.get("_self", {}).get("screen", "anonymous")
@@ -1260,7 +1275,31 @@ def ask_text(parent, title, label):
     return None
 
 
+def _make_excepthook(gui_log):
+    def hook(et, ev, tb):
+        try:
+            gui_log("uncaught: " + "".join(traceback.format_exception(et, ev, tb)))
+        except Exception:
+            pass
+        sys.__excepthook__(et, ev, tb)
+    return hook
+
+
+def _make_thread_hook(gui_log):
+    def hook(args):
+        try:
+            gui_log("thread crash: " + "".join(
+                traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+        except Exception:
+            pass
+    return hook
+
+
 def run_app():
+    gui_log = logging.log_fn(gui_log_path())
+    sys.excepthook = _make_excepthook(gui_log)
+    threading.excepthook = _make_thread_hook(gui_log)
+
     provider = Gtk.CssProvider()
     provider.load_from_data(CSS.encode())
     Gtk.StyleContext.add_provider_for_screen(
@@ -1275,12 +1314,16 @@ def run_app():
         err.destroy()
         return 1
 
+    session = None
     passphrase = read_valid_session()
     if passphrase:
         try:
             session = Session(passphrase)
         except ValueError:
             passphrase = None
+        except OSError as e:
+            session = None
+            gui_log(f"daemon unreachable during unlock ({e}) — retrying")
     if not passphrase:
         for attempt in range(3):
             passphrase = ask_passphrase(None)
@@ -1295,8 +1338,17 @@ def run_app():
                                         text="wrong passphrase or corrupted identity — try again")
                 err.run()
                 err.destroy()
+            except OSError as e:
+                err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE,
+                                        text=f"daemon not reachable: {e}\nretry after starting aimless")
+                err.run()
+                err.destroy()
+                return 1
         else:
             return 1
+
+    if session.cache_recovered:
+        gui_log(f"cache recovery: {session.cache_recovered}")
 
     win = AimlessWindow(session, supervisor)
     write_gui_pid()
@@ -1474,20 +1526,39 @@ def tray_alive():
 
 
 TRAY_SCRIPT_TEMPLATE = """
-import gi, sys, os, signal, subprocess
+import gi, sys, os, signal, subprocess, time, traceback, threading
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, GLib
 
 pid_file  = {pid_file!r}
 ui_cmd    = {ui_cmd!r}
 pyz_path  = {pyz_path!r}
+log_file  = {log_file!r}
+
+def _log(msg):
+    try:
+        with open(log_file, 'a') as f:
+            f.write('[%s] %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), msg))
+    except Exception:
+        pass
+
+def _excepthook(et, ev, tb):
+    _log('uncaught: ' + ''.join(traceback.format_exception(et, ev, tb)))
+sys.excepthook = _excepthook
+def _thread_hook(args):
+    _log('thread crash: ' + ''.join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+threading.excepthook = _thread_hook
 
 if pyz_path:
     sys.path.insert(0, pyz_path)
 from aimless.gtkui import focus_or_launch_gui, quit_everything
 
 def open_ui(*_):
-    focus_or_launch_gui(ui_cmd)
+    try:
+        focus_or_launch_gui(ui_cmd)
+        _log('open requested')
+    except Exception as e:
+        _log('open failed: %r' % e)
 
 def on_activate(icon, *_):
     open_ui()
@@ -1502,42 +1573,80 @@ menu.append(mi_open)
 menu.append(Gtk.SeparatorMenuItem())
 mi_quit = Gtk.MenuItem(label='Quit — shuts down AIMless')
 def _quit(*_):
-    quit_everything()
+    _log('quit: shutting down gui + daemon')
+    try:
+        quit_everything()
+    except Exception as e:
+        _log('shutdown error: %r' % e)
     Gtk.main_quit()
 mi_quit.connect('activate', _quit)
 menu.append(mi_quit)
 menu.show_all()
 
-icon = Gtk.StatusIcon()
-icon.set_from_icon_name({icon_name!r})
-icon.set_title('AIMless')
-icon.set_tooltip_text('AIMless — running\\nLeft-click to open Messages')
-icon.connect('activate', on_activate)
-icon.connect('popup-menu', on_popup)
-icon.set_visible(True)
+try:
+    icon = Gtk.StatusIcon()
+    icon.set_from_icon_name({icon_name!r})
+    icon.set_title('AIMless')
+    icon.set_tooltip_text('AIMless — running\\nLeft-click to open Messages')
+    icon.connect('activate', on_activate)
+    icon.connect('popup-menu', on_popup)
+    icon.set_visible(True)
+except Exception as e:
+    _log('icon failed: %r' % e)
+    sys.exit(1)
+
+sup_pid = None
+try:
+    with open(pid_file) as f:
+        sup_pid = int(f.read().strip())
+except Exception:
+    pass
+misses = 0
 
 def _heartbeat():
+    global misses
+    if sup_pid is None:
+        _log('no supervisor pid — exiting')
+        Gtk.main_quit()
+        return False
     try:
-        with open(pid_file) as f:
-            sup_pid = int(f.read().strip())
         os.kill(sup_pid, 0)
-    except Exception:
+        misses = 0
+        return True
+    except OSError:
+        misses += 1
+    _log('heartbeat: supervisor not responding (%d)' % misses)
+    if misses >= 2:
+        _log('supervisor confirmed dead — tray exiting')
         Gtk.main_quit()
         return False
     return True
 GLib.timeout_add_seconds(10, _heartbeat)
 
-Gtk.main()
+def _selfcheck():
+    _log('tray alive')
+    if not icon.get_visible():
+        _log('warning: icon not visible')
+    return True
+GLib.timeout_add_seconds(300, _selfcheck)
+
+_log('tray started (supervisor pid %s)' % sup_pid)
+try:
+    Gtk.main()
+except Exception:
+    _log('mainloop crashed: ' + traceback.format_exc())
 """
 
 
 def spawn_tray(pyz_path=None, ui_cmd=None):
     if ui_cmd is None:
         ui_cmd = UI_CMD
+    tray_log = os.path.join(CONFIG_DIR, "tray.log")
     code = TRAY_SCRIPT_TEMPLATE.format(
         pid_file=TRAY_PID_FILE,
         pyz_path=pyz_path or "",
         ui_cmd=ui_cmd,
+        log_file=tray_log,
         icon_name=first_icon("user-available-symbolic", "phone"),
     )
     try:
@@ -1556,12 +1665,18 @@ def spawn_tray(pyz_path=None, ui_cmd=None):
 def run_tray(open_gui=False):
     import fcntl
     os.makedirs(CONFIG_DIR, exist_ok=True)
+    sup_log = logging.log_fn(os.path.join(CONFIG_DIR, "supervisor.log"))
+
+    def say(s):
+        print(f"[aimless tray] {s}")
+        sup_log(s)
+
     pid_fh = open(TRAY_PID_FILE, "a+")
     try:
         fcntl.flock(pid_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         pid = read_pid(TRAY_PID_FILE)
-        print(f"[aimless tray] already running (pid {pid})")
+        say(f"already running (pid {pid})")
         if open_gui:
             focus_or_launch_gui()
         return 0
@@ -1569,13 +1684,13 @@ def run_tray(open_gui=False):
     pid_fh.truncate()
     pid_fh.write(str(os.getpid()))
     pid_fh.flush()
-    print(f"[aimless tray] PID {os.getpid()} — supervising aimlessd")
+    say(f"PID {os.getpid()} — supervising aimlessd")
 
     supervisor = DaemonSupervisor()
     try:
-        supervisor.ensure(log=lambda s: print(f"[aimless tray] {s}"))
+        supervisor.ensure(log=say)
     except RuntimeError as e:
-        print(f"[aimless tray] {e}")
+        say(f"{e}")
         return 1
 
     script_path = os.path.abspath(sys.argv[0])
@@ -1595,17 +1710,27 @@ def run_tray(open_gui=False):
         if state["shutting_down"]:
             return GLib.SOURCE_REMOVE
         if not supervisor.is_running():
-            print("[aimless tray] aimlessd died — restarting (unlock required again)")
+            say("aimlessd died — restarting (unlock required again)")
             clear_session()
             try:
-                supervisor.ensure(log=lambda s: print(f"[aimless tray] {s}"))
+                supervisor.ensure(log=say)
             except RuntimeError as e:
-                print(f"[aimless tray] restart failed: {e}")
+                say(f"restart failed: {e}")
+        if tray_proc and tray_proc.poll() is not None:
+            say("tray icon subprocess died — respawning (see tray.log)")
+            tail = ""
+            try:
+                with open(os.path.join(CONFIG_DIR, "tray.log")) as f:
+                    tail = "".join(f.read().splitlines(True)[-3:])
+            except OSError:
+                pass
+            say("tray.log tail: " + tail.replace("\n", " | "))
+            tray_proc = spawn_tray(pyz_path=pyz_path, ui_cmd=ui_cmd)
         return GLib.SOURCE_CONTINUE
 
     def cleanup(*_):
         state["shutting_down"] = True
-        print("[aimless tray] shutting down — stopping aimlessd")
+        say("shutting down — stopping aimlessd")
         if tray_proc:
             try:
                 tray_proc.terminate()

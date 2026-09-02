@@ -7,12 +7,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"sync"
 )
 
-const buildVersion = "aimlessd/0.3.1"
+const buildVersion = "aimlessd/0.3.2"
 
 type peerStatus struct {
 	URI     string `json:"uri"`
@@ -97,6 +98,9 @@ func (s *APIServer) acceptLoop() {
 
 func (s *APIServer) handleConn(conn net.Conn) {
 	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("recovered in connection handler: %v", r)
+		}
 		s.mu.Lock()
 		delete(s.conns, conn)
 		s.mu.Unlock()

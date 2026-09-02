@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -223,4 +225,31 @@ func TestAPISendErrors(t *testing.T) {
 			t.Fatalf("%s: error = %q, want contains %q", tc.name, resp.Error, tc.frag)
 		}
 	}
+}
+
+func TestAPISurvivesGarbage(t *testing.T) {
+	_, _, _, sock := startAPIFixture(t)
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	garbage := bytes.Repeat([]byte{0xFF, 0x00, 0x41}, 1000)
+	conn.Write(garbage)
+	conn.Write([]byte("\n"))
+	conn.Write([]byte{0x00, 0x01, 0x02})
+	conn.Close()
+	time.Sleep(200 * time.Millisecond)
+
+	conn2, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("daemon stopped accepting after garbage: %v", err)
+	}
+	fmt.Fprintf(conn2, "{\"op\":\"whoami\"}\n")
+	buf := make([]byte, 1024)
+	conn2.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, err := conn2.Read(buf)
+	if err != nil || !bytes.Contains(buf[:n], []byte("whoami")) {
+		t.Fatalf("daemon unresponsive after garbage: n=%d err=%v", n, err)
+	}
+	conn2.Close()
 }
