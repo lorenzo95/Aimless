@@ -903,3 +903,28 @@ def test_member_chips_render_visible_labels(gtk_app):
     joined = " ".join(markup)
     assert "●" in joined, "buddy chip uses a filled dot"
     assert "○" in joined, "non-buddy chip uses a hollow dot"
+
+
+def test_unread_badge_increments(gtk_app):
+    """Regression: the badge froze at 1 — it was only written when first created."""
+    app = gtk_app
+    win = app["win"]
+    bob = app["bob"]
+    b_node = app["b_node"]
+
+    win.messages.thread_list.select_row(None)  # not viewing → unread counts
+    ts = int(time.time() * 1000)
+    for i in range(3):
+        bob.send(app["session"].client.pubkey_hex, app["a_node"], f"msg {i}", ts + i)
+
+    def badge_shows_three():
+        t = win.messages.threads.get(b_node)
+        badge = t and t["widgets"].get("badge")
+        return badge is not None and badge.get_text() == "3"
+    assert _pump(win, badge_shows_three, timeout=30), \
+        f"badge text: {win.messages.threads[b_node]['widgets']['badge'].get_text()}"
+
+    # opening the thread clears it
+    win.messages.thread_list.select_row(win.messages.threads[b_node]["row"])
+    assert win.messages.threads[b_node]["unread"] == 0
+    assert win.messages.threads[b_node]["widgets"]["badge"] is None

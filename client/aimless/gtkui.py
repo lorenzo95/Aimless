@@ -827,15 +827,18 @@ class MessagesView(Gtk.Box):
             row_style.add_class("aimless-muted")
         else:
             row_style.remove_class("aimless-muted")
-        if thread["unread"] > 0 and not w["badge"]:
-            badge = Gtk.Label()
-            badge.set_markup(f"<b>{thread['unread']}</b>")
-            badge.set_halign(Gtk.Align.END)
-            badge.get_style_context().add_class("aimless-badge")
-            meta_box = thread["row"].get_child().get_children()[-1]
-            meta_box.pack_start(badge, False, False, 0)
-            badge.show()
-            w["badge"] = badge
+        if thread["unread"] > 0:
+            if not w["badge"]:
+                badge = Gtk.Label()
+                badge.set_markup(f"<b>{thread['unread']}</b>")
+                badge.set_halign(Gtk.Align.END)
+                badge.get_style_context().add_class("aimless-badge")
+                meta_box = thread["row"].get_child().get_children()[-1]
+                meta_box.pack_start(badge, False, False, 0)
+                badge.show()
+                w["badge"] = badge
+            else:
+                w["badge"].set_markup(f"<b>{thread['unread']}</b>")
         elif thread["unread"] == 0 and w["badge"]:
             w["badge"].destroy()
             w["badge"] = None
