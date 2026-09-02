@@ -873,3 +873,33 @@ def test_mute_room_silences_and_recovers(gtk_app):
         t = win.messages.threads.get(conv)
         return t and t["unread"] == 1 and t["preview"] == "loud msg"
     assert _pump(win, loud, timeout=30)
+
+
+def test_member_chips_render_visible_labels(gtk_app):
+    """Regression: chips rendered as EMPTY buttons (btn.show() never showed the
+    label child), leaving no way to tell who's who beyond the +N title truncation."""
+    app = gtk_app
+    win = app["win"]
+    bob = app["bob"]
+    b_node = app["b_node"]
+    carol_key = crypto.new_identity()
+    carol_node = "cd" * 32
+    chosen = [{"node": b_node, "pubkey": bob.pubkey_hex, "screen": "Bob"},
+              {"node": carol_node, "pubkey": bytes(carol_key.verify_key).hex(), "screen": "Carol"}]
+    win.messages.create_room(chosen)
+    conv = next(k for k, t in win.messages.threads.items() if t.get("is_room"))
+    win.messages.thread_list.select_row(win.messages.threads[conv]["row"])
+
+    chips = win.messages.member_chips
+    assert chips.get_visible()
+    texts, markup = [], []
+    for fc in chips.get_children():
+        btn = fc.get_child()
+        lbl = btn.get_child()
+        assert lbl is not None and lbl.get_visible(), "chip label must be visible"
+        texts.append(lbl.get_text())
+        markup.append(lbl.get_label())
+    assert "Bob" in " ".join(texts) and "Carol" in " ".join(texts), texts
+    joined = " ".join(markup)
+    assert "●" in joined, "buddy chip uses a filled dot"
+    assert "○" in joined, "non-buddy chip uses a hollow dot"

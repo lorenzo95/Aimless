@@ -202,7 +202,14 @@ menuitem:hover { background-color: #33363f; }
 }
 
 .aimless-chip {
-    padding: 0px 4px;
+    padding: 2px 8px;
+    margin: 1px;
+    border-radius: 11px;
+    background-color: #22252e;
+}
+
+.aimless-chip:hover {
+    background-color: #2c313d;
 }
 """
 
@@ -1108,17 +1115,19 @@ class MessagesView(Gtk.Box):
             p = pb.get(n, {})
             color = "#a6e3a1" if p.get("online") else ("#fab387" if p.get("away") else "#6c7086")
             known = n in contact_nodes
+            glyph = "●" if known else "○"
             btn = Gtk.Button()
             btn.set_relief(Gtk.ReliefStyle.NONE)
             lbl = Gtk.Label()
-            lbl.set_markup(f"<span foreground='{color}'>●</span> {GLib.markup_escape_text(screen)}")
+            lbl.set_markup(f"<span foreground='{color}'>{glyph}</span> {GLib.markup_escape_text(screen)}")
             lbl.set_xalign(0.0)
             btn.add(lbl)
             btn.get_style_context().add_class("aimless-chip")
-            btn.set_tooltip_text("Open conversation" if known else "Add as buddy")
+            btn.set_tooltip_text("Open conversation — your buddy" if known
+                                 else "Add as buddy (not your buddy yet)")
             btn.connect("clicked", self.on_member_chip, n, screen, known)
             chips.add(btn)
-            btn.show()
+            btn.show_all()
         chips.show()
 
     def on_member_chip(self, _btn, node, screen, known):
