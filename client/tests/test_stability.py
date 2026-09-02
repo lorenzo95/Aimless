@@ -45,7 +45,7 @@ def test_corrupt_cache_recovers(tmp_path):
         c = crypto.Cache(str(cache), "pw")
     assert recovered is not None
     assert os.path.exists(str(cache) + ".bad")
-    assert c.buddy("aa") == {"msgs": [], "recv_last": 0, "sent_last": 0}
+    assert c.msgs("aa") == []
 
 
 def test_corrupt_cache_session_recovery(tmp_path, monkeypatch):

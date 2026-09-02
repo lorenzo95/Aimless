@@ -387,7 +387,12 @@ class Session:
             self.cache_recovered = f"corrupted cache recovered as .bad ({e})"
             self.cache = crypto.Cache(cache_path(), passphrase)
         self.daemon = DaemonClient(sock_path())
+        self.self_node = self.daemon.request("whoami")["key"]
         contacts = protocol.load_contacts(contacts_path())
+        for info in contacts.values():
+            node = info.get("node")
+            if node and self.cache.is_muted(node):
+                self.cache.unmute(node)
         self.self_screen = contacts.get("_self", {}).get("screen", "anonymous")
         self.client = Client(self.daemon, self.identity, self.self_screen)
         self.pubkey_hex = self.client.pubkey_hex
@@ -451,6 +456,14 @@ class MessagesView(Gtk.Box):
         hint.set_margin_bottom(4)
         hint.get_style_context().add_class("muted")
         sidebar.pack_start(hint, False, False, 0)
+
+        new_room_btn = Gtk.Button(label="＋ New room…")
+        new_room_btn.set_relief(Gtk.ReliefStyle.NONE)
+        new_room_btn.set_halign(Gtk.Align.START)
+        new_room_btn.set_margin_start(6)
+        new_room_btn.set_margin_bottom(4)
+        new_room_btn.connect("clicked", self.on_new_room)
+        sidebar.pack_start(new_room_btn, False, False, 0)
 
         self.thread_scroll = Gtk.ScrolledWindow()
         self.thread_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -525,15 +538,21 @@ class MessagesView(Gtk.Box):
         self.sync_sidebar()
 
     def sync_sidebar(self):
-        for node in list(self.threads):
-            if node not in self.app.session.contacts():
-                thread = self.threads.pop(node)
+        session = self.app.session
+        contacts = session.contacts()
+        contact_nodes = {info["node"] for info in contacts.values()}
+        for key in list(self.threads):
+            thread = self.threads[key]
+            if thread.get("is_room"):
+                continue
+            if thread["node"] not in contact_nodes:
+                self.threads.pop(key)
                 if self.selected is thread:
                     self.selected = None
                     self.stack.set_visible_child_name("placeholder")
                 if "row" in thread:
                     thread["row"].destroy()
-        for petname, info in sorted(self.app.session.contacts().items()):
+        for petname, info in sorted(contacts.items()):
             node = info["node"]
             if node in self.threads:
                 thread = self.threads[node]
@@ -541,31 +560,98 @@ class MessagesView(Gtk.Box):
                 thread["screen"] = info.get("screen", petname)
             else:
                 thread = {
-                    "node": node, "petname": petname, "contact": info, "online": False, "away": None,
+                    "node": node, "conv": node, "is_room": False,
+                    "petname": petname, "contact": info, "online": False, "away": None,
                     "preview": "", "unread": 0, "screen": info.get("screen", petname),
                 }
                 self.threads[node] = thread
                 self.append_thread_row(node, thread)
             self.update_thread_row(node)
+        for conv in session.cache.rooms():
+            members = session.cache.members(conv)
+            screens = sorted(m.get("screen") or n[:8] for n, m in members.items()
+                             if n != session.self_node)
+            title = ", ".join(screens[:3]) + (f" +{len(screens) - 3}" if len(screens) > 3 else "")
+            if conv in self.threads:
+                thread = self.threads[conv]
+                thread["members"] = members
+                thread["screen"] = title
+            else:
+                thread = {
+                    "node": conv, "conv": conv, "is_room": True, "petname": None, "contact": None,
+                    "members": members, "screen": title, "online": False, "away": None,
+                    "preview": "", "unread": 0,
+                }
+                self.threads[conv] = thread
+                self.append_thread_row(conv, thread)
+            self.update_thread_row(conv)
         if self.selected:
             row = self.selected.get("row")
             if row:
                 self.thread_list.select_row(row)
 
+    def on_new_room(self, *_):
+        contacts = self.app.session.contacts()
+        if len(contacts) < 2:
+            self.app.activity.log("a room needs at least two buddies — add more people first")
+            return
+        dlg = Gtk.Dialog(title="New room", transient_for=self.get_toplevel(), modal=True)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Create", Gtk.ResponseType.OK)
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        dlg.set_default_size(360, 300)
+        box = dlg.get_content_area()
+        box.set_border_width(10)
+        box.add(Gtk.Label(label="Pick the buddies to include (2 or more):"))
+        checks = {}
+        for petname, info in sorted(contacts.items()):
+            cb = Gtk.CheckButton(label=info.get("screen", petname))
+            box.add(cb)
+            checks[info["node"]] = (cb, info)
+        dlg.show_all()
+        resp = dlg.run()
+        chosen = [info for cb, info in checks.values() if cb.get_active()]
+        dlg.destroy()
+        if resp != Gtk.ResponseType.OK:
+            return
+        if len(chosen) < 2:
+            self.append_system_note("a room needs at least two buddies")
+            return
+        self.create_room(chosen)
+
+    def create_room(self, chosen_infos):
+        session = self.app.session
+        members = {session.self_node: {"node": session.self_node,
+                                       "pubkey": session.client.pubkey_hex,
+                                       "screen": session.self_screen}}
+        for info in chosen_infos:
+            members[info["node"]] = {"node": info["node"], "pubkey": info["pubkey"],
+                                     "screen": info.get("screen", "")}
+        conv = protocol.room_id(sorted(members.keys()))
+        session.cache.ensure_room(conv, members)
+        self.sync_sidebar()
+        thread = self.threads.get(conv)
+        if thread and "row" in thread:
+            self.thread_list.select_row(thread["row"])
+
     def refresh_presence(self, presence):
-        for node, thread in self.threads.items():
-            p = presence.get(node, {})
-            thread["online"] = p.get("online", False)
-            away = None
-            if p.get("status_payload"):
-                try:
-                    st = self.app.session.client.decrypt_status(p["status_payload"])
-                    if st.get("away"):
-                        away = st["away"]
-                except (ValueError, KeyError):
-                    pass
-            thread["away"] = away
-            self.update_thread_row(node)
+        for conv, thread in self.threads.items():
+            if thread.get("is_room"):
+                known = [n for n in thread["members"] if n != self.app.session.self_node]
+                thread["online"] = any(presence.get(n, {}).get("online") for n in known)
+                thread["away"] = None
+            else:
+                p = presence.get(conv, {})
+                thread["online"] = p.get("online", False)
+                away = None
+                if p.get("status_payload"):
+                    try:
+                        st = self.app.session.client.decrypt_status(p["status_payload"])
+                        if st.get("away"):
+                            away = st["away"]
+                    except (ValueError, KeyError):
+                        pass
+                thread["away"] = away
+            self.update_thread_row(conv)
 
     def append_thread_row(self, node, thread):
         row = Gtk.ListBoxRow()
@@ -635,35 +721,56 @@ class MessagesView(Gtk.Box):
             self.stack.set_visible_child_name("placeholder")
             self.selected = None
             return
-        node = next((n for n, t in self.threads.items() if t.get("row") is row), None)
-        if node is None:
+        conv = next((c for c, t in self.threads.items() if t.get("row") is row), None)
+        if conv is None:
             return
-        thread = self.threads[node]
+        thread = self.threads[conv]
         self.selected = thread
         thread["unread"] = 0
-        self.update_thread_row(node)
+        self.update_thread_row(conv)
 
-        self.conversation_header.set_markup(
-            f"<big><b>{GLib.markup_escape_text(thread['screen'])}</b></big>"
-            f"  <span size='small' foreground='#8c8c8c'>{node[:16]}…</span>")
+        if thread.get("is_room"):
+            self.conversation_header.set_markup(
+                f"<big><b>{GLib.markup_escape_text(thread['screen'])}</b></big>"
+                f"  <span size='small' foreground='#8c8c8c'>room</span>")
+        else:
+            self.conversation_header.set_markup(
+                f"<big><b>{GLib.markup_escape_text(thread['screen'])}</b></big>"
+                f"  <span size='small' foreground='#8c8c8c'>{conv[:16]}…</span>")
         clear_children(self.conversation)
-        for m in sorted(self.app.session.cache.msgs(node), key=lambda m: (m["ts"], m["seq"])):
-            self.append_bubble(m["dir"] == "out", m["text"], m["ts"])
+        for m in sorted(self.app.session.cache.msgs(conv), key=lambda m: (m["ts"], min(m["seqs"].values()))):
+            self.append_bubble(m["dir"] == "out", m["text"], m["ts"],
+                               sender=None if m["dir"] == "out" else self._sender_label(thread, m))
         self.stack.set_visible_child_name("conversation")
         scroll_to_bottom(self.conversation_scroll)
-        self.load_history_async(node)
+        self.load_history_async(conv)
 
-    def load_history_async(self, node):
+    def _sender_label(self, thread, m):
+        sender = m.get("sender")
+        if not sender or sender == "self":
+            return None
+        info = thread.get("members", {}).get(sender)
+        if info:
+            return info.get("screen") or sender[:8]
+        contact = thread.get("contact")
+        if contact and contact.get("node") == sender:
+            return thread.get("screen")
+        return sender[:8]
+
+    def load_history_async(self, conv):
         if self._history_busy:
             return
         self._history_busy = True
+        session = self.app.session
+        thread = self.threads.get(conv)
+        nodes = (list(thread["members"].keys()) if thread and thread.get("is_room") else [conv])
 
         def worker():
-            return self.app.session.client.history(node, self.app.session.cache.recv_last(node))
+            return {n: session.client.history(n, session.cache.recv_last(conv, n)) for n in nodes}
 
-        def done(hist):
+        def done(hists):
             self._history_busy = False
-            self._history_loaded(node, hist)
+            self._history_loaded(conv, hists)
 
         def fail(e):
             self._history_busy = False
@@ -671,22 +778,27 @@ class MessagesView(Gtk.Box):
 
         run_async(worker, on_done=done, on_error=fail)
 
-    def _history_loaded(self, node, hist):
-        if self.selected is None or self.selected["node"] != node:
+    def _history_loaded(self, conv, hists):
+        if self.selected is None or self.selected.get("conv") != conv:
             return False
-        for m in hist.get("msgs", []):
-            try:
-                opened = protocol.open_message(self.app.session.identity, m["payload"])
-            except (ValueError, KeyError):
-                continue
-            self.app.session.cache.add_recv(node, m["seq"], opened["ts"], opened["text"])
-        oldest = hist.get("oldest", 0)
-        recv_last = self.app.session.cache.recv_last(node)
-        if recv_last and oldest and recv_last + 1 < oldest:
-            self.append_system_note(f"gap — messages before seq {oldest} were dropped by retention")
+        thread = self.selected
+        for member, hist in hists.items():
+            for m in hist.get("msgs", []):
+                try:
+                    opened = protocol.open_message(self.app.session.identity, m["payload"])
+                except (ValueError, KeyError):
+                    continue
+                self.app.session.cache.add_recv(conv, member, m["seq"], opened["ts"], opened["text"])
+            oldest = hist.get("oldest", 0)
+            cur = self.app.session.cache.recv_last(conv, member)
+            if cur and oldest and cur + 1 < oldest:
+                self.append_system_note(
+                    f"gap — messages from {self._sender_label(thread, {'sender': member}) or member[:8]} "
+                    f"before seq {oldest} were dropped by retention")
         clear_children(self.conversation)
-        for m in sorted(self.app.session.cache.msgs(node), key=lambda m: (m["ts"], m["seq"])):
-            self.append_bubble(m["dir"] == "out", m["text"], m["ts"])
+        for m in sorted(self.app.session.cache.msgs(conv), key=lambda m: (m["ts"], min(m["seqs"].values()))):
+            self.append_bubble(m["dir"] == "out", m["text"], m["ts"],
+                               sender=None if m["dir"] == "out" else self._sender_label(thread, m))
         scroll_to_bottom(self.conversation_scroll)
         return False
 
@@ -694,7 +806,7 @@ class MessagesView(Gtk.Box):
         self.append_system_note(f"history unavailable: {e}")
         return False
 
-    def append_bubble(self, outgoing, text, ts):
+    def append_bubble(self, outgoing, text, ts, sender=None):
         stamp = datetime.fromtimestamp(ts / 1000).strftime("%H:%M") if ts else ""
         row = Gtk.ListBoxRow()
         row.set_selectable(False)
@@ -703,6 +815,11 @@ class MessagesView(Gtk.Box):
         for attr, val in (("margin-start", 8), ("margin-end", 8), ("margin-top", 8), ("margin-bottom", 1)):
             box.set_property(attr, val)
         box.set_halign(Gtk.Align.END if outgoing else Gtk.Align.START)
+        if sender and not outgoing:
+            who = Gtk.Label(label=sender)
+            who.set_xalign(0.0)
+            who.get_style_context().add_class("muted")
+            box.pack_start(who, False, False, 0)
         bubble = Gtk.Label()
         bubble.set_markup(GLib.markup_escape_text(text))
         bubble.set_line_wrap(True)
@@ -753,23 +870,41 @@ class MessagesView(Gtk.Box):
             return
         if self._send_in_flight:
             return
-        contact = self.selected["contact"]
+        thread = self.selected
+        conv = thread["conv"]
         ts = int(time.time() * 1000)
         self._send_in_flight = True
         self.send_button.set_sensitive(False)
         buf.set_text("")
 
-        def worker():
-            return self.app.session.client.send(contact["pubkey"], contact["node"], text, ts)
+        if thread.get("is_room"):
+            members = list(thread["members"].values())
 
-        def done(resp):
-            self._send_in_flight = False
-            self.send_button.set_sensitive(True)
-            self.app.session.cache.add_sent(contact["node"], resp.get("seq", 0), ts, text)
-            self.append_bubble(True, text, ts)
-            self.selected["preview"] = text
-            self.update_thread_row(contact["node"])
-            scroll_to_bottom(self.conversation_scroll)
+            def worker():
+                return self.app.session.client.send_room(members, conv, text, ts)
+
+            def done(seqs):
+                self._send_in_flight = False
+                self.send_button.set_sensitive(True)
+                self.app.session.cache.add_sent(conv, seqs, ts, text)
+                self.append_bubble(True, text, ts)
+                self.selected["preview"] = text
+                self.update_thread_row(conv)
+                scroll_to_bottom(self.conversation_scroll)
+        else:
+            contact = thread["contact"]
+
+            def worker():
+                return self.app.session.client.send(contact["pubkey"], contact["node"], text, ts)
+
+            def done(resp):
+                self._send_in_flight = False
+                self.send_button.set_sensitive(True)
+                self.app.session.cache.add_sent(conv, {contact["node"]: resp.get("seq", 0)}, ts, text)
+                self.append_bubble(True, text, ts)
+                self.selected["preview"] = text
+                self.update_thread_row(conv)
+                scroll_to_bottom(self.conversation_scroll)
 
         def fail(e):
             self._send_in_flight = False
@@ -781,24 +916,46 @@ class MessagesView(Gtk.Box):
 
     def incoming(self, ev):
         node = ev.get("from")
-        thread = self.threads.get(node)
-        if thread is None:
-            self.sync_sidebar()
-            thread = self.threads.get(node)
-            if thread is None:
-                return
         try:
             opened = self.app.session.client.decrypt_recv(ev)
         except (ValueError, KeyError):
             return
-        self.app.session.cache.add_recv(node, ev.get("seq", 0), opened["ts"], opened["text"])
+        session = self.app.session
+        conv = opened.get("conv") or node
+        if opened.get("conv"):
+            members = {}
+            for m in opened.get("members", []):
+                members[m["node"]] = {"node": m["node"], "pubkey": m["pubkey"],
+                                      "screen": m.get("screen", "")}
+            if members:
+                session.cache.ensure_room(conv, members)
+        contact_nodes = {info["node"] for info in session.contacts().values()}
+        if node not in contact_nodes:
+            if session.cache.is_muted(node):
+                return
+            session.cache.add_pending({
+                "node": node, "pubkey": opened.get("from"),
+                "screen": opened.get("screen") or node[:8],
+                "conv": opened.get("conv"), "members": opened.get("members") or [],
+                "seq": ev.get("seq", 0), "ts": opened["ts"], "text": opened["text"],
+            })
+            self.app.surface_pending_requests()
+            return
+        thread = self.threads.get(conv)
+        if thread is None:
+            self.sync_sidebar()
+            thread = self.threads.get(conv)
+            if thread is None:
+                return
+        session.cache.add_recv(conv, node, ev.get("seq", 0), opened["ts"], opened["text"])
         thread["preview"] = opened["text"]
         if self.selected is thread:
-            self.append_bubble(False, opened["text"], opened["ts"])
+            self.append_bubble(False, opened["text"], opened["ts"],
+                               sender=self._sender_label(thread, {"sender": node}))
             scroll_to_bottom(self.conversation_scroll)
         else:
             thread["unread"] += 1
-        self.update_thread_row(node)
+        self.update_thread_row(conv)
 
 
 class ContactsView(Gtk.Box):
@@ -1083,6 +1240,7 @@ class AimlessWindow(Gtk.Window):
         self.connect("destroy", self.on_destroy)
         self._presence_busy = False
         self._status_busy = False
+        self._request_open = False
         self._daemon_user_stopped = False
         saved_away = self.prefs.get("away", "")
         if saved_away:
@@ -1107,6 +1265,64 @@ class AimlessWindow(Gtk.Window):
 
         self._push_status(self.prefs.get("away") or None)
         GLib.timeout_add_seconds(STATUS_REASSERT_SECONDS, self._reassert_status)
+        GLib.idle_add(self.surface_pending_requests)
+
+    def _ask_request(self, req):
+        is_room = bool(req.get("conv"))
+        if is_room:
+            others = [m.get("screen") or m["node"][:8] for m in req.get("members", [])
+                      if m["node"] != self.session.self_node]
+            text = f"{req['screen']} invited you to a conversation with {', '.join(others)}"
+        else:
+            text = f"{req['screen']} wants to chat with you"
+        dlg = Gtk.MessageDialog(transient_for=self, modal=True,
+                                message_type=Gtk.MessageType.QUESTION,
+                                buttons=Gtk.ButtonsType.NONE, text=text)
+        dlg.format_secondary_text((req.get("text") or "")[:300])
+        dlg.add_buttons("Deny", Gtk.ResponseType.REJECT, "Accept", Gtk.ResponseType.ACCEPT)
+        dlg.set_default_response(Gtk.ResponseType.ACCEPT)
+        resp = dlg.run()
+        dlg.destroy()
+        return resp == Gtk.ResponseType.ACCEPT
+
+    def surface_pending_requests(self):
+        if getattr(self, "_request_open", False):
+            return GLib.SOURCE_REMOVE
+        req = self.session.cache.pending_pop()
+        if req is None:
+            return GLib.SOURCE_REMOVE
+        self._request_open = True
+        try:
+            accepted = self._ask_request(req)
+        finally:
+            self._request_open = False
+        if accepted:
+            contacts = protocol.load_contacts(contacts_path())
+            petname = req.get("screen") or req["node"][:8]
+            base, i = petname, 2
+            while petname in contacts:
+                petname = f"{base} {i}"
+                i += 1
+            contacts[petname] = {"pubkey": req["pubkey"], "node": req["node"],
+                                 "screen": req.get("screen") or req["node"][:8]}
+            protocol.save_contacts(contacts_path(), contacts)
+            self.session.cache.unmute(req["node"])
+            if req.get("conv"):
+                members = {m["node"]: {"node": m["node"], "pubkey": m["pubkey"],
+                                       "screen": m.get("screen", "")}
+                           for m in req.get("members", [])}
+                if members:
+                    self.session.cache.ensure_room(req["conv"], members)
+            self.session.cache.add_recv(req.get("conv") or req["node"], req["node"],
+                                        req.get("seq", 0), req.get("ts", 0), req.get("text", ""))
+            self.contacts.refresh()
+            self.messages.sync_sidebar()
+            self.activity.log(f"added {petname}")
+        else:
+            self.session.cache.mute(req["node"])
+            self.activity.log(f"denied {req.get('screen') or req['node'][:8]}")
+        GLib.idle_add(self.surface_pending_requests)
+        return GLib.SOURCE_REMOVE
 
     def on_view_changed(self, stack, param):
         if stack.get_visible_child_name() == "contacts":

@@ -163,8 +163,26 @@ class Client:
 
     def send(self, buddy_client_hex: str, buddy_node_hex: str, text: str, ts: int) -> dict:
         from . import protocol
-        payload = protocol.seal_message(self.identity, buddy_client_hex, text, ts)
+        payload = protocol.seal_message(self.identity, buddy_client_hex, text, ts,
+                                        screen=self.screen_name)
         return self.daemon.request("send", to=buddy_node_hex, payload=payload)
+
+    def send_room(self, members: list, conv: str, text: str, ts: int) -> dict:
+        """members: full member set [{node, pubkey, screen}] including self; one sealed
+        copy is sent to every member except self. Returns {node: seq} per stream."""
+        from . import protocol
+        triplets = [{"node": m["node"], "pubkey": m["pubkey"], "screen": m.get("screen", "")}
+                    for m in members]
+        my_node = self.node_key()
+        seqs = {}
+        for m in triplets:
+            if m["node"] == my_node:
+                continue
+            payload = protocol.seal_message(self.identity, m["pubkey"], text, ts,
+                                            screen=self.screen_name, conv=conv, members=triplets)
+            resp = self.daemon.request("send", to=m["node"], payload=payload)
+            seqs[m["node"]] = resp.get("seq", 0)
+        return seqs
 
     def set_status(self, buddy_client_hex: str, buddy_node_hex: str, away) -> dict:
         from . import protocol

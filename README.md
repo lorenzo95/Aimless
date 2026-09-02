@@ -84,7 +84,12 @@ Status is **announce-and-refresh, never stored**: the sender's app re-announces 
 {"v": 1, "kind": "msg", "from": "<64-hex client pubkey>", "body": "<json>", "sig": "<b64>"}
 ```
 
-`body` is the canonical JSON `{"text": …, "ts": …}` and `sig` is the sender's Ed25519 signature over `aimless\x01 + body`. The recipient verifies the signature against the claimed `from` key — sender authenticity is enforced at the client layer, independently of the transport.
+`body` is the canonical JSON `{"text": …, "ts": …}` plus, when the sender's client includes it, `"screen"` (their screen name) and — for group conversations — `"conv"` (the room id: a SHA-256 of the sorted member node keys, so identical member sets always agree on the conversation) and `"members"` (the full member set as `{"node", "pubkey", "screen"}` triplets, carried in every room message since there is no server to ask). `sig` is the sender's Ed25519 signature over `aimless\x01 + body`. The recipient verifies the signature against the claimed `from` key — sender authenticity is enforced at the client layer, independently of the transport.
+
+### Rooms and contact requests
+
+- **Rooms are conversations with 3+ members**, delivered by client-side fan-out: the sender seals one copy per member and the daemon's normal retry/ACK/offline machinery handles each copy. Membership is learned from the messages themselves (advisory by design — a member can restate it, but every message is individually signed, so nobody can impersonate anyone). Room presence reflects the members who are your contacts.
+- **First contact is a handshake**: a chat message from someone not in your contacts pops an *Accept / Deny* dialog (persisted if the app is closed). **Accept** adds them and delivers the message; **Deny** mutes the node — their messages are dropped silently. Adding someone's invite later un-mutes them. All participants need aimless ≥ 0.5.0 for rooms; older clients simply see room messages as ordinary DMs from the sender.
 
 ### What the daemon knows vs. can't know
 

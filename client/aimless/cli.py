@@ -197,7 +197,7 @@ def cmd_send(args):
     cache = crypto.Cache(cache_path(), _passphrase_for_cache())
     ts = int(time.time() * 1000)
     resp = client.send(buddy["pubkey"], buddy["node"], args.text, ts)
-    cache.add_sent(buddy["node"], resp.get("seq", 0), ts, args.text)
+    cache.add_sent(buddy["node"], {buddy["node"]: resp.get("seq", 0)}, ts, args.text)
     print(f"queued (seq {resp.get('seq')})")
 
 
@@ -233,14 +233,15 @@ def cmd_chat(args):
     pw = _passphrase_for_cache()
     cache = crypto.Cache(cache_path(), pw)
 
-    resp = client.history(buddy_node, cache.recv_last(buddy_node))
+    resp = client.history(buddy_node, cache.recv_last(buddy_node, buddy_node))
     oldest, latest = resp.get("oldest", 0), resp.get("latest", 0)
-    if latest and cache.recv_last(buddy_node) and cache.recv_last(buddy_node) + 1 < oldest:
+    cur = cache.recv_last(buddy_node, buddy_node)
+    if latest and cur and cur + 1 < oldest:
         print(f"[gap: history before seq {oldest} no longer held by daemon]")
     for m in resp.get("msgs", []):
         try:
             opened = protocol.open_message(client.identity, m["payload"])
-            cache.add_recv(buddy_node, m["seq"], opened["ts"], opened["text"])
+            cache.add_recv(buddy_node, buddy_node, m["seq"], opened["ts"], opened["text"])
         except (ValueError, KeyError):
             continue
 
@@ -251,7 +252,7 @@ def cmd_chat(args):
         pass
 
     print(f"── chat with {buddy_screen} ({args.petname}) ──  /away <msg> /back /quit")
-    for m in sorted(cache.msgs(buddy_node), key=lambda m: (m["ts"], m["seq"])):
+    for m in sorted(cache.msgs(buddy_node), key=lambda m: (m["ts"], m["seqs"].get(buddy_node, 0))):
         who = client.screen_name if m["dir"] == "out" else buddy_screen
         stamp = time.strftime("%H:%M", time.localtime(m["ts"] / 1000))
         print(f"[{stamp}] {who}: {m['text']}")
@@ -273,7 +274,7 @@ def cmd_chat(args):
             continue
         ts = int(time.time() * 1000)
         resp = client.send(buddy_client, buddy_node, line, ts)
-        cache.add_sent(buddy_node, resp.get("seq", 0), ts, line)
+        cache.add_sent(buddy_node, {buddy_node: resp.get("seq", 0)}, ts, line)
         stamp = time.strftime("%H:%M")
         print(f"[{stamp}] {client.screen_name}: {line}")
         while True:
@@ -288,7 +289,7 @@ def _handle_event(client, cache, buddy_node, buddy_screen, ev):
         return
     try:
         opened = client.decrypt_recv(ev)
-        cache.add_recv(buddy_node, ev.get("seq", 0), opened["ts"], opened["text"])
+        cache.add_recv(buddy_node, buddy_node, ev.get("seq", 0), opened["ts"], opened["text"])
         stamp = time.strftime("%H:%M", time.localtime(opened["ts"] / 1000))
         print(f"\r[{stamp}] {buddy_screen}: {opened['text']}")
         print("> ", end="", flush=True)

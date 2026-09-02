@@ -395,3 +395,118 @@ def test_status_survives_own_daemon_restart(gtk_app):
             "away not re-delivered after own daemon restart (probe piggyback broken)"
     finally:
         proc.terminate()
+
+
+def test_gui_room_create_send_receive(gtk_app):
+    app = gtk_app
+    win = app["win"]
+    bob = app["bob"]
+    a_node = app["a_node"]
+    b_node = app["b_node"]
+
+    # a third party for the room: carol, known to alice via contacts only
+    carol_identity = crypto.new_identity()
+    carol = Client(DaemonClient(app["sock_b"]), carol_identity, "Carol")
+    c_node = "cd" * 32  # fake node for carol (not probing)
+    chosen = [
+        {"node": b_node, "pubkey": bob.pubkey_hex, "screen": "Bob"},
+        {"node": c_node, "pubkey": carol.pubkey_hex, "screen": "Carol"},
+    ]
+
+    win.messages.create_room(chosen)
+    conv = None
+    for key, t in win.messages.threads.items():
+        if t.get("is_room"):
+            conv = key
+    assert conv is not None, "room thread missing after create_room"
+    thread = win.messages.threads[conv]
+    assert "Bob" in thread["screen"] and "Carol" in thread["screen"]
+    assert not thread["contact"]
+
+    win.messages.thread_list.select_row(thread["row"])
+    buf = win.messages.composer.get_buffer()
+    buf.set_text("hello room")
+    win.messages.send_message()
+
+    def bob_got_room_msg():
+        hist = bob.history(a_node, 0)
+        if not hist.get("msgs"):
+            return False
+        opened = protocol.open_message(app["bob_identity"], hist["msgs"][-1]["payload"])
+        return opened["text"] == "hello room" and opened["conv"] == conv
+    assert _pump(win, bob_got_room_msg, timeout=30), "room message never reached bob"
+
+    texts = [m["text"] for m in win.session.cache.msgs(conv)]
+    assert "hello room" in texts
+
+
+def test_gui_request_accept_and_deny(gtk_app, tmp_path, monkeypatch):
+    app = gtk_app
+    win = app["win"]
+    contacts_path = str(app["home"] / "client-contacts.json")
+
+    stranger_node = "ab" * 32
+    req = {"node": stranger_node, "pubkey": "ff" * 32, "screen": "Mallory",
+           "conv": None, "members": [], "seq": 1, "ts": 1000, "text": "hi there"}
+    win.session.cache.add_pending(req)
+
+    answers = []
+    monkeypatch.setattr(win, "_ask_request", lambda r: answers.append(True) or True)
+    win.surface_pending_requests()
+
+    contacts = protocol.load_contacts(contacts_path)
+    assert "Mallory" in contacts
+    assert contacts["Mallory"]["node"] == stranger_node
+    assert not win.session.cache.pending()
+    texts = [m["text"] for m in win.session.cache.msgs(stranger_node)]
+    assert "hi there" in texts
+    assert stranger_node in win.messages.threads, "accepted stranger has no thread"
+
+    # deny the next one → muted, no contact, no thread, message dropped
+    stranger2 = "cd" * 32
+    win.session.cache.add_pending({"node": stranger2, "pubkey": "ee" * 32, "screen": "Spam",
+                                   "conv": None, "members": [], "seq": 2, "ts": 1001, "text": "buy stuff"})
+    monkeypatch.setattr(win, "_ask_request", lambda r: False)
+    win.surface_pending_requests()
+    contacts = protocol.load_contacts(contacts_path)
+    assert "Spam" not in contacts
+    assert win.session.cache.is_muted(stranger2)
+    assert win.session.cache.msgs(stranger2) == []
+    assert stranger2 not in win.messages.threads
+
+
+def test_gui_request_persists_until_answered(gtk_app):
+    app = gtk_app
+    win = app["win"]
+    req = {"node": "ef" * 32, "pubkey": "11" * 32, "screen": "Later",
+           "conv": None, "members": [], "seq": 3, "ts": 1002, "text": "hey"}
+    win.session.cache.add_pending(req)
+    # a fresh Session on the same cache must still see the pending request
+    fresh = gtkui.Session("testpass")
+    assert fresh.cache.pending() and fresh.cache.pending()[0]["node"] == "ef" * 32
+
+
+def test_gui_incoming_from_unknown_sender_queues_request(gtk_app, monkeypatch):
+    app = gtk_app
+    win = app["win"]
+    b_node = app["b_node"]
+
+    # simulate a v0.5 room invite arriving from bob... no — from a node NOT in contacts:
+    stranger = "99" * 32
+    alice_ident = win.session.identity
+    payload = protocol.seal_message(alice_ident, alice_ident and _self_pub(app), "let me in", 500,
+                                    screen="Newbie")
+    ev = {"op": "recv", "from": stranger, "seq": 7, "payload": payload}
+    monkeypatch.setattr(win, "_ask_request", lambda r: True)
+    win.messages.incoming(ev)
+
+    # the synchronous stub accepted the request, so pending is consumed and applied
+    contacts = protocol.load_contacts(str(app["home"] / "client-contacts.json"))
+    assert "Newbie" in contacts
+    # accepted → message delivered into the new thread
+    texts = [m["text"] for m in win.session.cache.msgs(stranger)]
+    assert "let me in" in texts
+
+
+def _self_pub(app):
+    return app["session"].client.pubkey_hex

@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import os
 
@@ -65,10 +66,23 @@ def _verify(from_hex: str, body: bytes, sig_b64: str) -> bool:
         return False
 
 
+def room_id(member_nodes) -> str:
+    """Stable conversation id for a room: identical member sets always agree."""
+    return hashlib.sha256("|".join(sorted(member_nodes)).encode("utf-8")).hexdigest()
+
+
 def seal_message(
-    identity: nacl.signing.SigningKey, buddy_pubkey_hex: str, text: str, ts: int
+    identity: nacl.signing.SigningKey, buddy_pubkey_hex: str, text: str, ts: int,
+    screen: str = None, conv: str = None, members=None,
 ) -> str:
-    body = json.dumps({"text": text, "ts": ts}, sort_keys=True).encode("utf-8")
+    body_obj = {"text": text, "ts": ts}
+    if screen:
+        body_obj["screen"] = screen
+    if conv is not None:
+        body_obj["conv"] = conv
+    if members is not None:
+        body_obj["members"] = members
+    body = json.dumps(body_obj, sort_keys=True).encode("utf-8")
     sig = _sign(identity, body)
     inner = json.dumps(
         {"v": 1, "kind": "msg", "from": bytes(identity.verify_key).hex(), "body": body.decode(), "sig": sig}
@@ -92,7 +106,11 @@ def open_message(
     body_obj = json.loads(msg["body"])
     if not _verify(msg["from"], msg["body"].encode("utf-8"), msg["sig"]):
         raise ValueError("bad signature")
-    return {"from": msg["from"], "text": body_obj["text"], "ts": body_obj["ts"]}
+    out = {"from": msg["from"], "text": body_obj["text"], "ts": body_obj["ts"]}
+    for field in ("screen", "conv", "members"):
+        if field in body_obj:
+            out[field] = body_obj[field]
+    return out
 
 
 def seal_status(

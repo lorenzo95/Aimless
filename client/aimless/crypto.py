@@ -78,7 +78,7 @@ class Cache:
         salt = hashlib.sha256(b"aimless-cache" + kdf_key(passphrase, b"aimless-cache-salt")).digest()[:16]
         self._key = kdf_key(passphrase, salt)
         self._box = nacl.secret.SecretBox(self._key)
-        self._data = {"buddies": {}}
+        self._data = {"conversations": {}, "muted": [], "pending": []}
         self._load()
 
     def _load(self) -> None:
@@ -88,7 +88,30 @@ class Cache:
             blob = f.read()
         nonce = blob[: nacl.secret.SecretBox.NONCE_SIZE]
         ct = blob[nacl.secret.SecretBox.NONCE_SIZE :]
-        self._data = json.loads(self._box.decrypt(ct, nonce))
+        data = json.loads(self._box.decrypt(ct, nonce))
+        if "buddies" in data and "conversations" not in data:
+            data = self._migrate(data)
+            self._data = data
+            self._flush()
+        else:
+            self._data = data
+
+    @staticmethod
+    def _migrate(old: dict) -> dict:
+        convs = {}
+        for key, b in old.get("buddies", {}).items():
+            convs[key] = {
+                "dm": True,
+                "members": {},
+                "msgs": [
+                    {"dir": m["dir"], "seqs": {key: m["seq"]}, "ts": m["ts"], "text": m["text"],
+                     "sender": key if m["dir"] == "in" else "self"}
+                    for m in b["msgs"]
+                ],
+                "recv_last": {key: b["recv_last"]},
+                "sent_last": {key: b["sent_last"]},
+            }
+        return {"conversations": convs, "muted": [], "pending": []}
 
     def _flush(self) -> None:
         blob = self._box.encrypt(json.dumps(self._data).encode("utf-8"))
@@ -98,31 +121,76 @@ class Cache:
             f.write(blob)
         os.replace(tmp, self.path)
 
-    def buddy(self, pubkey_hex: str) -> dict:
-        return self._data["buddies"].setdefault(pubkey_hex, {"msgs": [], "recv_last": 0, "sent_last": 0})
+    def conversation(self, conv_id: str) -> dict:
+        return self._data["conversations"].setdefault(
+            conv_id, {"dm": True, "members": {}, "msgs": [], "recv_last": {}, "sent_last": {}})
 
-    def add_recv(self, pubkey_hex: str, seq: int, ts: int, text: str) -> bool:
-        b = self.buddy(pubkey_hex)
-        if any(m["dir"] == "in" and m["seq"] == seq for m in b["msgs"]):
+    def ensure_room(self, conv_id: str, members: dict) -> dict:
+        c = self.conversation(conv_id)
+        c["dm"] = False
+        c["members"] = members
+        self._flush()
+        return c
+
+    def rooms(self) -> list:
+        return [cid for cid, c in self._data["conversations"].items() if not c.get("dm")]
+
+    def members(self, conv_id: str) -> dict:
+        return dict(self.conversation(conv_id)["members"])
+
+    def add_recv(self, conv_id: str, sender_node: str, seq: int, ts: int, text: str) -> bool:
+        c = self.conversation(conv_id)
+        if any(m["dir"] == "in" and m["seqs"].get(sender_node) == seq for m in c["msgs"]):
             return False
-        b["msgs"].append({"dir": "in", "seq": seq, "ts": ts, "text": text})
-        if seq > b["recv_last"]:
-            b["recv_last"] = seq
+        c["msgs"].append({"dir": "in", "seqs": {sender_node: seq}, "ts": ts, "text": text,
+                          "sender": sender_node})
+        if seq > c["recv_last"].get(sender_node, 0):
+            c["recv_last"][sender_node] = seq
         self._flush()
         return True
 
-    def add_sent(self, pubkey_hex: str, seq: int, ts: int, text: str) -> bool:
-        b = self.buddy(pubkey_hex)
-        if any(m["dir"] == "out" and m["seq"] == seq for m in b["msgs"]):
-            return False
-        b["msgs"].append({"dir": "out", "seq": seq, "ts": ts, "text": text})
-        if seq > b["sent_last"]:
-            b["sent_last"] = seq
+    def add_sent(self, conv_id: str, seqs: dict, ts: int, text: str) -> bool:
+        c = self.conversation(conv_id)
+        for m in c["msgs"]:
+            if m["dir"] == "out" and all(m["seqs"].get(n) == s for n, s in seqs.items()):
+                return False
+        c["msgs"].append({"dir": "out", "seqs": dict(seqs), "ts": ts, "text": text, "sender": "self"})
+        for n, s in seqs.items():
+            if s > c["sent_last"].get(n, 0):
+                c["sent_last"][n] = s
         self._flush()
         return True
 
-    def msgs(self, pubkey_hex: str) -> list:
-        return list(self.buddy(pubkey_hex)["msgs"])
+    def msgs(self, conv_id: str) -> list:
+        return list(self.conversation(conv_id)["msgs"])
 
-    def recv_last(self, pubkey_hex: str) -> int:
-        return self.buddy(pubkey_hex)["recv_last"]
+    def recv_last(self, conv_id: str, node: str) -> int:
+        return self.conversation(conv_id)["recv_last"].get(node, 0)
+
+    def is_muted(self, node: str) -> bool:
+        return node in self._data["muted"]
+
+    def mute(self, node: str) -> None:
+        if node not in self._data["muted"]:
+            self._data["muted"].append(node)
+            self._flush()
+
+    def unmute(self, node: str) -> None:
+        if node in self._data["muted"]:
+            self._data["muted"].remove(node)
+            self._flush()
+
+    def add_pending(self, req: dict) -> None:
+        if not any(p.get("node") == req.get("node") for p in self._data["pending"]):
+            self._data["pending"].append(req)
+            self._flush()
+
+    def pending(self) -> list:
+        return list(self._data["pending"])
+
+    def pending_pop(self) -> dict:
+        if not self._data["pending"]:
+            return None
+        req = self._data["pending"].pop(0)
+        self._flush()
+        return req
