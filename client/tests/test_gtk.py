@@ -257,3 +257,48 @@ def _pump(win, cond, timeout=30.0):
             return True
         time.sleep(0.02)
     return False
+
+
+def test_gui_full_stack_real_poll_and_click(gtk_app):
+    app = gtk_app
+    win = app["win"]
+
+    def real_pump(seconds):
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+            time.sleep(0.02)
+
+    # Un-stub poll_status: run the REAL timer handler (presence + status via daemon).
+    def real_poll():
+        try:
+            win.supervisor.child = None  # poll_status calls supervisor.status(); guard
+        except Exception:
+            pass
+        return win.poll_status()
+
+    try:
+        win.poll_status()  # first real call
+        real_pump(2.0)
+
+        # un-stub the periodic timer too
+        orig = win.poll_status
+        win.poll_status = real_poll
+        b_node = app["b_node"]
+        row = win.messages.threads[b_node]["row"]
+        win.messages.thread_list.select_row(row)  # the click
+
+        buf = win.messages.composer.get_buffer()
+        buf.set_text("full-stack click+send")
+        win.messages.send_message()
+        real_pump(2.0)
+
+        def delivered():
+            hist = app["bob"].history(app["a_node"], 0)
+            if not hist.get("msgs"):
+                return False
+            return any(True for _ in hist["msgs"])
+        assert delivered(), "message never landed via real presence path"
+    finally:
+        win.poll_status = orig

@@ -1,4 +1,5 @@
 import os
+import sys
 
 import pytest
 
@@ -76,3 +77,39 @@ def test_corrupt_cache_session_recovery(tmp_path, monkeypatch):
         session.cache_recovered = str(e)
     assert session.cache_recovered
     assert os.path.exists(str(cache) + ".bad")
+
+
+def test_tray_template_compiles(tmp_path):
+    import py_compile, tempfile
+    code = gtkui.TRAY_SCRIPT_TEMPLATE.format(
+        pid_file=str(tmp_path / "tray.pid"),
+        pyz_path="/fake/aimless.pyz",
+        ui_cmd=[sys.executable, "/fake/aimless.pyz", "gui"],
+        log_file=str(tmp_path / "tray.log"),
+        icon_name="user-available-symbolic",
+    )
+    f = tmp_path / "tray_code.py"
+    f.write_text(code)
+    py_compile.compile(str(f), doraise=True)
+
+
+def test_tray_script_runs_and_logs(tmp_path):
+    import subprocess, sys, time
+    log = tmp_path / "tray.log"
+    code = gtkui.TRAY_SCRIPT_TEMPLATE.format(
+        pid_file=str(tmp_path / "tray.pid"),
+        pyz_path=os.getcwd(),
+        ui_cmd=[sys.executable, "-c", "pass"],
+        log_file=str(log),
+        icon_name="user-available-symbolic",
+    )
+    p = subprocess.Popen([sys.executable, "-c", code],
+                         stderr=subprocess.PIPE, text=True)
+    time.sleep(4)
+    if p.poll() is not None:
+        err = p.stderr.read()
+        raise AssertionError(f"tray script exited early: {err}")
+    p.terminate()
+    p.wait()
+    assert log.exists(), "tray never wrote its log (died before _log)"
+    assert "tray started" in log.read_text()

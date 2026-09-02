@@ -1525,7 +1525,7 @@ def tray_alive():
         return None
 
 
-TRAY_SCRIPT_TEMPLATE = """
+TRAY_SCRIPT_TEMPLATE = r"""
 import gi, sys, os, signal, subprocess, time, traceback, threading
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, GLib
@@ -1707,6 +1707,7 @@ def run_tray(open_gui=False):
     state = {"shutting_down": False}
 
     def supervise():
+        nonlocal tray_proc
         if state["shutting_down"]:
             return GLib.SOURCE_REMOVE
         if not supervisor.is_running():
