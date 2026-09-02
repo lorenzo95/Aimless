@@ -410,6 +410,17 @@ class Session:
         return protocol.make_invite(self.identity, who["key"], self.self_screen)
 
 
+def _room_dots_markup(members, presence_by_node, exclude):
+    """One presence dot per room member (sorted like the title), excluding self."""
+    parts = []
+    for screen, node in sorted((m.get("screen") or n[:8], n) for n, m in members.items()
+                               if n != exclude):
+        p = presence_by_node.get(node, {})
+        color = "#a6e3a1" if p.get("online") else ("#fab387" if p.get("away") else "#6c7086")
+        parts.append(f"<span foreground='{color}'>●</span>")
+    return "".join(parts)
+
+
 def run_async(fn, on_done=None, on_error=None):
     def worker():
         try:
@@ -497,6 +508,12 @@ class MessagesView(Gtk.Box):
         self.conversation_header.set_ellipsize(Pango.EllipsizeMode.END)
         self.conversation_header.set_xalign(0.0)
         header_box.pack_start(self.conversation_header, True, True, 0)
+        self.clear_btn = Gtk.Button(label="Clear history…")
+        self.clear_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self.clear_btn.set_valign(Gtk.Align.START)
+        self.clear_btn.get_style_context().add_class("muted")
+        self.clear_btn.connect("clicked", self.on_clear_history)
+        header_box.pack_end(self.clear_btn, False, False, 0)
         conversation_box.pack_start(header_box, False, False, 0)
         conversation_box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
 
@@ -580,7 +597,7 @@ class MessagesView(Gtk.Box):
                 thread = {
                     "node": conv, "conv": conv, "is_room": True, "petname": None, "contact": None,
                     "members": members, "screen": title, "online": False, "away": None,
-                    "preview": "", "unread": 0,
+                    "preview": "", "unread": 0, "presence_by_node": {},
                 }
                 self.threads[conv] = thread
                 self.append_thread_row(conv, thread)
@@ -636,8 +653,22 @@ class MessagesView(Gtk.Box):
     def refresh_presence(self, presence):
         for conv, thread in self.threads.items():
             if thread.get("is_room"):
-                known = [n for n in thread["members"] if n != self.app.session.self_node]
-                thread["online"] = any(presence.get(n, {}).get("online") for n in known)
+                pb = {}
+                for n in thread["members"]:
+                    if n == self.app.session.self_node:
+                        continue
+                    p = presence.get(n, {})
+                    away = None
+                    if p.get("status_payload"):
+                        try:
+                            st = self.app.session.client.decrypt_status(p["status_payload"])
+                            if st.get("away"):
+                                away = st["away"]
+                        except (ValueError, KeyError):
+                            pass
+                    pb[n] = {"online": p.get("online", False), "away": away}
+                thread["presence_by_node"] = pb
+                thread["online"] = any(v["online"] for v in pb.values())
                 thread["away"] = None
             else:
                 p = presence.get(conv, {})
@@ -658,10 +689,14 @@ class MessagesView(Gtk.Box):
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         box.set_border_width(10)
 
-        dot_color = "#a6e3a1" if thread["online"] else ("#fab387" if thread["away"] else "#6c7086")
+        if thread.get("is_room"):
+            initial = _room_dots_markup(thread["members"], thread.get("presence_by_node", {}),
+                                        self.app.session.self_node)
+        else:
+            dot_color = "#a6e3a1" if thread["online"] else ("#fab387" if thread["away"] else "#6c7086")
+            initial = f"<span foreground='{dot_color}'>●</span>"
         title = Gtk.Label()
-        title.set_markup(
-            f"<span foreground='{dot_color}'>●</span>  <b>{GLib.markup_escape_text(thread['screen'])}</b>")
+        title.set_markup(f"{initial}  <b>{GLib.markup_escape_text(thread['screen'])}</b>")
         title.set_xalign(0.0)
         title.set_ellipsize(Pango.EllipsizeMode.END)
         title.set_use_markup(True)
@@ -699,9 +734,14 @@ class MessagesView(Gtk.Box):
         if not thread or "row" not in thread:
             return
         w = thread["widgets"]
-        dot_color = "#a6e3a1" if thread["online"] else ("#fab387" if thread["away"] else "#6c7086")
-        w["title"].set_markup(
-            f"<span foreground='{dot_color}'>●</span>  <b>{GLib.markup_escape_text(thread['screen'])}</b>")
+        if thread.get("is_room"):
+            dots = _room_dots_markup(thread["members"], thread.get("presence_by_node", {}),
+                                     self.app.session.self_node)
+            w["title"].set_markup(f"{dots}  <b>{GLib.markup_escape_text(thread['screen'])}</b>")
+        else:
+            dot_color = "#a6e3a1" if thread["online"] else ("#fab387" if thread["away"] else "#6c7086")
+            w["title"].set_markup(
+                f"<span foreground='{dot_color}'>●</span>  <b>{GLib.markup_escape_text(thread['screen'])}</b>")
         w["subtitle"].set_text(thread["away"] if thread["away"] else thread["preview"])
         if thread["unread"] > 0 and not w["badge"]:
             badge = Gtk.Label()
@@ -766,7 +806,9 @@ class MessagesView(Gtk.Box):
         nodes = (list(thread["members"].keys()) if thread and thread.get("is_room") else [conv])
 
         def worker():
-            return {n: session.client.history(n, session.cache.recv_last(conv, n)) for n in nodes}
+            # the daemon journals everything a buddy ever sent us in one stream per
+            # sender; each conversation scans that stream and keeps only its own
+            return {n: session.client.history(n, session.cache.scan_last(conv, n)) for n in nodes}
 
         def done(hists):
             self._history_busy = False
@@ -783,15 +825,22 @@ class MessagesView(Gtk.Box):
             return False
         thread = self.selected
         for member, hist in hists.items():
+            pre_scan = self.app.session.cache.scan_last(conv, member)
+            max_seen = 0
             for m in hist.get("msgs", []):
+                max_seen = max(max_seen, m["seq"])
                 try:
                     opened = protocol.open_message(self.app.session.identity, m["payload"])
                 except (ValueError, KeyError):
                     continue
+                msg_conv = opened.get("conv") or member
+                if msg_conv != conv:
+                    continue
                 self.app.session.cache.add_recv(conv, member, m["seq"], opened["ts"], opened["text"])
+            if max_seen:
+                self.app.session.cache.set_scan_last(conv, member, max_seen)
             oldest = hist.get("oldest", 0)
-            cur = self.app.session.cache.recv_last(conv, member)
-            if cur and oldest and cur + 1 < oldest:
+            if pre_scan and oldest and pre_scan + 1 < oldest:
                 self.append_system_note(
                     f"gap — messages from {self._sender_label(thread, {'sender': member}) or member[:8]} "
                     f"before seq {oldest} were dropped by retention")
@@ -853,6 +902,32 @@ class MessagesView(Gtk.Box):
         self.conversation.add(row)
         row.show_all()
         scroll_to_bottom(self.conversation_scroll)
+
+    def _confirm_clear(self, title):
+        dlg = Gtk.MessageDialog(transient_for=self.get_toplevel(), modal=True,
+                                message_type=Gtk.MessageType.WARNING,
+                                text=f"Clear history with {title}?",
+                                buttons=Gtk.ButtonsType.OK_CANCEL)
+        dlg.format_secondary_text(
+            "This conversation is emptied and its history re-fetched from the daemon "
+            "next time you open it (messages already dropped by retention stay gone).")
+        dlg.set_default_response(Gtk.ResponseType.CANCEL)
+        resp = dlg.run()
+        dlg.destroy()
+        return resp == Gtk.ResponseType.OK
+
+    def on_clear_history(self, *_):
+        if self.selected is None:
+            return
+        title = self.selected["screen"]
+        if not self._confirm_clear(title):
+            return
+        conv = self.selected["conv"]
+        self.app.session.cache.clear_history(conv)
+        self.selected["preview"] = ""
+        clear_children(self.conversation)
+        self.update_thread_row(conv)
+        self.load_history_async(conv)
 
     def on_composer_key(self, widget, event):
         if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and not (event.state & Gdk.ModifierType.SHIFT_MASK):

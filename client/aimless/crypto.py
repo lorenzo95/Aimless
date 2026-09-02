@@ -94,6 +94,8 @@ class Cache:
             self._data = data
             self._flush()
         else:
+            for c in data.get("conversations", {}).values():
+                c.setdefault("scan_last", dict(c.get("recv_last", {})))
             self._data = data
 
     @staticmethod
@@ -110,6 +112,7 @@ class Cache:
                 ],
                 "recv_last": {key: b["recv_last"]},
                 "sent_last": {key: b["sent_last"]},
+                "scan_last": {key: b["recv_last"]},
             }
         return {"conversations": convs, "muted": [], "pending": []}
 
@@ -123,7 +126,8 @@ class Cache:
 
     def conversation(self, conv_id: str) -> dict:
         return self._data["conversations"].setdefault(
-            conv_id, {"dm": True, "members": {}, "msgs": [], "recv_last": {}, "sent_last": {}})
+            conv_id, {"dm": True, "members": {}, "msgs": [], "recv_last": {}, "sent_last": {},
+                      "scan_last": {}})
 
     def ensure_room(self, conv_id: str, members: dict) -> dict:
         c = self.conversation(conv_id)
@@ -166,6 +170,25 @@ class Cache:
 
     def recv_last(self, conv_id: str, node: str) -> int:
         return self.conversation(conv_id)["recv_last"].get(node, 0)
+
+    def scan_last(self, conv_id: str, node: str) -> int:
+        """Fetch cursor: highest journal seq already examined for this conversation
+        from this member, regardless of which conversation the messages belonged to."""
+        return self.conversation(conv_id).setdefault("scan_last", {}).get(node, 0)
+
+    def set_scan_last(self, conv_id: str, node: str, seq: int) -> None:
+        c = self.conversation(conv_id)
+        scan = c.setdefault("scan_last", {})
+        if seq > scan.get(node, 0):
+            scan[node] = seq
+            self._flush()
+
+    def clear_history(self, conv_id: str) -> None:
+        c = self.conversation(conv_id)
+        c["msgs"] = []
+        c["recv_last"] = {}
+        c["scan_last"] = {}
+        self._flush()
 
     def is_muted(self, node: str) -> bool:
         return node in self._data["muted"]

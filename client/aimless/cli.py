@@ -241,9 +241,11 @@ def cmd_chat(args):
     for m in resp.get("msgs", []):
         try:
             opened = protocol.open_message(client.identity, m["payload"])
-            cache.add_recv(buddy_node, buddy_node, m["seq"], opened["ts"], opened["text"])
         except (ValueError, KeyError):
             continue
+        if opened.get("conv") is not None:
+            continue
+        cache.add_recv(buddy_node, buddy_node, m["seq"], opened["ts"], opened["text"])
 
     client.add_contact(buddy_node)
     try:

@@ -510,3 +510,88 @@ def test_gui_incoming_from_unknown_sender_queues_request(gtk_app, monkeypatch):
 
 def _self_pub(app):
     return app["session"].client.pubkey_hex
+
+
+def test_room_history_excludes_dm_history(gtk_app):
+    """Regression: creating a room must NOT pull the buddies' old DMs into it,
+    and room messages must not leak into the DM threads."""
+    app = gtk_app
+    win = app["win"]
+    bob = app["bob"]
+    a_node = app["a_node"]
+    b_node = app["b_node"]
+
+    ts = int(time.time() * 1000)
+    bob.send(app["session"].client.pubkey_hex, a_node, "old private dm", ts)
+
+    def dm_arrived():
+        hist = win.session.client.history(b_node, 0)
+        msgs = hist.get("msgs", [])
+        return any(protocol.open_message(win.session.identity, m["payload"])["text"] == "old private dm"
+                   for m in msgs)
+    assert _pump(win, dm_arrived, timeout=30), "setup: dm never reached alice"
+
+    chosen = [{"node": b_node, "pubkey": bob.pubkey_hex, "screen": "Bob"},
+              {"node": "cd" * 32, "pubkey": "aa" * 32, "screen": "Carol"}]
+    win.messages.create_room(chosen)
+    conv = next(k for k, t in win.messages.threads.items() if t.get("is_room"))
+
+    def room_scanned_clean():
+        win.messages.thread_list.select_row(win.messages.threads[conv]["row"])
+        msgs = win.session.cache.msgs(conv)
+        scanned = win.session.cache.scan_last(conv, b_node) > 0
+        return scanned and all(m["text"] != "old private dm" for m in msgs)
+    assert _pump(win, room_scanned_clean, timeout=30), "room polluted with DM history"
+    assert win.session.cache.msgs(conv) == [], "room should have no history yet"
+
+    # a real room message arrives and is the only thing in the room
+    carol_key = crypto.new_identity()
+    members = [{"node": a_node, "pubkey": app["session"].client.pubkey_hex, "screen": "Alice"},
+               {"node": b_node, "pubkey": bob.pubkey_hex, "screen": "Bob"},
+               {"node": "cd" * 32, "pubkey": bytes(carol_key.verify_key).hex(), "screen": "Carol"}]
+    bob.send_room(members, conv, "first room msg", ts + 100)
+
+    def room_msg_only():
+        msgs = win.session.cache.msgs(conv)
+        return [m["text"] for m in msgs] == ["first room msg"]
+    assert _pump(win, lambda: (win.messages.thread_list.select_row(
+        win.messages.threads[conv]["row"]), room_msg_only())[-1], timeout=30)
+
+    # and the DM thread must not contain the room message
+    win.messages.thread_list.select_row(win.messages.threads[b_node]["row"])
+    dm_texts = [m["text"] for m in win.session.cache.msgs(b_node)]
+    assert "old private dm" in dm_texts
+    assert "first room msg" not in dm_texts
+
+
+def test_clear_history_refetches_clean(gtk_app, monkeypatch):
+    app = gtk_app
+    win = app["win"]
+    b_node = app["b_node"]
+
+    ts = int(time.time() * 1000)
+    win.session.cache.add_recv(b_node, b_node, 1, ts, "kept msg")
+    monkeypatch.setattr(win.messages, "_confirm_clear", lambda title: True)
+
+    win.messages.selected = win.messages.threads[b_node]
+    win.messages.on_clear_history()
+
+    assert win.session.cache.msgs(b_node) == []
+    assert win.session.cache.scan_last(b_node, b_node) == 0
+    assert win.session.cache.recv_last(b_node, b_node) == 0
+
+
+def test_room_dots_markup():
+    from aimless.gtkui import _room_dots_markup
+    members = {"n1": {"screen": "Bob"}, "n2": {"screen": "Carol"}, "n3": {"screen": "Dan"}}
+    pb = {"n1": {"online": True, "away": None},
+          "n2": {"online": False, "away": "gone"},
+          "n3": {}}
+    markup = _room_dots_markup(members, pb, exclude="me")
+    assert markup.count("●") == 3
+    greens = markup.count("#a6e3a1")
+    oranges = markup.count("#fab387")
+    grays = markup.count("#6c7086")
+    assert (greens, oranges, grays) == (1, 1, 1), markup
+    # self is excluded
+    assert _room_dots_markup({"me": {"screen": "Me"}}, {}, exclude="me") == ""
