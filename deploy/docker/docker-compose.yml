@@ -1,0 +1,14 @@
+services:
+  aimless-webtop:
+    build: .
+    image: aimless-webtop:local
+    container_name: aimless-webtop
+    ports:
+      - 127.0.0.1:8080:8080   # noVNC web UI (http://localhost:8080/vnc.html)
+      - 127.0.0.1:5900:5900   # raw VNC (optional)
+    environment:
+      - VNC_PASS=${VNC_PASS:-aimless}   # password for the noVNC connection prompt
+    restart: unless-stopped
+    shm_size: "512mb"   # GTK + Xvfb need /dev/shm
+    volumes:
+      - ./aimless-data:/data            # identity, cache, contacts, daemon state, peers

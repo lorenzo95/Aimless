@@ -12,12 +12,20 @@ wget https://raw.githubusercontent.com/lorenzo95/Aimless/main/dist/aimless.pyz
 
 chmod +x aimlessd-linux-amd64 aimless.pyz
 
-./aimless.pyz init    # once: passphrase + screen name
-./aimless.pyz         # tray + daemon + messages window
+./aimless.pyz         # first run: the window asks you to create your identity
+                      #   (passphrase + screen name) — no separate step needed
+./aimless.pyz         # afterwards: unlock + tray + daemon + messages window
 ./aimless.pyz autostart   # optional: start the whole stack at login
 ```
 
-That's the whole setup. The tray owns the daemon: closing the window closes just the window, clicking the tray icon reopens it, and tray `Quit` shuts everything down. `./aimless.pyz --version` tells you which build you're running.
+That's the whole setup. On the very first launch the GUI shows a *create your
+identity* dialog instead of the unlock prompt, so there's nothing to run before
+it. For headless or scripted setups, `./aimless.pyz init` still creates the
+identity from the command line. The tray owns the daemon: closing the window
+closes just the window, clicking the tray icon reopens it, and tray `Quit`
+shuts everything down. (Without a tray — e.g. in the Docker web desktop below —
+closing the window quits the app, which is what lets a supervisor restart it.)
+`./aimless.pyz --version` tells you which build you're running.
 
 Requires: Linux, python3 + `pip install pynacl`, and `python3-gi` + `gir1.2-gtk-3.0` for the window (distro packages). The daemon is a static binary with zero dependencies.
 
@@ -38,6 +46,30 @@ If an older pip-installed aimless exists on the machine, remove it first — its
 cd daemon && go build -o aimlessd . && ./aimlessd -datadir ~/.local/share/aimless
 cd ../client && pip install . && aimless
 ```
+
+## Run it in a browser — Docker web desktop
+
+`deploy/docker/` runs the aimless GUI in a browser from a minimal Alpine
+container: Xvfb + the tiny `openbox` window manager + `x11vnc` + `noVNC`,
+everything supervised and non-root (uid 1000) — the same pattern as the
+`bitmessage-docker` project.
+
+```sh
+cd deploy/docker
+./build.sh                  # syncs dist/aimless.pyz + daemon sources, builds, starts
+# then open http://localhost:8080/vnc.html  (noVNC password: VNC_PASS, default "aimless")
+```
+
+First run shows the same *create your identity* dialog in the browser window.
+There is no system tray in the container, so closing the window (or cancelling
+the identity dialog) quits the app and supervisord restarts it within a second —
+the aimless window is effectively always on, and you can never end up on a black
+screen. Everything persists in `deploy/docker/aimless-data/` (identity,
+contacts, encrypted cache, node key).
+
+The container builds the daemon from source (`CGO_ENABLED=0`, static, any arch),
+and the compose file binds the ports to `127.0.0.1` only. If you expose it on a
+public host, put it behind a TLS reverse proxy with auth or an SSH tunnel.
 
 ## Security model
 
