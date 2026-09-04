@@ -1,3 +1,4 @@
+import os
 import re
 import time
 
@@ -109,6 +110,56 @@ def test_gui_buddy_list_and_im_roundtrip(gtk_app):
     texts = [m["text"] for m in win.session.cache.msgs(b_node)]
     assert "hello from GTK" in texts
     assert "reply via daemon" in texts
+
+
+def test_gui_scroll_reaches_actual_bottom():
+    """A row appended just before scroll_to_bottom is laid out by the frame clock,
+    which fires after the first scroll attempt — so the pre-fix single idle pass
+    always ended up one row short. The scroll must re-settle on a tick boundary
+    until it truly sits at the bottom."""
+    from aimless import gtkui as g
+
+    win = Gtk.Window()
+    win.set_default_size(300, 200)
+    sw = Gtk.ScrolledWindow()
+    win.add(sw)
+    lb = Gtk.ListBox()
+    sw.add(lb)
+    for i in range(40):
+        r = Gtk.ListBoxRow()
+        lbl = Gtk.Label(label=f"message line {i} — some wrapping text to give height")
+        lbl.set_line_wrap(True)
+        lbl.set_max_width_chars(48)
+        r.add(lbl)
+        lb.add(r)
+        r.show_all()
+    win.show_all()
+
+    def drain_ms(ms):
+        end = time.time() + ms / 1000.0
+        while time.time() < end:
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+            time.sleep(0.002)
+
+    drain_ms(500)
+    adj = sw.get_vadjustment()
+
+    for k in range(5):
+        r = Gtk.ListBoxRow()
+        lbl = Gtk.Label(label=f"NEW MESSAGE {k} arrives at the bottom")
+        lbl.set_line_wrap(True)
+        lbl.set_max_width_chars(48)
+        r.add(lbl)
+        lb.add(r)
+        r.show_all()
+        g.scroll_to_bottom(sw)
+        drain_ms(2)   # scroll runs here on a stale size (old code stays stuck)
+    drain_ms(200)     # frame clock lays out the rows; the re-settle must catch up
+
+    gap = adj.get_upper() - adj.get_page_size() - adj.get_value()
+    win.destroy()
+    assert gap < 4, f"scroll left one row behind the latest message (gap={gap:.1f})"
 
 
 def test_gui_unread_badge_and_activity_log(gtk_app):
@@ -309,6 +360,9 @@ def test_close_hides_to_tray_and_window_survives(gtk_app):
     class _StubTray:
         have_tray = True
 
+        def is_embedded(self):
+            return True
+
     class _StubApp:
         tray = _StubTray()
 
@@ -318,7 +372,7 @@ def test_close_hides_to_tray_and_window_survives(gtk_app):
 
     win.app_ref = _StubApp()
     stopped = win.emit("delete-event", Gdk.Event())
-    assert stopped is True, "delete-event should be swallowed when a tray icon exists"
+    assert stopped is True, "delete-event should be swallowed when a real tray has the icon"
     assert not win.get_visible(), "window should hide instead of closing"
 
     win.deiconify()
@@ -326,6 +380,98 @@ def test_close_hides_to_tray_and_window_survives(gtk_app):
     assert win.get_visible(), "window should come back"
 
     win.app_ref = None
+
+
+def test_close_quits_when_tray_not_embedded(gtk_app):
+    win = gtk_app["win"]
+
+    class _StubTray:
+        have_tray = True
+
+        def is_embedded(self):
+            return False
+
+    class _StubApp:
+        tray = _StubTray()
+
+        def __init__(self):
+            self.quit_calls = 0
+
+        def log(self, msg):
+            pass
+
+        def quit(self):
+            self.quit_calls += 1
+
+    app = _StubApp()
+    win.app_ref = app
+    stopped = win.emit("delete-event", Gdk.Event())
+    assert stopped is False, "close should not be swallowed without a real tray"
+    win.destroy()
+    assert app.quit_calls == 1, "closing the window should quit the app headlessly"
+    win.app_ref = None
+
+
+def test_cancel_without_tray_logs_exit_and_no_window_exit_signal(gtk_app):
+    from aimless import gtkui as g
+
+    class _NoTray:
+        def is_embedded(self):
+            return False
+
+    class _App:
+        tray = _NoTray()
+
+        def __init__(self):
+            self.quit_calls = 0
+            self.logged = []
+
+        def log(self, m):
+            self.logged.append(m)
+
+        def quit(self):
+            self.quit_calls += 1
+
+    app = _App()
+    g.AimlessApp._cancel_or_quit(app)
+    assert app.logged, "headless (no tray): cancel must log the exit decision"
+    assert app.quit_calls == 0, "exit is decided by setup, not via gtk_main_quit (pre-main-loop)"
+
+    class _Embedded(_NoTray):
+        def is_embedded(self):
+            return True
+
+    app.tray = _Embedded()
+    g.AimlessApp._cancel_or_quit(app)
+    assert app.logged[-1].startswith("cancel — keeping app in the system tray")
+
+    class _EmbeddedNoWindow(_Embedded):
+        pass
+
+    app.logged = []
+    app.window = None
+    app.tray = _NoTray()
+    assert g.AimlessApp._no_window_headless(app), "container: no window + no tray -> exit"
+    app.tray = _Embedded()
+    assert not g.AimlessApp._no_window_headless(app), "desktop: tray keeps the app alive"
+    app.window = object()
+    app.tray = _NoTray()
+    assert not g.AimlessApp._no_window_headless(app), "window present -> stay"
+
+
+def test_create_identity_writes_files(tmp_path, monkeypatch):
+    from aimless import gtkui as g
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("AIMLESS_HOME", str(home))
+    identity_file = home / "identity.json"
+    assert not identity_file.exists()
+    pw = g.create_identity("secret", "Gerry")
+    assert pw == "secret"
+    identity = crypto.load_identity(str(identity_file), "secret")
+    contacts = protocol.load_contacts(str(home / "client-contacts.json"))
+    assert contacts["_self"]["screen"] == "Gerry"
+    assert contacts["_self"]["pubkey"] == bytes(identity.verify_key).hex()
 
 
 def _bob_sees_away(app, expected):

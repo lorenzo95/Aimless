@@ -237,13 +237,27 @@ def first_icon(*names):
 
 
 def scroll_to_bottom(scrolled):
-    def _scroll():
-        adj = scrolled.get_vadjustment()
-        adj.set_value(adj.get_upper() - adj.get_page_size())
-        return False
-    GLib.idle_add(_scroll)
+    state = {"upper": None}
 
+    def _settle():
+        try:
+            adj = scrolled.get_vadjustment()
+            if adj is None:
+                return False
+            upper = adj.get_upper()
+            adj.set_value(upper - adj.get_page_size())
+            # A row added just before this call is allocated by the frame clock,
+            # which fires a display tick AFTER this timeout runs — so the first
+            # read of `upper` is one row behind. Re-settle on a tick boundary
+            # until the size stops changing and the view sits at the true bottom.
+            if upper == state["upper"]:
+                return False
+            state["upper"] = upper
+        except Exception:
+            return False
+        return True
 
+    GLib.timeout_add(30, _settle)
 def clear_children(container):
     container.foreach(lambda w: w.destroy())
 
@@ -514,6 +528,7 @@ class MessagesView(Gtk.Box):
         self.selected = None
         self._send_in_flight = False
         self._history_busy = False
+        self._catchup_busy = False
 
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
 
@@ -529,11 +544,15 @@ class MessagesView(Gtk.Box):
         hint.get_style_context().add_class("muted")
         sidebar.pack_start(hint, False, False, 0)
 
-        new_room_btn = Gtk.Button(label="＋ New room…")
+        new_room_btn = Gtk.Button()
         new_room_btn.set_relief(Gtk.ReliefStyle.NONE)
         new_room_btn.set_halign(Gtk.Align.START)
         new_room_btn.set_margin_start(6)
         new_room_btn.set_margin_bottom(4)
+        new_room_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        new_room_box.pack_start(Gtk.Image.new_from_icon_name("list-add-symbolic", Gtk.IconSize.BUTTON), False, False, 0)
+        new_room_box.pack_start(Gtk.Label(label="New room…"), False, False, 0)
+        new_room_btn.add(new_room_box)
         new_room_btn.connect("clicked", self.on_new_room)
         sidebar.pack_start(new_room_btn, False, False, 0)
 
@@ -842,6 +861,62 @@ class MessagesView(Gtk.Box):
         elif thread["unread"] == 0 and w["badge"]:
             w["badge"].destroy()
             w["badge"] = None
+
+    def catchup_unread(self):
+        """One-time startup sweep: count messages that arrived while no client was
+        connected (the daemon keeps running between app sessions in the container,
+        and recv events broadcast to nobody are lost) as unread.
+
+        Fetches history past each conversation's scan cursor and adds anything new
+        to the cache WITHOUT advancing the cursor — so opening a thread still
+        fetches and shows the messages (and clears the badge)."""
+        if self._catchup_busy:
+            return
+        self._catchup_busy = True
+        session = self.app.session
+        jobs = []
+        for conv, thread in list(self.threads.items()):
+            nodes = list(thread.get("members", {}).keys()) if thread.get("is_room") else [conv]
+            for n in nodes:
+                jobs.append((conv, n))
+
+        def worker():
+            return [(conv, n, session.client.history(n, session.cache.scan_last(conv, n)))
+                    for conv, n in jobs]
+
+        def done(results):
+            self._catchup_busy = False
+            new_by_conv = {}
+            for conv, member, hist in results:
+                if not hist or not hist.get("msgs"):
+                    continue
+                count = 0
+                for m in hist["msgs"]:
+                    try:
+                        opened = protocol.open_message(session.identity, m["payload"])
+                    except (ValueError, KeyError):
+                        continue
+                    msg_conv = opened.get("conv") or member
+                    if msg_conv != conv:
+                        continue
+                    if session.cache.add_recv(conv, member, m["seq"], opened["ts"], opened["text"]):
+                        count += 1
+                if count:
+                    new_by_conv[conv] = new_by_conv.get(conv, 0) + count
+            for conv, count in new_by_conv.items():
+                thread = self.threads.get(conv)
+                if thread is None or self.selected is thread:
+                    continue
+                thread["unread"] += count
+                self.update_thread_row(conv)
+            if new_by_conv:
+                self.app.activity.log(
+                    f"unread sweep: {sum(new_by_conv.values())} message(s) arrived while you were away")
+
+        def fail(_e):
+            self._catchup_busy = False
+
+        run_async(worker, on_done=done, on_error=fail)
 
     def on_thread_selected(self, listbox, row):
         if row is None:
@@ -1575,6 +1650,7 @@ class AimlessWindow(Gtk.Window):
         GLib.timeout_add(150, self.drain_events)
         GLib.timeout_add_seconds(3, self.poll_presence)
         GLib.timeout_add_seconds(5, self.poll_status)
+        GLib.timeout_add(1200, self._catchup_once)
 
         def watch_all():
             for info in self.session.contacts().values():
@@ -1707,6 +1783,10 @@ class AimlessWindow(Gtk.Window):
                 pass
         return True
 
+    def _catchup_once(self):
+        self.messages.catchup_unread()
+        return GLib.SOURCE_REMOVE
+
 
 
 
@@ -1767,7 +1847,7 @@ class AimlessWindow(Gtk.Window):
 
     def on_delete(self, *_):
         self.save_geometry()
-        if self.app_ref is not None and self.app_ref.tray is not None and self.app_ref.tray.have_tray:
+        if self.app_ref is not None and self.app_ref.tray is not None and self.app_ref.tray.is_embedded():
             self.hide()
             return True
         return False
@@ -1804,6 +1884,48 @@ def ask_passphrase(parent):
     if resp == Gtk.ResponseType.OK and text:
         return text
     return None
+
+
+def ask_create_identity(parent):
+    """Ask for passphrase + confirm + screen name to create a brand-new identity.
+    Returns None (cancelled / empty), ("__mismatch__",) or (passphrase, screen)."""
+    dlg = Gtk.Dialog(title=f"{APP_NAME} — create your identity", transient_for=parent, modal=True)
+    dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Create identity", Gtk.ResponseType.OK)
+    dlg.set_default_response(Gtk.ResponseType.OK)
+    dlg.set_default_size(380, 120)
+    box = dlg.get_content_area()
+    box.set_spacing(8)
+    box.set_border_width(10)
+    box.add(Gtk.Label(label="No identity on this machine yet — set one up here."))
+    box.add(Gtk.Label(label="Passphrase (protects your keys; re-enter it later to unlock)"))
+    pw = Gtk.Entry(visibility=False, activates_default=True)
+    box.add(pw)
+    box.add(Gtk.Label(label="Confirm passphrase"))
+    pw2 = Gtk.Entry(visibility=False, activates_default=True)
+    box.add(pw2)
+    box.add(Gtk.Label(label="Screen name"))
+    screen = Gtk.Entry(activates_default=True)
+    box.add(screen)
+    dlg.show_all()
+    resp = dlg.run()
+    p1, p2, sn = pw.get_text(), pw2.get_text(), screen.get_text()
+    dlg.destroy()
+    if resp != Gtk.ResponseType.OK or not p1:
+        return None
+    if p1 != p2:
+        return ("__mismatch__",)
+    return (p1, sn)
+
+
+def create_identity(passphrase, screen):
+    """Persist a fresh identity and self contact entry. Mirrors `aimless init`."""
+    identity = crypto.new_identity()
+    crypto.save_identity(identity_path(), identity, passphrase)
+    contacts = protocol.load_contacts(contacts_path())
+    contacts["_self"] = {"screen": screen or "anonymous",
+                         "pubkey": bytes(identity.verify_key).hex()}
+    protocol.save_contacts(contacts_path(), contacts)
+    return passphrase
 
 
 def ask_text(parent, title, label):
@@ -1904,6 +2026,15 @@ class TrayIcon:
         except Exception as e:
             app.log(f"tray icon unavailable ({e!r}) — running as a plain window app")
 
+    def is_embedded(self):
+        """True only when a real system-tray host adopted the icon.
+
+        Gtk.StatusIcon() does not raise when no tray host exists (X11 simply shows
+        nothing), so `have_tray` alone would make a headless/container run believe
+        it owns a tray and hide away to a tray that is not there.
+        """
+        return self.have_tray and self.icon.is_embedded()
+
     def on_open(self, *_):
         try:
             self.app.open_window()
@@ -1971,6 +2102,9 @@ class AimlessApp:
         self.tray = TrayIcon(self)
         if open_window or not self.tray.have_tray:
             self.open_window()
+        if self._no_window_headless():
+            self.log("no window after setup (no usable tray) — exiting for the supervisor to restart")
+            return 0
 
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, self.on_open_signal)
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, self.quit)
@@ -1999,41 +2133,84 @@ class AimlessApp:
     def _open_window_unlocked(self):
         session = None
         passphrase = self.passphrase
-        if passphrase:
-            try:
-                session = Session(passphrase)
-            except ValueError:
-                passphrase = None
-            except OSError as e:
-                session = None
-                self.log(f"daemon unreachable during unlock ({e}) — retrying")
-        if not passphrase:
-            for _attempt in range(3):
-                passphrase = ask_passphrase(None)
-                if not passphrase:
+        if not os.path.exists(identity_path()):
+            for _create in range(3):
+                created = ask_create_identity(None)
+                if created is None:
+                    self._cancel_or_quit()
                     return
-                try:
-                    session = Session(passphrase)
-                    break
-                except ValueError:
+                if created[0] == "__mismatch__":
                     err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.OK,
-                                            text="wrong passphrase or corrupted identity — try again")
+                                            text="passphrases do not match — try again")
                     err.run()
                     err.destroy()
+                    continue
+                new_pw, screen = created
+                try:
+                    create_identity(new_pw, screen)
+                    passphrase = new_pw
+                    session = Session(passphrase)
+                    break
                 except OSError as e:
                     err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE,
-                                            text=f"daemon not reachable: {e}\nretry after starting aimless")
+                                            text=f"could not create identity: {e}")
                     err.run()
                     err.destroy()
                     return
             else:
                 return
+        else:
+            if passphrase:
+                try:
+                    session = Session(passphrase)
+                except ValueError:
+                    passphrase = None
+                except OSError as e:
+                    session = None
+                    self.log(f"daemon unreachable during unlock ({e}) — retrying")
+            if not passphrase:
+                for _attempt in range(3):
+                    passphrase = ask_passphrase(None)
+                    if not passphrase:
+                        self._cancel_or_quit()
+                        return
+                    try:
+                        session = Session(passphrase)
+                        break
+                    except ValueError:
+                        err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.OK,
+                                                text="wrong passphrase or corrupted identity — try again")
+                        err.run()
+                        err.destroy()
+                    except OSError as e:
+                        err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE,
+                                                text=f"daemon not reachable: {e}\nretry after starting aimless")
+                        err.run()
+                        err.destroy()
+                        return
+                else:
+                    return
         self.passphrase = passphrase
         if session.cache_recovered:
             self.log(f"cache recovery: {session.cache_recovered}")
         self.session = session
         self.window = AimlessWindow(session, self.supervisor, app_ref=self)
         self.window.show_all()
+
+    def _cancel_or_quit(self):
+        """User cancelled and there is no usable tray: log it so the caller (a
+        supervisor/container) is expected to restart us. With a real tray the
+        desktop behaviour is preserved: keep running, hidden in the tray."""
+        if self.tray is not None and self.tray.is_embedded():
+            self.log("cancel — keeping app in the system tray")
+            return
+        self.log("cancel — no usable tray (headless/container) — nothing to show")
+
+    def _no_window_headless(self):
+        """True right after setup when there is no window and no usable tray —
+        the app has nothing to show and (in a container) must exit so the
+        supervisor restarts it, instead of lingering on a black screen."""
+        return self.window is None and not (self.tray is not None and self.tray.is_embedded())
 
     def poll(self):
         if not self.quitting and not self.supervisor.is_running():
