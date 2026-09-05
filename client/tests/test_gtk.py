@@ -805,12 +805,8 @@ def test_gui_1to1_block_button_visibility_and_label(gtk_app):
     win.messages.thread_list.select_row(win.messages.threads[b_node]["row"])
     assert win.messages.block_btn.get_visible(), "block button must show for a 1:1 thread"
     assert win.messages.block_btn.get_label() == "Block…"
-
-    win.session.cache.mute(b_node)
-    win.messages.thread_list.select_row(None)
-    win.messages.thread_list.select_row(win.messages.threads[b_node]["row"])
-    assert win.messages.block_btn.get_label() == "Unblock…", "muted 1:1 must show Unblock"
-    win.session.cache.unmute(b_node)
+    assert win.messages.mute_btn.get_visible(), "mute button must show for a 1:1 thread"
+    assert win.messages.mute_btn.get_label() == "Mute…"
 
     carol_identity = crypto.new_identity()
     chosen = [{"node": b_node, "pubkey": app["bob"].pubkey_hex, "screen": "Bob"},
@@ -819,54 +815,51 @@ def test_gui_1to1_block_button_visibility_and_label(gtk_app):
     conv = next(k for k, t in win.messages.threads.items() if t.get("is_room"))
     win.messages.thread_list.select_row(win.messages.threads[conv]["row"])
     assert not win.messages.block_btn.get_visible(), "block button must hide for a room"
+    assert win.messages.mute_btn.get_visible(), "mute button must show for a room"
 
 
-def test_gui_1to1_block_toggle(gtk_app, monkeypatch):
+def test_gui_1to1_block_removes_contact(gtk_app, monkeypatch):
     app = gtk_app
     win = app["win"]
     b_node = app["b_node"]
-    session = app["session"]
+    contacts_path = str(app["home"] / "client-contacts.json")
 
-    blocked, unblocked = [], []
-    orig_block, orig_unblock = session.client.block, session.client.unblock
-
-    def spy_block(node):
-        blocked.append(node)
-        return orig_block(node)
-
-    def spy_unblock(node):
-        unblocked.append(node)
-        return orig_unblock(node)
-
-    monkeypatch.setattr(session.client, "block", spy_block)
-    monkeypatch.setattr(session.client, "unblock", spy_unblock)
-
+    monkeypatch.setattr(win.messages, "_confirm_block", lambda screen: True)
     win.messages.thread_list.select_row(win.messages.threads[b_node]["row"])
     win.messages.block_btn.clicked()
+
+    contacts = protocol.load_contacts(contacts_path)
+    assert not any(c.get("node") == b_node for k, c in contacts.items() if k != "_self"), \
+        "block must remove the contact"
+    assert b_node not in win.messages.threads, "block must tear down the thread"
+    assert win.messages.selected is None, "selection must reset after block"
+    assert win.messages.stack.get_visible_child_name() == "placeholder"
     assert win.session.cache.is_muted(b_node), "block must set the client mute"
     assert win.session.cache.blocked_screen(b_node) == "Bob", "block must store the screen name"
-    assert _pump(win, lambda: blocked == [b_node], timeout=10), "block never sent to the daemon"
-    assert _pump(win, lambda: win.messages.block_btn.get_label() == "Unblock…", timeout=10), \
-        "label must flip to Unblock after blocking"
 
-    def blocked_rendered():
+    def synthetic_rendered():
         rows = _contact_rows(win)
-        b = next((r for r in rows if "Bob" in r["title"]), None)
-        return b is not None and b["btn"] == "Unblock"
-    assert _pump(win, blocked_rendered, timeout=10), "contact row must show Unblock after block"
+        return any("Bob" in r["title"] and r["btn"] == "Unblock" for r in rows)
+    assert _pump(win, synthetic_rendered, timeout=10), \
+        "Contacts must show the blocked stranger's synthetic row with Unblock"
 
-    win.messages.block_btn.clicked()
-    assert not win.session.cache.is_muted(b_node), "unblock must clear the client mute"
-    assert win.session.cache.blocked_screen(b_node) is None, "unblock must clear the stored name"
-    assert _pump(win, lambda: unblocked == [b_node], timeout=10), "unblock never sent to the daemon"
-    assert _pump(win, lambda: win.messages.block_btn.get_label() == "Block…", timeout=10), \
-        "label must flip back to Block after unblocking"
 
-    def reverted():
-        rows = _contact_rows(win)
-        b = next((r for r in rows if "Bob" in r["title"]), None)
-        return b is not None and b["btn"] == "Remove"
-    assert _pump(win, reverted, timeout=10), "contact row must revert to Remove after unblock"
+def test_gui_1to1_mute_toggle(gtk_app):
+    app = gtk_app
+    win = app["win"]
+    b_node = app["b_node"]
+
+    win.messages.thread_list.select_row(win.messages.threads[b_node]["row"])
+    win.messages.on_toggle_mute()
+    assert win.session.cache.is_conversation_muted(b_node), "mute must mark the 1:1 conversation"
+    assert win.messages.mute_btn.get_label() == "Unmute…"
+    assert b_node in win.messages.threads, "mute must keep the thread"
+    assert win.messages.threads[b_node]["row"].get_style_context().has_class("aimless-muted")
+    assert win.messages.threads[b_node]["widgets"]["subtitle"].get_text() == "muted"
+
+    win.messages.on_toggle_mute()
+    assert not win.session.cache.is_conversation_muted(b_node)
+    assert win.messages.mute_btn.get_label() == "Mute…"
 
 
 def test_gui_request_persists_until_answered(gtk_app):
@@ -1234,7 +1227,7 @@ def test_mute_room_silences_and_recovers(gtk_app):
 
     win.messages.on_toggle_mute()
     assert win.session.cache.is_conversation_muted(conv)
-    assert "Unmute room…" in win.messages.mute_btn.get_label()
+    assert "Unmute…" in win.messages.mute_btn.get_label()
     assert win.messages.threads[conv]["row"].get_style_context().has_class("aimless-muted")
 
     ts = int(time.time() * 1000)

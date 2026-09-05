@@ -613,7 +613,7 @@ class MessagesView(Gtk.Box):
         self.block_btn.set_valign(Gtk.Align.START)
         self.block_btn.get_style_context().add_class("muted")
         self.block_btn.set_no_show_all(True)
-        self.block_btn.connect("clicked", self.on_toggle_block)
+        self.block_btn.connect("clicked", self.on_block)
         header_box.pack_end(self.block_btn, False, False, 0)
         conversation_box.pack_start(header_box, False, False, 0)
 
@@ -843,7 +843,7 @@ class MessagesView(Gtk.Box):
             return
         w = thread["widgets"]
         w["title"].set_markup(_sidebar_title_markup(thread, self.app.session.self_node))
-        muted = thread.get("is_room") and self.app.session.cache.is_conversation_muted(node)
+        muted = self.app.session.cache.is_conversation_muted(node)
         if muted:
             w["subtitle"].set_text("muted")
         else:
@@ -946,15 +946,15 @@ class MessagesView(Gtk.Box):
             self.conversation_header.set_markup(_room_header_markup(thread, self.app.session.self_node))
             self.delete_btn.show()
             self.mute_btn.show()
+            self.mute_btn.set_label("Unmute…" if self.app.session.cache.is_conversation_muted(conv) else "Mute…")
             self.block_btn.hide()
-            self.mute_btn.set_label("Unmute room…" if self.app.session.cache.is_conversation_muted(conv)
-                                    else "Mute room…")
             self._render_member_chips(thread)
         else:
             self.delete_btn.hide()
-            self.mute_btn.hide()
+            self.mute_btn.show()
+            self.mute_btn.set_label("Unmute…" if self.app.session.cache.is_conversation_muted(conv) else "Mute…")
             self.block_btn.show()
-            self.block_btn.set_label("Unblock…" if self.app.session.cache.is_muted(conv) else "Block…")
+            self.block_btn.set_label("Block…")
             self._render_member_chips(None)
             self.conversation_header.set_markup(
                 f"<big><b>{GLib.markup_escape_text(thread['screen'])}</b></big>"
@@ -1243,7 +1243,7 @@ class MessagesView(Gtk.Box):
 
     def on_toggle_mute(self, *_):
         thread = self.selected
-        if thread is None or not thread.get("is_room"):
+        if thread is None:
             return
         conv = thread["conv"]
         cache = self.app.session.cache
@@ -1253,35 +1253,48 @@ class MessagesView(Gtk.Box):
         else:
             cache.mute_conversation(conv)
             self.app.activity.log(f"muted {thread['screen']}")
-        self.mute_btn.set_label("Unmute room…" if cache.is_conversation_muted(conv) else "Mute room…")
+        self.mute_btn.set_label("Unmute…" if cache.is_conversation_muted(conv) else "Mute…")
         self.update_thread_row(conv)
 
-    def on_toggle_block(self, *_):
+    def on_block(self, *_):
         thread = self.selected
         if thread is None or thread.get("is_room"):
             return
         node = thread["conv"]
         screen = thread["screen"]
+        if not self._confirm_block(screen):
+            return
         cache = self.app.session.cache
+        cache.mute(node)
+        cache.set_blocked_screen(node, screen)
+        allc = protocol.load_contacts(contacts_path())
+        for key in list(allc):
+            if key != "_self" and allc[key].get("node") == node:
+                del allc[key]
+        protocol.save_contacts(contacts_path(), allc)
+        gone = self.threads.pop(node, None)
+        if gone and "row" in gone:
+            gone["row"].destroy()
+        if self.selected is thread:
+            self.selected = None
+            self.stack.set_visible_child_name("placeholder")
+            self.delete_btn.hide()
+            self.mute_btn.hide()
+            self.block_btn.hide()
+        self.app.daemon_block_set(node, blocked=True, on_done=self.app.contacts.refresh)
+        self.app.activity.log(f"blocked {screen}")
 
-        def after(thread=thread):
-            # The daemon op is async; if the user switched threads (or to
-            # nothing) before it landed, don't touch a button for the wrong view.
-            if self.selected is not thread or self.selected.get("is_room"):
-                return
-            self.block_btn.set_label("Unblock…" if self.app.session.cache.is_muted(node) else "Block…")
-            self.app.contacts.refresh()
-
-        if cache.is_muted(node):
-            cache.unmute(node)
-            cache.clear_blocked_screen(node)
-            self.app.daemon_block_set(node, blocked=False, on_done=after)
-            self.app.activity.log(f"unblocked {screen}")
-        else:
-            cache.mute(node)
-            cache.set_blocked_screen(node, screen)
-            self.app.daemon_block_set(node, blocked=True, on_done=after)
-            self.app.activity.log(f"blocked {screen}")
+    def _confirm_block(self, screen):
+        dlg = Gtk.MessageDialog(transient_for=self.get_toplevel(), modal=True,
+                                message_type=Gtk.MessageType.WARNING,
+                                text=f"Block and remove {screen}?",
+                                buttons=Gtk.ButtonsType.OK_CANCEL)
+        dlg.format_secondary_text(
+            "They won't be able to message you. You can unblock them later from the Contacts list.")
+        dlg.set_default_response(Gtk.ResponseType.CANCEL)
+        resp = dlg.run()
+        dlg.destroy()
+        return resp == Gtk.ResponseType.OK
 
     def on_composer_key(self, widget, event):
         if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and not (event.state & Gdk.ModifierType.SHIFT_MASK):
