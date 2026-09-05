@@ -37,6 +37,8 @@ var defaultPeers = []string{
 
 const defaultInboxCapacity = 50
 
+const defaultAttachCap = 64 << 20
+
 const defaultRetryInterval = 2 * time.Second
 
 const defaultProbeInterval = 15 * time.Second
@@ -73,15 +75,19 @@ func main() {
 	listenFlag := flag.String("listen", "", "comma-separated link listener URIs")
 	retryFlag := flag.Duration("retry", defaultRetryInterval, "outbox retry interval")
 	probeFlag := flag.Duration("probe", defaultProbeInterval, "presence probe interval")
+	inboxFlag := flag.Int("inbox", defaultInboxCapacity, "per-peer inbox message capacity")
+	attachFlag := flag.Int64("attachcap", defaultAttachCap, "per-peer attachment byte budget")
 	verbose := flag.Bool("verbose", false, "debug logging")
 	flag.Parse()
 
-	if err := run(*datadir, *apiPath, *peersFlag, *listenFlag, *retryFlag, *probeFlag, *verbose); err != nil {
+	if err := run(*datadir, *apiPath, *peersFlag, *listenFlag, *retryFlag, *probeFlag,
+		*inboxFlag, *attachFlag, *verbose); err != nil {
 		log.Fatalf("aimlessd: %v", err)
 	}
 }
 
-func run(datadir, apiPath, peersFlag, listenFlag string, retryInterval, probeInterval time.Duration, verbose bool) error {
+func run(datadir, apiPath, peersFlag, listenFlag string, retryInterval, probeInterval time.Duration,
+	inboxCapacity int, attachCap int64, verbose bool) error {
 	logger := &aimlessLogger{verbose: verbose}
 
 	if err := acquireLock(datadir); err != nil {
@@ -114,7 +120,7 @@ func run(datadir, apiPath, peersFlag, listenFlag string, retryInterval, probeInt
 	}
 	defer node.Stop()
 
-	mail, err := NewMail(datadir, defaultInboxCapacity, retryInterval)
+	mail, err := NewMail(datadir, inboxCapacity, attachCap, retryInterval)
 	if err != nil {
 		return err
 	}
@@ -134,6 +140,7 @@ func run(datadir, apiPath, peersFlag, listenFlag string, retryInterval, probeInt
 	}
 	defer api.Close()
 	mail.OnDeliver = api.DeliverMsg
+	mail.OnDeliverFile = api.DeliverFileMsg
 	mail.OnAcked = api.Acked
 
 	fmt.Printf("aimlessd %s\n", buildVersion)

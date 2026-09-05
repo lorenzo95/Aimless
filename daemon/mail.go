@@ -37,12 +37,14 @@ func base64Decode(s string) ([]byte, error) {
 type Mailbox struct {
 	journal *OutboxJournal
 	inbox   *InboxStore
+	attach  *AttachmentStore
 }
 
 type Mail struct {
 	mu            sync.Mutex
 	datadir       string
 	inboxCapacity int
+	attachCap     int64
 	retryInterval time.Duration
 	boxes         map[string]*Mailbox
 	blocked       map[string]struct{}
@@ -51,14 +53,16 @@ type Mail struct {
 
 	Presence *Presence
 
-	OnDeliver func(from ed25519.PublicKey, seq uint64, ts int64, payload []byte)
-	OnAcked   func(to ed25519.PublicKey, seq uint64)
+	OnDeliver     func(from ed25519.PublicKey, seq uint64, ts int64, payload []byte)
+	OnDeliverFile func(from ed25519.PublicKey, seq uint64, ts int64, payload []byte)
+	OnAcked       func(to ed25519.PublicKey, seq uint64)
 }
 
-func NewMail(datadir string, inboxCapacity int, retryInterval time.Duration) (*Mail, error) {
+func NewMail(datadir string, inboxCapacity int, attachCap int64, retryInterval time.Duration) (*Mail, error) {
 	m := &Mail{
 		datadir:       datadir,
 		inboxCapacity: inboxCapacity,
+		attachCap:     attachCap,
 		retryInterval: retryInterval,
 		boxes:         make(map[string]*Mailbox),
 	}
@@ -258,7 +262,11 @@ func (m *Mail) boxFor(peerHex string) (*Mailbox, error) {
 	if err != nil {
 		return nil, err
 	}
-	box := &Mailbox{journal: journal, inbox: inbox}
+	attach, err := NewAttachmentStore(m.datadir, peerHex, m.attachCap)
+	if err != nil {
+		return nil, err
+	}
+	box := &Mailbox{journal: journal, inbox: inbox, attach: attach}
 	m.boxes[peerHex] = box
 	return box, nil
 }
@@ -284,6 +292,27 @@ func (m *Mail) SendMsg(to ed25519.PublicKey, payload []byte) (uint64, error) {
 	return seq, nil
 }
 
+func (m *Mail) SendFile(to ed25519.PublicKey, payload []byte) (uint64, error) {
+	if m.IsBlocked(to) {
+		return 0, fmt.Errorf("peer is blocked")
+	}
+	peerHex := hex.EncodeToString(to)
+	box, err := m.boxFor(peerHex)
+	if err != nil {
+		return 0, err
+	}
+	seq, err := box.journal.NextSeq()
+	if err != nil {
+		return 0, err
+	}
+	env := &Envelope{Version: envelopeVersion, Type: TypeFile, Seq: seq, Ts: time.Now().UnixMilli(), Payload: payload}
+	if err := box.journal.QueueAs(seq, env.Ts, payload, TypeFile); err != nil {
+		return 0, err
+	}
+	m.flushPub(to)
+	return seq, nil
+}
+
 func (m *Mail) HandlePacket(from ed25519.PublicKey, payload []byte) {
 	if m.IsBlocked(from) {
 		return
@@ -301,6 +330,21 @@ func (m *Mail) HandlePacket(from ed25519.PublicKey, payload []byte) {
 		return
 	}
 	switch env.Type {
+	case TypeFile:
+		tid, index, total, ok := parseFileHeader(env.Payload)
+		if !ok {
+			return
+		}
+		isNew, err := box.attach.Add(tid, index, total, env.Ts, env.Payload)
+		if err != nil {
+			return
+		}
+		if ackBytes, err := encodeAck(env.Seq); err == nil {
+			_, _ = m.node.Send(from, ackBytes)
+		}
+		if isNew && m.OnDeliverFile != nil {
+			m.OnDeliverFile(from, env.Seq, env.Ts, env.Payload)
+		}
 	case TypeMsg:
 		isNew, err := box.inbox.Add(env.Seq, env.Ts, env.Payload)
 		if err != nil {
@@ -401,7 +445,7 @@ func (m *Mail) flushPeer(peerHex string) {
 		if err != nil {
 			continue
 		}
-		env := &Envelope{Version: envelopeVersion, Type: TypeMsg, Seq: entry.Seq, Ts: entry.Ts, Payload: payload}
+		env := &Envelope{Version: envelopeVersion, Type: entry.Type, Seq: entry.Seq, Ts: entry.Ts, Payload: payload}
 		if data, err := env.Encode(); err == nil {
 			_, _ = m.node.Send(pub, data)
 		}
@@ -436,4 +480,28 @@ func (m *Mail) History(peerHex string, afterSeq uint64) ([]journalEntry, uint64,
 	}
 	msgs := box.inbox.After(afterSeq)
 	return msgs, box.inbox.Oldest(), box.inbox.Latest(), nil
+}
+
+func (m *Mail) PendingAttachments(peerHex string) ([]AttachPending, error) {
+	box, err := m.boxFor(peerHex)
+	if err != nil {
+		return nil, err
+	}
+	return box.attach.Pending(), nil
+}
+
+func (m *Mail) FetchAttachment(peerHex, tid string) ([]attachEntry, error) {
+	box, err := m.boxFor(peerHex)
+	if err != nil {
+		return nil, err
+	}
+	return box.attach.FetchTid(tid), nil
+}
+
+func (m *Mail) AckAttachment(peerHex, tid string) error {
+	box, err := m.boxFor(peerHex)
+	if err != nil {
+		return err
+	}
+	return box.attach.AckTid(tid)
 }

@@ -12,9 +12,10 @@ import (
 )
 
 type journalEntry struct {
-	Seq     uint64 `json:"seq"`
-	Ts      int64  `json:"ts"`
-	Payload string `json:"payload"`
+	Seq     uint64        `json:"seq"`
+	Ts      int64         `json:"ts"`
+	Payload string        `json:"payload"`
+	Type    EnvelopeType  `json:"type,omitempty"`
 }
 
 type OutboxJournal struct {
@@ -59,6 +60,9 @@ func (j *OutboxJournal) load() error {
 			if err := json.Unmarshal([]byte(line), &e); err != nil {
 				return fmt.Errorf("parse %s: %w", j.path, err)
 			}
+			if e.Type == 0 {
+				e.Type = TypeMsg // pre-0.5.0 journal entries
+			}
 			j.entries = append(j.entries, e)
 		}
 	} else if !os.IsNotExist(err) {
@@ -94,7 +98,11 @@ func (j *OutboxJournal) NextSeq() (uint64, error) {
 }
 
 func (j *OutboxJournal) Queue(seq uint64, ts int64, payload []byte) error {
-	entry := journalEntry{Seq: seq, Ts: ts, Payload: base64.StdEncoding.EncodeToString(payload)}
+	return j.QueueAs(seq, ts, payload, TypeMsg)
+}
+
+func (j *OutboxJournal) QueueAs(seq uint64, ts int64, payload []byte, typ EnvelopeType) error {
+	entry := journalEntry{Seq: seq, Ts: ts, Payload: base64.StdEncoding.EncodeToString(payload), Type: typ}
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	data, err := json.Marshal(entry)

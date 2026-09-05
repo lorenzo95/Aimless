@@ -8,7 +8,7 @@ import (
 
 func newTestMail(t *testing.T, datadir string, node *Node) *Mail {
 	t.Helper()
-	mail, err := NewMail(datadir, 50, 250*time.Millisecond)
+	mail, err := NewMail(datadir, 50, 1<<20, 250*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewMail: %v", err)
 	}

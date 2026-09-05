@@ -13,7 +13,7 @@ import (
 	"sync"
 )
 
-const buildVersion = "aimlessd/0.4.1"
+const buildVersion = "aimlessd/0.5.0"
 
 type peerStatus struct {
 	URI     string `json:"uri"`
@@ -51,6 +51,10 @@ type apiMessage struct {
 	Latest   uint64          `json:"latest,omitempty"`
 	Presence []presenceEntry `json:"presence,omitempty"`
 	Blocked  []string        `json:"blocked,omitempty"`
+	Type     string          `json:"type,omitempty"`
+	Transfers []AttachPending `json:"transfers,omitempty"`
+	Chunks   []attachEntry   `json:"chunks,omitempty"`
+	Tid      string          `json:"tid,omitempty"`
 }
 
 type APIServer struct {
@@ -151,8 +155,16 @@ func (s *APIServer) dispatch(conn net.Conn, req apiMessage) {
 		})
 	case "send":
 		s.handleSend(conn, req)
+	case "sendfile":
+		s.handleSend(conn, req, TypeFile)
 	case "history":
 		s.handleHistory(conn, req)
+	case "pendingattachments":
+		s.handlePendingAttachments(conn, req)
+	case "fetchattachment":
+		s.handleFetchAttachment(conn, req)
+	case "ackfile":
+		s.handleAckFile(conn, req)
 	case "presence":
 		s.replyReq(conn, req, apiMessage{Op: "presence", Presence: s.presence.Snapshot()})
 	case "watch":
@@ -172,7 +184,7 @@ func (s *APIServer) dispatch(conn net.Conn, req apiMessage) {
 	}
 }
 
-func (s *APIServer) handleSend(conn net.Conn, req apiMessage) {
+func (s *APIServer) handleSend(conn net.Conn, req apiMessage, typ ...EnvelopeType) {
 	keyBytes, err := hex.DecodeString(req.To)
 	if err != nil {
 		s.replyReq(conn, req, apiMessage{Op: "error", Error: "bad key hex: " + err.Error()})
@@ -187,12 +199,66 @@ func (s *APIServer) handleSend(conn net.Conn, req apiMessage) {
 		s.replyReq(conn, req, apiMessage{Op: "error", Error: "bad payload base64: " + err.Error()})
 		return
 	}
-	seq, err := s.mail.SendMsg(ed25519.PublicKey(keyBytes), payload)
+	var seq uint64
+	if len(typ) > 0 && typ[0] == TypeFile {
+		seq, err = s.mail.SendFile(ed25519.PublicKey(keyBytes), payload)
+	} else {
+		seq, err = s.mail.SendMsg(ed25519.PublicKey(keyBytes), payload)
+	}
 	if err != nil {
 		s.replyReq(conn, req, apiMessage{Op: "error", Error: "send failed: " + err.Error()})
 		return
 	}
 	s.replyReq(conn, req, apiMessage{Op: "queued", To: req.To, Seq: seq, Bytes: len(payload)})
+}
+
+func (s *APIServer) handlePendingAttachments(conn net.Conn, req apiMessage) {
+	keyBytes, err := hex.DecodeString(req.From)
+	if err != nil || len(keyBytes) != ed25519.PublicKeySize {
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "bad from key"})
+		return
+	}
+	transfers, err := s.mail.PendingAttachments(hex.EncodeToString(keyBytes))
+	if err != nil {
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "pending failed: " + err.Error()})
+		return
+	}
+	s.replyReq(conn, req, apiMessage{Op: "pendingattachments", From: req.From, Transfers: transfers})
+}
+
+func (s *APIServer) handleFetchAttachment(conn net.Conn, req apiMessage) {
+	keyBytes, err := hex.DecodeString(req.From)
+	if err != nil || len(keyBytes) != ed25519.PublicKeySize {
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "bad from key"})
+		return
+	}
+	if req.Tid == "" {
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "missing tid"})
+		return
+	}
+	chunks, err := s.mail.FetchAttachment(hex.EncodeToString(keyBytes), req.Tid)
+	if err != nil {
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "fetch failed: " + err.Error()})
+		return
+	}
+	s.replyReq(conn, req, apiMessage{Op: "fetchattachment", From: req.From, Tid: req.Tid, Chunks: chunks})
+}
+
+func (s *APIServer) handleAckFile(conn net.Conn, req apiMessage) {
+	keyBytes, err := hex.DecodeString(req.From)
+	if err != nil || len(keyBytes) != ed25519.PublicKeySize {
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "bad from key"})
+		return
+	}
+	if req.Tid == "" {
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "missing tid"})
+		return
+	}
+	if err := s.mail.AckAttachment(hex.EncodeToString(keyBytes), req.Tid); err != nil {
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "ack failed: " + err.Error()})
+		return
+	}
+	s.replyReq(conn, req, apiMessage{Op: "ackfile", From: req.From, Tid: req.Tid})
 }
 
 func (s *APIServer) handleHistory(conn net.Conn, req apiMessage) {
@@ -309,6 +375,17 @@ func (s *APIServer) replyReq(conn net.Conn, req apiMessage, msg apiMessage) {
 func (s *APIServer) DeliverMsg(from ed25519.PublicKey, seq uint64, ts int64, payload []byte) {
 	s.broadcast(apiMessage{
 		Op:      "recv",
+		From:    hex.EncodeToString(from),
+		Seq:     seq,
+		Ts:      ts,
+		Payload: base64.StdEncoding.EncodeToString(payload),
+	})
+}
+
+func (s *APIServer) DeliverFileMsg(from ed25519.PublicKey, seq uint64, ts int64, payload []byte) {
+	s.broadcast(apiMessage{
+		Op:      "recv",
+		Type:    "file",
 		From:    hex.EncodeToString(from),
 		Seq:     seq,
 		Ts:      ts,

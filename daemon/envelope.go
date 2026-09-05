@@ -18,6 +18,7 @@ const (
 	TypeAck    EnvelopeType = 2
 	TypeStatus EnvelopeType = 3
 	TypeProbe  EnvelopeType = 4
+	TypeFile   EnvelopeType = 5
 )
 
 var ErrBadVersion = errors.New("bad envelope version")

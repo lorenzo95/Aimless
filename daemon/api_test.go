@@ -344,14 +344,14 @@ func TestAPIBlockedSetStatusDoesNotAdvanceOutStatus(t *testing.T) {
 func TestBlocklistPersistsAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	pub := randomPub(t)
-	m1, err := NewMail(dir, 50, time.Second)
+	m1, err := NewMail(dir, 50, 1<<20, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := m1.Block(pub); err != nil {
 		t.Fatal(err)
 	}
-	m2, err := NewMail(dir, 50, time.Second)
+	m2, err := NewMail(dir, 50, 1<<20, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +365,7 @@ func TestBlocklistPersistsAcrossRestart(t *testing.T) {
 	if err := m2.Unblock(pub); err != nil {
 		t.Fatal(err)
 	}
-	m3, err := NewMail(dir, 50, time.Second)
+	m3, err := NewMail(dir, 50, 1<<20, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
