@@ -200,7 +200,9 @@ def test_gui_contacts_add_remove_and_self_guard(gtk_app):
     assert _pump(win, lambda: contacts_view.invite_entry.get_text().startswith("aimless1:")), \
         "invite never loaded"
     invite = contacts_view.invite_entry.get_text()
-    assert app["a_node"] in invite
+    client_hex, node_out, _ = protocol.parse_invite(invite)
+    assert node_out == app["a_node"]
+    assert client_hex == app["session"].client.pubkey_hex
 
     carol_identity = crypto.new_identity()
     carol_invite = protocol.make_invite(carol_identity, "ef" * 32, "Carol")

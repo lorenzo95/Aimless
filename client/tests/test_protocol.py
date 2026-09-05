@@ -18,6 +18,28 @@ def test_invite_roundtrip():
     assert node_out == node_hex
     assert screen == "alice"
     assert invite.startswith("aimless1:")
+    # base58-encoded key fields are ~44 chars, never the 64-char hex form
+    field = invite[len("aimless1:"):].split(":")[0]
+    assert len(field) != 64
+
+
+def test_invite_legacy_hex_still_parses():
+    identity = _identity()
+    node_hex = "ab" * 32
+    legacy = f"aimless1:{bytes(identity.verify_key).hex()}:{node_hex}:alice"
+    client_hex, node_out, screen = protocol.parse_invite(legacy)
+    assert client_hex == bytes(identity.verify_key).hex()
+    assert node_out == node_hex
+    assert screen == "alice"
+
+
+def test_invite_malformed_key_raises():
+    # '0', 'O', 'I', 'l' are not in the base58 alphabet and the field is not hex
+    with pytest.raises(ValueError):
+        protocol.parse_invite("aimless1:0OIl10:aabb:alice")
+    # valid base58 but wrong length
+    with pytest.raises(ValueError):
+        protocol.parse_invite("aimless1:1111:aabb:alice")
 
 
 def test_invite_bad_prefix():

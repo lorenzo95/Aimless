@@ -8,6 +8,7 @@ import nacl.public
 import nacl.signing
 import nacl.bindings
 
+from . import base58
 from . import crypto
 
 INVITE_PREFIX = "aimless1:"
@@ -29,7 +30,24 @@ def load_contacts(path: str) -> dict:
 
 
 def make_invite(identity: nacl.signing.SigningKey, node_pubkey_hex: str, screen_name: str) -> str:
-    return f"{INVITE_PREFIX}{bytes(identity.verify_key).hex()}:{node_pubkey_hex}:{screen_name}"
+    client_key = base58.b58encode(bytes(identity.verify_key))
+    node_key = base58.b58encode(bytes.fromhex(node_pubkey_hex))
+    return f"{INVITE_PREFIX}{client_key}:{node_key}:{screen_name}"
+
+
+def _decode_key_field(field: str, label: str) -> bytes:
+    if len(field) == 64 and all(c in "0123456789abcdefABCDEF" for c in field):
+        key = bytes.fromhex(field)
+        if len(key) != 32:
+            raise ValueError(f"{label} must be 64 hex chars")
+        return key
+    try:
+        key = base58.b58decode(field)
+    except ValueError as e:
+        raise ValueError(f"{label} is neither valid hex nor base58: {e}") from e
+    if len(key) != 32:
+        raise ValueError(f"{label} must decode to 32 bytes")
+    return key
 
 
 def parse_invite(invite: str):
@@ -40,17 +58,12 @@ def parse_invite(invite: str):
     parts = rest.split(":")
     if len(parts) != 3:
         raise ValueError("invite must be aimless1:<client-pk>:<node-pk>:<screen-name>")
-    client_hex, node_hex, screen_name = parts
-    try:
-        client_bytes = bytes.fromhex(client_hex)
-        node_bytes = bytes.fromhex(node_hex)
-    except ValueError as e:
-        raise ValueError("keys must be valid hex") from e
-    if len(client_bytes) != 32 or len(node_bytes) != 32:
-        raise ValueError("keys must be 64 hex chars each")
+    client_field, node_field, screen_name = parts
+    client_bytes = _decode_key_field(client_field, "client key")
+    node_bytes = _decode_key_field(node_field, "node key")
     if not screen_name:
         raise ValueError("missing screen name")
-    return client_hex, node_hex, screen_name
+    return client_bytes.hex(), node_bytes.hex(), screen_name
 
 
 def _sign(identity: nacl.signing.SigningKey, body: bytes) -> str:
