@@ -147,6 +147,21 @@ def test_cache_migrates_legacy_buddies(tmp_path):
     assert len(c2.msgs("aa")) == 2
 
 
+def test_cache_blocked_screen_roundtrip(tmp_path):
+    path = str(tmp_path / "cache.json.enc")
+    node = "aa" * 32
+    c = crypto.Cache(path, "pw")
+    assert c.blocked_screen(node) is None
+    c.set_blocked_screen(node, "Spammy")
+    assert c.blocked_screen(node) == "Spammy"
+    c2 = crypto.Cache(path, "pw")
+    assert c2.blocked_screen(node) == "Spammy", "blocked screen must persist across reload"
+    c2.clear_blocked_screen(node)
+    assert c2.blocked_screen(node) is None
+    c3 = crypto.Cache(path, "pw")
+    assert c3.blocked_screen(node) is None, "cleared blocked screen must stay cleared"
+
+
 def test_room_id_order_independent():
     from aimless import protocol
     assert protocol.room_id(["aa", "bb", "cc"]) == protocol.room_id(["cc", "aa", "bb"])

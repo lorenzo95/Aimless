@@ -1445,16 +1445,17 @@ class ContactsView(Gtk.Box):
         for node in sorted(blocked):
             if node in contact_nodes:
                 continue
+            name = self.app.session.cache.blocked_screen(node)
             row = Gtk.ListBoxRow()
             row.set_selectable(False)
             box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             box.set_border_width(8)
             labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            title = Gtk.Label(label=f"{node[:20]}…")
+            title = Gtk.Label(label=name or f"{node[:20]}…")
             title.set_xalign(0.0)
             title.get_style_context().add_class("muted")
             labels.pack_start(title, False, False, 0)
-            sub = Gtk.Label(label="blocked (denied)")
+            sub = Gtk.Label(label=f"{node[:20]}…" if name else "blocked")
             sub.set_xalign(0.0)
             sub.get_style_context().add_class("muted")
             labels.pack_start(sub, False, False, 0)
@@ -1499,11 +1500,17 @@ class ContactsView(Gtk.Box):
         contacts = self.app.session.contacts()
         for petname, title in getattr(self, "_buddy_rows", {}).items():
             info = contacts.get(petname, {})
-            p = presence.get(info.get("node"), {})
+            node = info.get("node")
+            label = info.get("screen", petname)
+            if not info:
+                # synthetic blocked-stranger row: prefer the stored screen name
+                node = petname
+                label = self.app.session.cache.blocked_screen(petname) or label
+            p = presence.get(node, {})
             color = "#a6e3a1" if p.get("online") else "#9aa0ad"
             state = "online" if p.get("online") else "offline"
             title.set_markup(
-                f"<b>{GLib.markup_escape_text(info.get('screen', petname))}</b> "
+                f"<b>{GLib.markup_escape_text(label)}</b> "
                 f"<span foreground='{color}' size='small'>{state}</span>")
 
     def on_add(self, *_):
@@ -1557,6 +1564,7 @@ class ContactsView(Gtk.Box):
 
     def on_unblock(self, btn, node):
         self.app.session.cache.unmute(node)
+        self.app.session.cache.clear_blocked_screen(node)
 
         def worker():
             return self.app.session.client.unblock(node)
@@ -1754,7 +1762,7 @@ class AimlessWindow(Gtk.Window):
         dlg.destroy()
         return resp
 
-    def daemon_block_set(self, node, blocked):
+    def daemon_block_set(self, node, blocked, on_done=None):
         """Best-effort daemon-side block/unblock (fire-and-forget). Against a
         pre-0.3.4 daemon the op is unknown; fail quietly, leaving the client-side
         mute in charge."""
@@ -1768,7 +1776,11 @@ class AimlessWindow(Gtk.Window):
         def fail(e):
             self.activity.log(f"daemon {'block' if blocked else 'unblock'} failed: {e} — client-side only")
 
-        run_async(worker, on_error=fail)
+        def done(_r):
+            if on_done is not None:
+                on_done()
+
+        run_async(worker, on_done=done, on_error=fail)
 
     def surface_pending_requests(self):
         if getattr(self, "_request_open", False):
@@ -1798,7 +1810,8 @@ class AimlessWindow(Gtk.Window):
             self.activity.log(f"added {petname}")
         elif choice == Gtk.ResponseType.NO:
             self.session.cache.mute(req["node"])
-            self.daemon_block_set(req["node"], blocked=True)
+            self.session.cache.set_blocked_screen(req["node"], req.get("screen") or req["node"][:8])
+            self.daemon_block_set(req["node"], blocked=True, on_done=self.contacts.refresh)
             self.activity.log(f"blocked {req.get('screen') or req['node'][:8]}")
         else:
             # Deny is a one-time soft decline: this request is discarded and the

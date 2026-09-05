@@ -208,6 +208,44 @@ def _passphrase_for_cache() -> str:
     return get_passphrase()
 
 
+def cmd_blocked(args):
+    cache = crypto.Cache(cache_path(), _passphrase_for_cache())
+    daemon = connect_daemon()
+    try:
+        nodes = get_client(daemon).blocklist()
+    except DaemonError as e:
+        print(f"blocklist unavailable: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        daemon.close()
+    if not nodes:
+        print("nothing blocked")
+        return
+    for node in sorted(nodes):
+        print(f"{node} · {cache.blocked_screen(node) or '?'}")
+
+
+def cmd_unblock(args):
+    node = args.node
+    cache = crypto.Cache(cache_path(), _passphrase_for_cache())
+    cache.unmute(node)
+    cache.clear_blocked_screen(node)
+    print(f"cleared local suppression for {node[:16]}…")
+    try:
+        daemon = DaemonClient(socket_path())
+    except (OSError, FileNotFoundError) as e:
+        print(f"daemon not reachable ({e}) — the client mute is cleared; start the app to fully apply",
+              file=sys.stderr)
+        return
+    try:
+        get_client(daemon).unblock(node)
+        print("daemon block removed")
+    except DaemonError as e:
+        print(f"daemon unblock failed: {e} — client mute cleared", file=sys.stderr)
+    finally:
+        daemon.close()
+
+
 def cmd_away(args):
     buddy_map = {k: v for k, v in protocol.load_contacts(contacts_path()).items() if k != "_self"}
     if not buddy_map:
@@ -372,6 +410,11 @@ def main():
     p_rm = sub.add_parser("remove", help="remove a buddy")
     p_rm.add_argument("petname")
 
+    sub.add_parser("blocked", help="list blocked nodes (daemon blocklist, with names where known)")
+
+    p_unblock = sub.add_parser("unblock", help="unblock a node (clears the client mute + daemon block)")
+    p_unblock.add_argument("node")
+
     p_send = sub.add_parser("send", help="send one message")
     p_send.add_argument("petname")
     p_send.add_argument("text")
@@ -397,6 +440,8 @@ def main():
         "add": cmd_add,
         "list": cmd_list,
         "remove": cmd_remove,
+        "blocked": cmd_blocked,
+        "unblock": cmd_unblock,
         "send": cmd_send,
         "chat": cmd_chat,
         "away": cmd_away,

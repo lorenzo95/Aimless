@@ -704,8 +704,9 @@ def _contact_rows(win):
         children = box.get_children()
         labels = children[0]
         title = labels.get_children()[0].get_label() or ""
+        sub = labels.get_children()[1].get_label() if len(labels.get_children()) > 1 else ""
         btn = children[-1].get_label()
-        out.append({"row": row, "btn": btn, "title": title})
+        out.append({"row": row, "btn": btn, "title": title, "sub": sub})
     return out
 
 
@@ -752,6 +753,32 @@ def test_gui_blocked_stranger_renders_synthetic_row(gtk_app):
         rows = _contact_rows(win)
         return not any(stranger[:20] in r["title"] for r in rows)
     assert _pump(win, gone, timeout=10), "synthetic row not removed after unblock"
+
+
+def test_gui_blocked_stranger_shows_screen_name(gtk_app, monkeypatch):
+    app = gtk_app
+    win = app["win"]
+    stranger = "cd" * 32
+    win.session.cache.add_pending({"node": stranger, "pubkey": "ee" * 32, "screen": "Spammy",
+                                   "conv": None, "members": [], "seq": 2, "ts": 1001, "text": "buy"})
+    monkeypatch.setattr(win, "_ask_request", lambda r: Gtk.ResponseType.NO)
+    win.surface_pending_requests()
+
+    def named_rendered():
+        rows = _contact_rows(win)
+        return any("Spammy" in r["title"] for r in rows)
+    assert _pump(win, named_rendered, timeout=10), "blocked stranger never rendered with its screen name"
+    syn = next(r for r in _contact_rows(win) if "Spammy" in r["title"])
+    assert syn["btn"] == "Unblock"
+    assert stranger[:20] in syn["sub"], "row must show the truncated node for identification"
+
+    syn["row"].get_child().get_children()[-1].clicked()
+
+    def gone():
+        rows = _contact_rows(win)
+        return not any(stranger[:20] in r["title"] or stranger[:20] in r["sub"] for r in rows)
+    assert _pump(win, gone, timeout=10), "synthetic row not removed after unblock"
+    assert win.session.cache.blocked_screen(stranger) is None, "blocked screen name not cleared on unblock"
 
 
 def test_gui_blocklist_error_renders_contacts_only(gtk_app, monkeypatch):

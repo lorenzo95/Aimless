@@ -75,7 +75,7 @@ def load_identity(path: str, passphrase: str) -> nacl.signing.SigningKey:
 class Cache:
     def __init__(self, path: str, passphrase: str):
         self.path = path
-        self._data = {"conversations": {}, "muted": [], "pending": []}
+        self._data = {"conversations": {}, "muted": [], "pending": [], "blocked_screens": {}}
         self._salt = None
         self._key = None
         self._box = None
@@ -139,6 +139,7 @@ class Cache:
         else:
             for c in data.get("conversations", {}).values():
                 c.setdefault("scan_last", dict(c.get("recv_last", {})))
+            data.setdefault("blocked_screens", {})
         self._data = data
         if need_rewrite:
             if self._migrated_format:
@@ -163,7 +164,7 @@ class Cache:
                 "sent_last": {key: b["sent_last"]},
                 "scan_last": {key: b["recv_last"]},
             }
-        return {"conversations": convs, "muted": [], "pending": []}
+        return {"conversations": convs, "muted": [], "pending": [], "blocked_screens": {}}
 
     def _flush(self) -> None:
         blob = self._box.encrypt(json.dumps(self._data).encode("utf-8"))
@@ -286,6 +287,18 @@ class Cache:
     def unmute(self, node: str) -> None:
         if node in self._data["muted"]:
             self._data["muted"].remove(node)
+            self._flush()
+
+    def set_blocked_screen(self, node: str, screen: str) -> None:
+        self._data["blocked_screens"][node] = screen
+        self._flush()
+
+    def blocked_screen(self, node: str) -> str:
+        return self._data["blocked_screens"].get(node)
+
+    def clear_blocked_screen(self, node: str) -> None:
+        if node in self._data["blocked_screens"]:
+            del self._data["blocked_screens"][node]
             self._flush()
 
     def add_pending(self, req: dict) -> None:
