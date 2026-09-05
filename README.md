@@ -69,13 +69,19 @@ contacts, encrypted cache, node key).
 
 The container builds the daemon from source (`CGO_ENABLED=0`, static, any arch),
 and the compose file binds the ports to `127.0.0.1` only. If you expose it on a
-public host, put it behind a TLS reverse proxy with auth or an SSH tunnel.
+public host, put it behind a TLS reverse proxy with auth or an SSH tunnel —
+and **change `VNC_PASS`** (`aimless` is only the default; whoever can reach the
+page gets your desktop with it).
 
 ## Security model
 
 - **Identity** = client Ed25519 keypair (PyNaCl). Your invite string contains your client key (what buddies encrypt to) and your daemon's node key (where to route). The Yggdrasil address is derived from the node key — permanent, unspoofable.
 - **End-to-end encryption** — NaCl sealed boxes per recipient, made by the client. Messages are signed by the sender's identity key.
 - **The daemon never sees plaintext.** It journals ciphertext, retries until ACKed, and relays presence blobs it cannot read.
+- **No forward secrecy.** Identities are long-term keys with no per-message
+  ratchet: messages are encrypted to a static public key, so anyone holding your
+  private key (or who later compromises it) can decrypt past traffic. This is a
+  store-and-forward design — treat it like email, not Signal.
 - **No plaintext on disk anywhere.** History lives in an encrypted local cache (passphrase-derived scrypt key); the identity keyfile is passphrase-encrypted the same way.
 
 ## Components
