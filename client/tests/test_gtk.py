@@ -13,7 +13,7 @@ from test_e2e import two_nodes  # noqa: F401
 
 from aimless import crypto, protocol
 from aimless import gtkui
-from aimless.daemon import Client, DaemonClient
+from aimless.daemon import Client, DaemonClient, DaemonError
 
 
 def all_texts(widget):
@@ -620,6 +620,64 @@ def test_gui_request_accept_and_deny(gtk_app, tmp_path, monkeypatch):
     assert win.session.cache.is_muted(stranger2)
     assert win.session.cache.msgs(stranger2) == []
     assert stranger2 not in win.messages.threads
+
+
+def test_gui_deny_wires_daemon_block_and_accept_wires_unblock(gtk_app, monkeypatch):
+    app = gtk_app
+    win = app["win"]
+    session = app["session"]
+
+    blocked, unblocked = [], []
+    monkeypatch.setattr(session.client, "block", lambda node: blocked.append(node) or {"op": "blocked"})
+    monkeypatch.setattr(session.client, "unblock", lambda node: unblocked.append(node) or {"op": "unblocked"})
+
+    stranger = "cd" * 32
+    win.session.cache.add_pending({"node": stranger, "pubkey": "ee" * 32, "screen": "Spam",
+                                   "conv": None, "members": [], "seq": 2, "ts": 1001, "text": "buy"})
+    monkeypatch.setattr(win, "_ask_request", lambda r: False)
+    win.surface_pending_requests()
+    assert win.session.cache.is_muted(stranger)
+    assert _pump(win, lambda: blocked == [stranger], timeout=10), "deny never sent a daemon block"
+
+    friend = "ef" * 32
+    win.session.cache.add_pending({"node": friend, "pubkey": "11" * 32, "screen": "Friend",
+                                   "conv": None, "members": [], "seq": 3, "ts": 1002, "text": "hi"})
+    monkeypatch.setattr(win, "_ask_request", lambda r: True)
+    win.surface_pending_requests()
+    assert _pump(win, lambda: unblocked == [friend], timeout=10), "accept never sent a daemon unblock"
+    assert not win.session.cache.is_muted(friend)
+
+
+def test_gui_deny_falls_back_when_daemon_lacks_block(gtk_app, monkeypatch):
+    app = gtk_app
+    win = app["win"]
+    session = app["session"]
+
+    def no_block(node):
+        raise DaemonError("unknown op: block")
+
+    monkeypatch.setattr(session.client, "block", no_block)
+    stranger = "cd" * 32
+    win.session.cache.add_pending({"node": stranger, "pubkey": "ee" * 32, "screen": "Spam",
+                                   "conv": None, "members": [], "seq": 2, "ts": 1001, "text": "buy"})
+    monkeypatch.setattr(win, "_ask_request", lambda r: False)
+    win.surface_pending_requests()  # must not crash on the failed block op
+    assert win.session.cache.is_muted(stranger), "client-side mute must still apply on fallback"
+    assert not win.session.cache.msgs(stranger)
+
+
+def test_client_block_unblock_wrappers():
+    calls = []
+
+    class _DC:
+        def request(self, op, **kw):
+            calls.append((op, kw))
+            return {"op": "ok"}
+
+    c = Client(_DC(), crypto.new_identity(), "T")
+    c.block("aa" * 32)
+    c.unblock("bb" * 32)
+    assert calls == [("block", {"to": "aa" * 32}), ("unblock", {"to": "bb" * 32})]
 
 
 def test_gui_request_persists_until_answered(gtk_app):

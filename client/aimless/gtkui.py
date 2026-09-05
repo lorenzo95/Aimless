@@ -1221,6 +1221,7 @@ class MessagesView(Gtk.Box):
             return
         petname = _add_contact_from_roster(node, info.get("pubkey"), screen)
         self.app.session.cache.unmute(node)
+        self.app.daemon_block_set(node, blocked=False)
         self.app.contacts.refresh()
         self.sync_sidebar()
         self.app.activity.log(f"added {petname} from the room")
@@ -1486,7 +1487,15 @@ class ContactsView(Gtk.Box):
         allc = protocol.load_contacts(contacts_path())
         allc[petname or screen] = {"pubkey": client_hex, "node": node_hex, "screen": screen}
         protocol.save_contacts(contacts_path(), allc)
-        run_async(lambda: self.app.session.client.add_contact(node_hex))
+
+        def add_worker():
+            try:
+                self.app.session.client.unblock(node_hex)
+            except DaemonError:
+                pass
+            return self.app.session.client.add_contact(node_hex)
+
+        run_async(add_worker)
         self.add_invite_entry.set_text("")
         self.add_petname_entry.set_text("")
         self.add_status.set_text(f"added {screen}")
@@ -1683,6 +1692,22 @@ class AimlessWindow(Gtk.Window):
         dlg.destroy()
         return resp == Gtk.ResponseType.ACCEPT
 
+    def daemon_block_set(self, node, blocked):
+        """Best-effort daemon-side block/unblock (fire-and-forget). Against a
+        pre-0.3.4 daemon the op is unknown; fail quietly, leaving the client-side
+        mute in charge."""
+        if blocked:
+            def worker():
+                return self.session.client.block(node)
+        else:
+            def worker():
+                return self.session.client.unblock(node)
+
+        def fail(e):
+            self.activity.log(f"daemon {'block' if blocked else 'unblock'} failed: {e} — client-side only")
+
+        run_async(worker, on_error=fail)
+
     def surface_pending_requests(self):
         if getattr(self, "_request_open", False):
             return GLib.SOURCE_REMOVE
@@ -1697,6 +1722,7 @@ class AimlessWindow(Gtk.Window):
         if accepted:
             petname = _add_contact_from_roster(req["node"], req["pubkey"], req.get("screen"))
             self.session.cache.unmute(req["node"])
+            self.daemon_block_set(req["node"], blocked=False)
             if req.get("conv"):
                 members = {m["node"]: {"node": m["node"], "pubkey": m["pubkey"],
                                        "screen": m.get("screen", "")}
@@ -1710,6 +1736,7 @@ class AimlessWindow(Gtk.Window):
             self.activity.log(f"added {petname}")
         else:
             self.session.cache.mute(req["node"])
+            self.daemon_block_set(req["node"], blocked=True)
             self.activity.log(f"denied {req.get('screen') or req['node'][:8]}")
         GLib.idle_add(self.surface_pending_requests)
         return GLib.SOURCE_REMOVE

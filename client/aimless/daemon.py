@@ -170,6 +170,12 @@ class Client:
     def add_contact(self, buddy_node_hex: str) -> dict:
         return self.daemon.request("watch", to=buddy_node_hex)
 
+    def block(self, node_hex: str) -> dict:
+        return self.daemon.request("block", to=node_hex)
+
+    def unblock(self, node_hex: str) -> dict:
+        return self.daemon.request("unblock", to=node_hex)
+
     def send(self, buddy_client_hex: str, buddy_node_hex: str, text: str, ts: int) -> dict:
         from . import protocol
         payload = protocol.seal_message(self.identity, buddy_client_hex, text, ts,
