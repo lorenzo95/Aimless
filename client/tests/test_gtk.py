@@ -680,6 +680,72 @@ def test_client_block_unblock_wrappers():
     assert calls == [("block", {"to": "aa" * 32}), ("unblock", {"to": "bb" * 32})]
 
 
+def _contact_rows(win):
+    out = []
+    for row in win.contacts.buddy_list.get_children():
+        box = row.get_child()
+        children = box.get_children()
+        labels = children[0]
+        title = labels.get_children()[0].get_label() or ""
+        btn = children[-1].get_label()
+        out.append({"row": row, "btn": btn, "title": title})
+    return out
+
+
+def test_gui_blocked_contact_renders_unblock(gtk_app):
+    app = gtk_app
+    win = app["win"]
+    b_node = app["b_node"]
+    win.session.client.block(b_node)
+    win.contacts.refresh()
+    rows = _contact_rows(win)
+    bob = next(r for r in rows if "Bob" in r["title"])
+    assert bob["btn"] == "Unblock", f"blocked contact should show Unblock, got {bob['btn']!r}"
+
+    bob["row"].get_child().get_children()[-1].clicked()
+
+    def reverted():
+        rows = _contact_rows(win)
+        b = next((r for r in rows if "Bob" in r["title"]), None)
+        return b is not None and b["btn"] == "Remove"
+    assert _pump(win, reverted, timeout=10), "contact did not revert to Remove after unblock"
+
+
+def test_gui_blocked_stranger_renders_synthetic_row(gtk_app):
+    app = gtk_app
+    win = app["win"]
+    stranger = "cd" * 32
+    win.session.client.block(stranger)
+    win.contacts.refresh()
+    rows = _contact_rows(win)
+    syn = next((r for r in rows if stranger[:20] in r["title"]), None)
+    assert syn is not None, "denied stranger has no synthetic row"
+    assert syn["btn"] == "Unblock"
+
+    syn["row"].get_child().get_children()[-1].clicked()
+
+    def gone():
+        rows = _contact_rows(win)
+        return not any(stranger[:20] in r["title"] for r in rows)
+    assert _pump(win, gone, timeout=10), "synthetic row not removed after unblock"
+
+
+def test_gui_blocklist_error_renders_contacts_only(gtk_app, monkeypatch):
+    app = gtk_app
+    win = app["win"]
+
+    def boom():
+        raise DaemonError("unknown op: blocklist")
+
+    monkeypatch.setattr(win.session.client, "blocklist", boom)
+    win.contacts.refresh()
+    rows = _contact_rows(win)
+    assert rows, "contacts must still render when blocklist is unavailable"
+    assert all(r["btn"] == "Remove" for r in rows), "blocklist failure must not add blocked rows"
+    assert _pump(win, lambda: win.contacts.invite_entry.get_text().startswith("aimless1:"), timeout=10), \
+        "invite field must still populate on blocklist failure"
+
+
 def test_gui_request_persists_until_answered(gtk_app):
     app = gtk_app
     win = app["win"]

@@ -1413,6 +1413,12 @@ class ContactsView(Gtk.Box):
         clear_children(self.buddy_list)
         self._buddy_rows = {}
         contacts = self.app.session.contacts()
+        try:
+            blocked = set(self.app.session.client.blocklist())
+        except DaemonError:
+            blocked = set()
+        self._blocked = blocked
+        contact_nodes = {info["node"] for info in contacts.values()}
         for petname, info in sorted(contacts.items()):
             row = Gtk.ListBoxRow()
             row.set_selectable(False)
@@ -1428,13 +1434,43 @@ class ContactsView(Gtk.Box):
             sub.get_style_context().add_class("muted")
             labels.pack_start(sub, False, False, 0)
             box.pack_start(labels, True, True, 0)
-            rm = Gtk.Button(label="Remove")
-            rm.connect("clicked", self.on_remove, petname)
-            box.pack_start(rm, False, False, 0)
+            if info["node"] in blocked:
+                title.get_style_context().add_class("muted")
+                labels.get_style_context().add_class("muted")
+                btn = Gtk.Button(label="Unblock")
+                btn.connect("clicked", self.on_unblock, info["node"])
+            else:
+                btn = Gtk.Button(label="Remove")
+                btn.connect("clicked", self.on_remove, petname)
+            box.pack_start(btn, False, False, 0)
             row.add(box)
             self.buddy_list.add(row)
             row.show_all()
             self._buddy_rows[petname] = title
+        for node in sorted(blocked):
+            if node in contact_nodes:
+                continue
+            row = Gtk.ListBoxRow()
+            row.set_selectable(False)
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            box.set_border_width(8)
+            labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            title = Gtk.Label(label=f"{node[:20]}…")
+            title.set_xalign(0.0)
+            title.get_style_context().add_class("muted")
+            labels.pack_start(title, False, False, 0)
+            sub = Gtk.Label(label="blocked (denied)")
+            sub.set_xalign(0.0)
+            sub.get_style_context().add_class("muted")
+            labels.pack_start(sub, False, False, 0)
+            box.pack_start(labels, True, True, 0)
+            ub = Gtk.Button(label="Unblock")
+            ub.connect("clicked", self.on_unblock, node)
+            box.pack_start(ub, False, False, 0)
+            row.add(box)
+            self.buddy_list.add(row)
+            row.show_all()
+            self._buddy_rows[node] = title
         self.refresh_presence(getattr(self, "_cached_presence", {}))
 
         def worker():
@@ -1509,6 +1545,21 @@ class ContactsView(Gtk.Box):
         self.add_status.set_text(f"removed {petname}")
         self.refresh()
         self.app.messages.sync_sidebar()
+
+    def on_unblock(self, btn, node):
+        self.app.session.cache.unmute(node)
+
+        def worker():
+            return self.app.session.client.unblock(node)
+
+        def done(_r):
+            self.refresh()
+
+        def fail(e):
+            self.add_status.set_text(f"unblock failed: {e}")
+            self.refresh()
+
+        run_async(worker, on_done=done, on_error=fail)
 
 
 class ActivityView(Gtk.Box):

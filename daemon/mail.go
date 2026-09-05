@@ -347,6 +347,12 @@ func (m *Mail) Buddies() []ed25519.PublicKey {
 	return out
 }
 
+func (m *Mail) Blocked() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sortedBlockedLocked()
+}
+
 func (m *Mail) SendProbe(to ed25519.PublicKey) error {
 	m.mu.Lock()
 	m.probeSeq++

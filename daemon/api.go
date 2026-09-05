@@ -13,7 +13,7 @@ import (
 	"sync"
 )
 
-const buildVersion = "aimlessd/0.4.0"
+const buildVersion = "aimlessd/0.4.1"
 
 type peerStatus struct {
 	URI     string `json:"uri"`
@@ -50,6 +50,7 @@ type apiMessage struct {
 	Oldest   uint64          `json:"oldest,omitempty"`
 	Latest   uint64          `json:"latest,omitempty"`
 	Presence []presenceEntry `json:"presence,omitempty"`
+	Blocked  []string        `json:"blocked,omitempty"`
 }
 
 type APIServer struct {
@@ -162,6 +163,8 @@ func (s *APIServer) dispatch(conn net.Conn, req apiMessage) {
 		s.handleBlock(conn, req, true)
 	case "unblock":
 		s.handleBlock(conn, req, false)
+	case "blocklist":
+		s.replyReq(conn, req, apiMessage{Op: "blocklist", Blocked: s.mail.Blocked()})
 	case "":
 		s.replyReq(conn, req, apiMessage{Op: "error", Error: "missing op"})
 	default:

@@ -355,6 +355,10 @@ func TestBlocklistPersistsAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	blocked := m2.Blocked()
+	if len(blocked) != 1 || blocked[0] != hex.EncodeToString(pub) {
+		t.Fatalf("blocked after restart = %v, want [%s]", blocked, hex.EncodeToString(pub))
+	}
 	if !m2.IsBlocked(pub) {
 		t.Fatal("blocklist did not survive restart")
 	}
@@ -392,3 +396,37 @@ func TestAPIIdEcho(t *testing.T) {
 		t.Fatalf("history id = %q, want h-1", resp.Id)
 	}
 }
+
+func TestAPIBlocklistOp(t *testing.T) {
+	_, _, _, sock := startAPIFixture(t)
+	client := dialAPI(t, sock)
+	pub1, pub2 := randomPub(t), randomPub(t)
+	hex1, hex2 := hex.EncodeToString(pub1), hex.EncodeToString(pub2)
+
+	client.send(t, apiMessage{Op: "block", To: hex2})
+	client.read(t, 5*time.Second)
+	client.send(t, apiMessage{Op: "block", To: hex1})
+	client.read(t, 5*time.Second)
+
+	client.send(t, apiMessage{Op: "blocklist"})
+	resp := client.read(t, 5*time.Second)
+	if resp.Op != "blocklist" {
+		t.Fatalf("op = %s, want blocklist", resp.Op)
+	}
+	want := []string{hex1, hex2}
+	if hex1 > hex2 {
+		want = []string{hex2, hex1}
+	}
+	if len(resp.Blocked) != 2 || resp.Blocked[0] != want[0] || resp.Blocked[1] != want[1] {
+		t.Fatalf("blocked = %v, want %v (sorted)", resp.Blocked, want)
+	}
+
+	client.send(t, apiMessage{Op: "unblock", To: hex1})
+	client.read(t, 5*time.Second)
+	client.send(t, apiMessage{Op: "blocklist"})
+	resp = client.read(t, 5*time.Second)
+	if len(resp.Blocked) != 1 || resp.Blocked[0] != hex2 {
+		t.Fatalf("blocked after unblock = %v, want [%s]", resp.Blocked, hex2)
+	}
+}
+

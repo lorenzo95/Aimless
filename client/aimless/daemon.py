@@ -255,6 +255,9 @@ class Client:
     def unblock(self, node_hex: str) -> dict:
         return self.daemon.request("unblock", to=node_hex)
 
+    def blocklist(self) -> list:
+        return self.daemon.request("blocklist", timeout=3).get("blocked", [])
+
     def send(self, buddy_client_hex: str, buddy_node_hex: str, text: str, ts: int) -> dict:
         from . import protocol
         payload = protocol.seal_message(self.identity, buddy_client_hex, text, ts,
