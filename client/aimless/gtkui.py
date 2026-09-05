@@ -1746,11 +1746,13 @@ class AimlessWindow(Gtk.Window):
                                 message_type=Gtk.MessageType.QUESTION,
                                 buttons=Gtk.ButtonsType.NONE, text=text)
         dlg.format_secondary_text((req.get("text") or "")[:300])
-        dlg.add_buttons("Deny", Gtk.ResponseType.REJECT, "Accept", Gtk.ResponseType.ACCEPT)
+        dlg.add_buttons("Deny", Gtk.ResponseType.REJECT,
+                        "Accept", Gtk.ResponseType.ACCEPT,
+                        "Block", Gtk.ResponseType.NO)
         dlg.set_default_response(Gtk.ResponseType.ACCEPT)
         resp = dlg.run()
         dlg.destroy()
-        return resp == Gtk.ResponseType.ACCEPT
+        return resp
 
     def daemon_block_set(self, node, blocked):
         """Best-effort daemon-side block/unblock (fire-and-forget). Against a
@@ -1776,10 +1778,10 @@ class AimlessWindow(Gtk.Window):
             return GLib.SOURCE_REMOVE
         self._request_open = True
         try:
-            accepted = self._ask_request(req)
+            choice = self._ask_request(req)
         finally:
             self._request_open = False
-        if accepted:
+        if choice == Gtk.ResponseType.ACCEPT:
             petname = _add_contact_from_roster(req["node"], req["pubkey"], req.get("screen"))
             self.session.cache.unmute(req["node"])
             self.daemon_block_set(req["node"], blocked=False)
@@ -1794,9 +1796,12 @@ class AimlessWindow(Gtk.Window):
             self.contacts.refresh()
             self.messages.sync_sidebar()
             self.activity.log(f"added {petname}")
-        else:
+        elif choice == Gtk.ResponseType.NO:
             self.session.cache.mute(req["node"])
             self.daemon_block_set(req["node"], blocked=True)
+            self.activity.log(f"blocked {req.get('screen') or req['node'][:8]}")
+        else:
+            self.session.cache.mute(req["node"])
             self.activity.log(f"denied {req.get('screen') or req['node'][:8]}")
         GLib.idle_add(self.surface_pending_requests)
         return GLib.SOURCE_REMOVE

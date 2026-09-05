@@ -600,7 +600,7 @@ def test_gui_request_accept_and_deny(gtk_app, tmp_path, monkeypatch):
     win.session.cache.add_pending(req)
 
     answers = []
-    monkeypatch.setattr(win, "_ask_request", lambda r: answers.append(True) or True)
+    monkeypatch.setattr(win, "_ask_request", lambda r: answers.append(True) or Gtk.ResponseType.ACCEPT)
     win.surface_pending_requests()
 
     contacts = protocol.load_contacts(contacts_path)
@@ -615,7 +615,7 @@ def test_gui_request_accept_and_deny(gtk_app, tmp_path, monkeypatch):
     stranger2 = "cd" * 32
     win.session.cache.add_pending({"node": stranger2, "pubkey": "ee" * 32, "screen": "Spam",
                                    "conv": None, "members": [], "seq": 2, "ts": 1001, "text": "buy stuff"})
-    monkeypatch.setattr(win, "_ask_request", lambda r: False)
+    monkeypatch.setattr(win, "_ask_request", lambda r: Gtk.ResponseType.REJECT)
     win.surface_pending_requests()
     contacts = protocol.load_contacts(contacts_path)
     assert "Spam" not in contacts
@@ -624,7 +624,7 @@ def test_gui_request_accept_and_deny(gtk_app, tmp_path, monkeypatch):
     assert stranger2 not in win.messages.threads
 
 
-def test_gui_deny_wires_daemon_block_and_accept_wires_unblock(gtk_app, monkeypatch):
+def test_gui_deny_accept_block_responses(gtk_app, monkeypatch):
     app = gtk_app
     win = app["win"]
     session = app["session"]
@@ -633,24 +633,34 @@ def test_gui_deny_wires_daemon_block_and_accept_wires_unblock(gtk_app, monkeypat
     monkeypatch.setattr(session.client, "block", lambda node: blocked.append(node) or {"op": "blocked"})
     monkeypatch.setattr(session.client, "unblock", lambda node: unblocked.append(node) or {"op": "unblocked"})
 
-    stranger = "cd" * 32
-    win.session.cache.add_pending({"node": stranger, "pubkey": "ee" * 32, "screen": "Spam",
-                                   "conv": None, "members": [], "seq": 2, "ts": 1001, "text": "buy"})
-    monkeypatch.setattr(win, "_ask_request", lambda r: False)
-    win.surface_pending_requests()
-    assert win.session.cache.is_muted(stranger)
-    assert _pump(win, lambda: blocked == [stranger], timeout=10), "deny never sent a daemon block"
+    def send_request(node, screen):
+        win.session.cache.add_pending({"node": node, "pubkey": "11" * 32, "screen": screen,
+                                       "conv": None, "members": [], "seq": 5, "ts": 1000, "text": "hi"})
+        win.surface_pending_requests()
 
-    friend = "ef" * 32
-    win.session.cache.add_pending({"node": friend, "pubkey": "11" * 32, "screen": "Friend",
-                                   "conv": None, "members": [], "seq": 3, "ts": 1002, "text": "hi"})
-    monkeypatch.setattr(win, "_ask_request", lambda r: True)
-    win.surface_pending_requests()
-    assert _pump(win, lambda: unblocked == [friend], timeout=10), "accept never sent a daemon unblock"
+    # Deny: soft decline — client mute only, no daemon interaction at all
+    stranger = "cd" * 32
+    monkeypatch.setattr(win, "_ask_request", lambda r: Gtk.ResponseType.REJECT)
+    send_request(stranger, "Spam")
+    assert win.session.cache.is_muted(stranger)
+    assert blocked == [] and unblocked == [], "Deny must not touch the daemon"
+
+    # Block: mute + daemon block
+    bad = "ce" * 32
+    monkeypatch.setattr(win, "_ask_request", lambda r: Gtk.ResponseType.NO)
+    send_request(bad, "Worse")
+    assert win.session.cache.is_muted(bad)
+    assert _pump(win, lambda: blocked == [bad], timeout=10), "Block never sent a daemon block"
+
+    # Accept: unblocks (re-adding someone previously blocked/denied)
+    friend = "cf" * 32
+    monkeypatch.setattr(win, "_ask_request", lambda r: Gtk.ResponseType.ACCEPT)
+    send_request(friend, "Friend")
+    assert _pump(win, lambda: unblocked == [friend], timeout=10), "Accept never sent a daemon unblock"
     assert not win.session.cache.is_muted(friend)
 
 
-def test_gui_deny_falls_back_when_daemon_lacks_block(gtk_app, monkeypatch):
+def test_gui_block_falls_back_when_daemon_lacks_block(gtk_app, monkeypatch):
     app = gtk_app
     win = app["win"]
     session = app["session"]
@@ -662,7 +672,7 @@ def test_gui_deny_falls_back_when_daemon_lacks_block(gtk_app, monkeypatch):
     stranger = "cd" * 32
     win.session.cache.add_pending({"node": stranger, "pubkey": "ee" * 32, "screen": "Spam",
                                    "conv": None, "members": [], "seq": 2, "ts": 1001, "text": "buy"})
-    monkeypatch.setattr(win, "_ask_request", lambda r: False)
+    monkeypatch.setattr(win, "_ask_request", lambda r: Gtk.ResponseType.NO)
     win.surface_pending_requests()  # must not crash on the failed block op
     assert win.session.cache.is_muted(stranger), "client-side mute must still apply on fallback"
     assert not win.session.cache.msgs(stranger)
@@ -777,7 +787,7 @@ def test_gui_incoming_from_unknown_sender_queues_request(gtk_app, monkeypatch):
     payload = protocol.seal_message(alice_ident, alice_ident and _self_pub(app), "let me in", 500,
                                     screen="Newbie")
     ev = {"op": "recv", "from": stranger, "seq": 7, "payload": payload}
-    monkeypatch.setattr(win, "_ask_request", lambda r: True)
+    monkeypatch.setattr(win, "_ask_request", lambda r: Gtk.ResponseType.ACCEPT)
     win.messages.incoming(ev)
 
     # the synchronous stub accepted the request, so pending is consumed and applied
