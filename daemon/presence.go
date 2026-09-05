@@ -134,6 +134,9 @@ func (p *Presence) tick() {
 }
 
 func (p *Presence) probeOne(pub ed25519.PublicKey) {
+	if p.mail.IsBlocked(pub) {
+		return
+	}
 	_ = p.mail.SendProbe(pub)
 	p.mu.Lock()
 	pp := p.peers[hex.EncodeToString(pub)]
@@ -160,6 +163,9 @@ func (p *Presence) Snapshot() []presenceEntry {
 	out := make([]presenceEntry, 0, len(p.peers))
 	now := time.Now()
 	for peerHex, pp := range p.peers {
+		if p.mail.IsBlockedHex(peerHex) {
+			continue
+		}
 		e := presenceEntry{Key: peerHex, Online: now.Sub(pp.lastSeen) < p.onlineWindow}
 		if pp.in != nil {
 			e.StatusTs = pp.in.ts

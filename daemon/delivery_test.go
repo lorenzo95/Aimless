@@ -230,3 +230,106 @@ func TestMailSeqPersistsAcrossRestart(t *testing.T) {
 		t.Fatalf("seq after restart = %d, want 2 (no reuse)", seq)
 	}
 }
+
+func TestBlockInboundDropsUntilUnblock(t *testing.T) {
+	dirA, dirB := t.TempDir(), t.TempDir()
+	nodeA, err := StartNode(dirA, nil, []string{"tcp://127.0.0.1:0"}, quietLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nodeA.Stop()
+	var peerURL string
+	for _, l := range nodeA.listeners {
+		peerURL = "tcp://" + l.Addr().String()
+	}
+	nodeB, err := StartNode(dirB, []string{peerURL}, nil, quietLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nodeB.Stop()
+	waitForPeerUp(t, nodeB.Core, 15*time.Second)
+
+	mailA := newTestMail(t, dirA, nodeA)
+	mailB := newTestMail(t, dirB, nodeB)
+	mailA.Attach(nodeA)
+	mailB.Attach(nodeB)
+
+	delivered := make(chan struct{}, 8)
+	mailA.OnDeliver = func(from ed25519.PublicKey, seq uint64, ts int64, payload []byte) {
+		delivered <- struct{}{}
+	}
+	acked := make(chan struct{}, 8)
+	mailB.OnAcked = func(to ed25519.PublicKey, seq uint64) {
+		acked <- struct{}{}
+	}
+
+	if err := mailA.Block(nodeB.Pub); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mailB.SendMsg(nodeA.Pub, []byte("should be dropped")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The sender retries; every attempt must be silently dropped, never acked.
+	time.Sleep(1500 * time.Millisecond)
+	select {
+	case <-delivered:
+		t.Fatal("blocked peer's message was delivered")
+	default:
+	}
+	if _, ok := mailA.boxes[hexString(nodeB.Pub)]; ok {
+		t.Fatal("blocked peer got an inbox/journal box (boxFor must not run)")
+	}
+	if pending := mailB.boxes[hexString(nodeA.Pub)].journal.Pending(); len(pending) == 0 {
+		t.Fatal("sender journal empty: blocked message was acked")
+	}
+
+	if err := mailA.Unblock(nodeB.Pub); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 20*time.Second, "delivery after unblock", delivered)
+	waitFor(t, 20*time.Second, "ack after unblock", acked)
+}
+
+func TestBlockExistingContactStopsPresence(t *testing.T) {
+	_, mailA, presenceA, nodeB, _, _ := presenceFixture(t)
+
+	deadline := time.After(15 * time.Second)
+	for {
+		if e := findEntry(t, presenceA.Snapshot(), hexString(nodeB.Pub)); e != nil && e.Online {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("B never came online in A's presence")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	if err := mailA.Block(nodeB.Pub); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mailA.SendMsg(nodeB.Pub, []byte("nope")); err == nil {
+		t.Fatal("SendMsg to a blocked existing contact must error")
+	}
+
+	time.Sleep(700 * time.Millisecond)
+	if e := findEntry(t, presenceA.Snapshot(), hexString(nodeB.Pub)); e != nil {
+		t.Fatal("blocked existing contact still present in the presence snapshot")
+	}
+
+	if err := mailA.Unblock(nodeB.Pub); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.After(15 * time.Second)
+	for {
+		if e := findEntry(t, presenceA.Snapshot(), hexString(nodeB.Pub)); e != nil && e.Online {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("unblocked contact never reappeared online")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}

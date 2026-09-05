@@ -13,7 +13,7 @@ import (
 	"sync"
 )
 
-const buildVersion = "aimlessd/0.3.3"
+const buildVersion = "aimlessd/0.3.4"
 
 type peerStatus struct {
 	URI     string `json:"uri"`
@@ -157,6 +157,10 @@ func (s *APIServer) dispatch(conn net.Conn, req apiMessage) {
 		s.handleWatch(conn, req)
 	case "setstatus":
 		s.handleSetStatus(conn, req)
+	case "block":
+		s.handleBlock(conn, req, true)
+	case "unblock":
+		s.handleBlock(conn, req, false)
 	case "":
 		s.reply(conn, apiMessage{Op: "error", Error: "missing op"})
 	default:
@@ -236,6 +240,10 @@ func (s *APIServer) handleSetStatus(conn net.Conn, req apiMessage) {
 		s.reply(conn, apiMessage{Op: "error", Error: fmt.Sprintf("key must be %d hex chars", 2*ed25519.PublicKeySize)})
 		return
 	}
+	if s.mail.IsBlocked(ed25519.PublicKey(keyBytes)) {
+		s.reply(conn, apiMessage{Op: "error", Error: "peer is blocked"})
+		return
+	}
 	payload, err := base64.StdEncoding.DecodeString(req.Payload)
 	if err != nil {
 		s.reply(conn, apiMessage{Op: "error", Error: "bad payload base64: " + err.Error()})
@@ -247,6 +255,35 @@ func (s *APIServer) handleSetStatus(conn net.Conn, req apiMessage) {
 		return
 	}
 	s.reply(conn, apiMessage{Op: "statusset", To: req.To, Seq: seq})
+}
+
+func (s *APIServer) handleBlock(conn net.Conn, req apiMessage, block bool) {
+	keyBytes, err := hex.DecodeString(req.To)
+	if err != nil {
+		s.reply(conn, apiMessage{Op: "error", Error: "bad key hex: " + err.Error()})
+		return
+	}
+	if len(keyBytes) != ed25519.PublicKeySize {
+		s.reply(conn, apiMessage{Op: "error", Error: fmt.Sprintf("key must be %d hex chars", 2*ed25519.PublicKeySize)})
+		return
+	}
+	pub := ed25519.PublicKey(keyBytes)
+	if block {
+		if err := s.mail.Block(pub); err != nil {
+			s.reply(conn, apiMessage{Op: "error", Error: "block failed: " + err.Error()})
+			return
+		}
+	} else {
+		if err := s.mail.Unblock(pub); err != nil {
+			s.reply(conn, apiMessage{Op: "error", Error: "unblock failed: " + err.Error()})
+			return
+		}
+	}
+	if block {
+		s.reply(conn, apiMessage{Op: "blocked", To: req.To})
+	} else {
+		s.reply(conn, apiMessage{Op: "unblocked", To: req.To})
+	}
 }
 
 func (s *APIServer) reply(conn net.Conn, msg apiMessage) {

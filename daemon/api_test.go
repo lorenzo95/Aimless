@@ -253,3 +253,119 @@ func TestAPISurvivesGarbage(t *testing.T) {
 	}
 	conn2.Close()
 }
+
+func randomPub(t *testing.T) ed25519.PublicKey {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return priv.Public().(ed25519.PublicKey)
+}
+
+func TestAPIBlockUnblockOps(t *testing.T) {
+	_, _, _, sock := startAPIFixture(t)
+	client := dialAPI(t, sock)
+	pub := randomPub(t)
+	pubHex := hex.EncodeToString(pub)
+
+	client.send(t, apiMessage{Op: "block", To: pubHex})
+	if resp := client.read(t, 5*time.Second); resp.Op != "blocked" {
+		t.Fatalf("op = %s, want blocked", resp.Op)
+	}
+	client.send(t, apiMessage{Op: "block", To: pubHex})
+	if resp := client.read(t, 5*time.Second); resp.Op != "blocked" {
+		t.Fatalf("second block op = %s, want blocked (idempotent)", resp.Op)
+	}
+
+	client.send(t, apiMessage{Op: "watch", To: pubHex})
+	if resp := client.read(t, 5*time.Second); resp.Op != "error" {
+		t.Fatalf("watch on blocked peer op = %s, want error", resp.Op)
+	}
+	client.send(t, apiMessage{Op: "send", To: pubHex, Payload: base64.StdEncoding.EncodeToString([]byte("hi"))})
+	if resp := client.read(t, 5*time.Second); resp.Op != "error" {
+		t.Fatalf("send to blocked peer op = %s, want error", resp.Op)
+	}
+	client.send(t, apiMessage{Op: "setstatus", To: pubHex, Payload: base64.StdEncoding.EncodeToString([]byte("away"))})
+	if resp := client.read(t, 5*time.Second); resp.Op != "error" {
+		t.Fatalf("setstatus to blocked peer op = %s, want error", resp.Op)
+	}
+
+	client.send(t, apiMessage{Op: "unblock", To: pubHex})
+	if resp := client.read(t, 5*time.Second); resp.Op != "unblocked" {
+		t.Fatalf("op = %s, want unblocked", resp.Op)
+	}
+	client.send(t, apiMessage{Op: "watch", To: pubHex})
+	if resp := client.read(t, 5*time.Second); resp.Op != "watching" {
+		t.Fatalf("watch after unblock op = %s, want watching", resp.Op)
+	}
+}
+
+func TestAPIBlockedSetStatusDoesNotAdvanceOutStatus(t *testing.T) {
+	_, _, _, sock := startAPIFixture(t)
+	client := dialAPI(t, sock)
+	pub := randomPub(t)
+	pubHex := hex.EncodeToString(pub)
+	payload := base64.StdEncoding.EncodeToString([]byte("busy"))
+
+	setAndGetSeq := func() uint64 {
+		client.send(t, apiMessage{Op: "setstatus", To: pubHex, Payload: payload})
+		resp := client.read(t, 5*time.Second)
+		if resp.Op != "statusset" {
+			t.Fatalf("op = %s, want statusset", resp.Op)
+		}
+		return resp.Seq
+	}
+
+	if seq := setAndGetSeq(); seq != 1 {
+		t.Fatalf("first setstatus seq = %d, want 1", seq)
+	}
+
+	client.send(t, apiMessage{Op: "block", To: pubHex})
+	if resp := client.read(t, 5*time.Second); resp.Op != "blocked" {
+		t.Fatalf("block op = %s", resp.Op)
+	}
+	for i := 0; i < 2; i++ {
+		client.send(t, apiMessage{Op: "setstatus", To: pubHex, Payload: payload})
+		if resp := client.read(t, 5*time.Second); resp.Op != "error" {
+			t.Fatalf("setstatus while blocked op = %s, want error", resp.Op)
+		}
+	}
+
+	client.send(t, apiMessage{Op: "unblock", To: pubHex})
+	if resp := client.read(t, 5*time.Second); resp.Op != "unblocked" {
+		t.Fatalf("unblock op = %s", resp.Op)
+	}
+	if seq := setAndGetSeq(); seq != 2 {
+		t.Fatalf("setstatus seq after block = %d, want 2 (must not advance while blocked)", seq)
+	}
+}
+
+func TestBlocklistPersistsAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	pub := randomPub(t)
+	m1, err := NewMail(dir, 50, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m1.Block(pub); err != nil {
+		t.Fatal(err)
+	}
+	m2, err := NewMail(dir, 50, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m2.IsBlocked(pub) {
+		t.Fatal("blocklist did not survive restart")
+	}
+	if err := m2.Unblock(pub); err != nil {
+		t.Fatal(err)
+	}
+	m3, err := NewMail(dir, 50, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m3.IsBlocked(pub) {
+		t.Fatal("unblock did not survive restart")
+	}
+}

@@ -154,10 +154,20 @@ func (j *OutboxJournal) Ack(seq uint64) (bool, error) {
 }
 
 type InboxStore struct {
-	mu       sync.Mutex
-	path     string
-	capacity int
-	entries  []journalEntry
+	mu          sync.Mutex
+	path        string
+	highSeqPath string
+	capacity    int
+	entries     []journalEntry
+	dedup       map[uint64]struct{}
+	seenBelow   map[uint64]struct{}
+	seenCap     int
+	retainedMin uint64
+}
+
+type highSeqFile struct {
+	RetainedMin uint64   `json:"retained_min"`
+	Seen        []uint64 `json:"seen"`
 }
 
 func NewInboxStore(datadir, peerHex string, capacity int) (*InboxStore, error) {
@@ -166,8 +176,12 @@ func NewInboxStore(datadir, peerHex string, capacity int) (*InboxStore, error) {
 		return nil, err
 	}
 	in := &InboxStore{
-		path:     filepath.Join(dir, peerHex+".jsonl"),
-		capacity: capacity,
+		path:        filepath.Join(dir, peerHex+".jsonl"),
+		highSeqPath: filepath.Join(dir, peerHex+".highseq"),
+		capacity:    capacity,
+		dedup:       make(map[uint64]struct{}),
+		seenBelow:   make(map[uint64]struct{}),
+		seenCap:     4 * capacity,
 	}
 	if err := in.load(); err != nil {
 		return nil, err
@@ -192,14 +206,54 @@ func (in *InboxStore) load() error {
 		return err
 	}
 	sort.Slice(in.entries, func(i, k int) bool { return in.entries[i].Seq < in.entries[k].Seq })
-	in.trim()
+	if scData, err := os.ReadFile(in.highSeqPath); err == nil {
+		var sc highSeqFile
+		if err := json.Unmarshal(scData, &sc); err == nil {
+			for _, s := range sc.Seen {
+				in.seenBelow[s] = struct{}{}
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	in.trimLocked()
+	for _, e := range in.entries {
+		in.dedup[e.Seq] = struct{}{}
+	}
 	return nil
 }
 
-func (in *InboxStore) trim() {
-	if len(in.entries) > in.capacity {
-		in.entries = in.entries[len(in.entries)-in.capacity:]
+// trimLocked drops the oldest entries past capacity, remembering their seqs in
+// the seen set so a later replay (which is no longer in `entries`) is rejected.
+func (in *InboxStore) trimLocked() {
+	for len(in.entries) > in.capacity {
+		oldest := in.entries[0]
+		in.entries = in.entries[1:]
+		delete(in.dedup, oldest.Seq)
+		in.addSeenLocked(oldest.Seq)
 	}
+	if len(in.entries) > 0 {
+		in.retainedMin = in.entries[0].Seq
+	}
+}
+
+// addSeenLocked records a seq that was accepted but now sits below the retained
+// window, bounded to seenCap entries (replay protection is windowed, not absolute).
+func (in *InboxStore) addSeenLocked(seq uint64) {
+	if _, ok := in.seenBelow[seq]; ok {
+		return
+	}
+	if len(in.seenBelow) >= in.seenCap {
+		var oldest uint64
+		first := true
+		for s := range in.seenBelow {
+			if first || s < oldest {
+				oldest, first = s, false
+			}
+		}
+		delete(in.seenBelow, oldest)
+	}
+	in.seenBelow[seq] = struct{}{}
 }
 
 func (in *InboxStore) persistLocked() error {
@@ -215,23 +269,49 @@ func (in *InboxStore) persistLocked() error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, in.path)
+	if err := os.Rename(tmp, in.path); err != nil {
+		return err
+	}
+	sc := highSeqFile{RetainedMin: in.retainedMin, Seen: in.sortedSeenLocked()}
+	scData, err := json.Marshal(sc)
+	if err != nil {
+		return err
+	}
+	tmp2 := in.highSeqPath + ".tmp"
+	if err := os.WriteFile(tmp2, scData, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp2, in.highSeqPath)
+}
+
+func (in *InboxStore) sortedSeenLocked() []uint64 {
+	out := make([]uint64, 0, len(in.seenBelow))
+	for s := range in.seenBelow {
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, k int) bool { return out[i] < out[k] })
+	return out
 }
 
 func (in *InboxStore) Add(seq uint64, ts int64, payload []byte) (bool, error) {
 	in.mu.Lock()
 	defer in.mu.Unlock()
-	for _, e := range in.entries {
-		if e.Seq == seq {
+	if _, ok := in.dedup[seq]; ok {
+		return false, nil
+	}
+	if seq < in.retainedMin {
+		if _, ok := in.seenBelow[seq]; ok {
 			return false, nil
 		}
+		in.addSeenLocked(seq)
 	}
 	entry := journalEntry{Seq: seq, Ts: ts, Payload: base64.StdEncoding.EncodeToString(payload)}
 	idx := sort.Search(len(in.entries), func(i int) bool { return in.entries[i].Seq > seq })
 	in.entries = append(in.entries, journalEntry{})
 	copy(in.entries[idx+1:], in.entries[idx:])
 	in.entries[idx] = entry
-	in.trim()
+	in.dedup[seq] = struct{}{}
+	in.trimLocked()
 	if err := in.persistLocked(); err != nil {
 		return true, err
 	}

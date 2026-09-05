@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -44,6 +45,7 @@ type Mail struct {
 	inboxCapacity int
 	retryInterval time.Duration
 	boxes         map[string]*Mailbox
+	blocked       map[string]struct{}
 	node          *Node
 	probeSeq      uint64
 
@@ -60,6 +62,11 @@ func NewMail(datadir string, inboxCapacity int, retryInterval time.Duration) (*M
 		retryInterval: retryInterval,
 		boxes:         make(map[string]*Mailbox),
 	}
+	blocked, err := m.loadBlocked()
+	if err != nil {
+		return nil, err
+	}
+	m.blocked = blocked
 	dir := journalDir(datadir)
 	entries, err := osReadDir(dir)
 	if err != nil {
@@ -109,7 +116,95 @@ func (m *Mail) loadContacts() ([]string, error) {
 	return cf.Contacts, nil
 }
 
+type blockedFile struct {
+	Blocked []string `json:"blocked"`
+}
+
+func (m *Mail) blockedPath() string {
+	return filepath.Join(m.datadir, "blocked.json")
+}
+
+func (m *Mail) loadBlocked() (map[string]struct{}, error) {
+	data, err := os.ReadFile(m.blockedPath())
+	if os.IsNotExist(err) {
+		return make(map[string]struct{}), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var bf blockedFile
+	if err := json.Unmarshal(data, &bf); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", m.blockedPath(), err)
+	}
+	out := make(map[string]struct{}, len(bf.Blocked))
+	for _, b := range bf.Blocked {
+		out[b] = struct{}{}
+	}
+	return out, nil
+}
+
+func (m *Mail) IsBlocked(pub ed25519.PublicKey) bool {
+	return m.IsBlockedHex(hex.EncodeToString(pub))
+}
+
+func (m *Mail) IsBlockedHex(peerHex string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.blocked[peerHex]
+	return ok
+}
+
+func (m *Mail) Block(pub ed25519.PublicKey) error {
+	peerHex := hex.EncodeToString(pub)
+	m.mu.Lock()
+	if _, ok := m.blocked[peerHex]; ok {
+		m.mu.Unlock()
+		return nil
+	}
+	m.blocked[peerHex] = struct{}{}
+	blocked := m.sortedBlockedLocked()
+	m.mu.Unlock()
+	return m.persistBlocked(blocked)
+}
+
+func (m *Mail) Unblock(pub ed25519.PublicKey) error {
+	peerHex := hex.EncodeToString(pub)
+	m.mu.Lock()
+	if _, ok := m.blocked[peerHex]; !ok {
+		m.mu.Unlock()
+		return nil
+	}
+	delete(m.blocked, peerHex)
+	blocked := m.sortedBlockedLocked()
+	m.mu.Unlock()
+	return m.persistBlocked(blocked)
+}
+
+func (m *Mail) sortedBlockedLocked() []string {
+	out := make([]string, 0, len(m.blocked))
+	for k := range m.blocked {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (m *Mail) persistBlocked(blocked []string) error {
+	data, err := json.Marshal(blockedFile{Blocked: blocked})
+	if err != nil {
+		return err
+	}
+	tmp := m.blockedPath() + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, m.blockedPath())
+}
+
 func (m *Mail) Watch(pub ed25519.PublicKey) error {
+	if m.IsBlocked(pub) {
+		return fmt.Errorf("peer is blocked")
+	}
 	peerHex := hex.EncodeToString(pub)
 	if _, err := m.boxFor(peerHex); err != nil {
 		return err
@@ -169,6 +264,9 @@ func (m *Mail) boxFor(peerHex string) (*Mailbox, error) {
 }
 
 func (m *Mail) SendMsg(to ed25519.PublicKey, payload []byte) (uint64, error) {
+	if m.IsBlocked(to) {
+		return 0, fmt.Errorf("peer is blocked")
+	}
 	peerHex := hex.EncodeToString(to)
 	box, err := m.boxFor(peerHex)
 	if err != nil {
@@ -187,6 +285,9 @@ func (m *Mail) SendMsg(to ed25519.PublicKey, payload []byte) (uint64, error) {
 }
 
 func (m *Mail) HandlePacket(from ed25519.PublicKey, payload []byte) {
+	if m.IsBlocked(from) {
+		return
+	}
 	env, err := DecodeEnvelope(payload)
 	if err != nil {
 		return
@@ -275,6 +376,9 @@ func (m *Mail) flushPub(pub ed25519.PublicKey) {
 }
 
 func (m *Mail) flushPeer(peerHex string) {
+	if m.IsBlockedHex(peerHex) {
+		return
+	}
 	m.mu.Lock()
 	box, ok := m.boxes[peerHex]
 	m.mu.Unlock()
