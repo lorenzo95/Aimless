@@ -1409,15 +1409,10 @@ class ContactsView(Gtk.Box):
         cb.set_text(self.invite_entry.get_text(), -1)
         self.add_status.set_text("invite copied to clipboard")
 
-    def refresh(self):
+    def _render_buddy_rows(self, blocked):
         clear_children(self.buddy_list)
         self._buddy_rows = {}
         contacts = self.app.session.contacts()
-        try:
-            blocked = set(self.app.session.client.blocklist())
-        except DaemonError:
-            blocked = set()
-        self._blocked = blocked
         contact_nodes = {info["node"] for info in contacts.values()}
         for petname, info in sorted(contacts.items()):
             row = Gtk.ListBoxRow()
@@ -1473,15 +1468,29 @@ class ContactsView(Gtk.Box):
             self._buddy_rows[node] = title
         self.refresh_presence(getattr(self, "_cached_presence", {}))
 
+    def refresh(self):
+        # The buddy list renders immediately from local state (no daemon call on
+        # the UI thread); the blocklist is fetched in the worker and only re-renders
+        # if it changed, so a slow daemon can never stall the interface.
+        self._render_buddy_rows(getattr(self, "_blocked", set()))
+        self.refresh_presence(getattr(self, "_cached_presence", {}))
+
         def worker():
             invite = self.app.session.my_invite()
             presence = {p["key"]: p for p in self.app.session.client.presence(timeout=3)}
-            return invite, presence
+            try:
+                blocked = set(self.app.session.client.blocklist())
+            except DaemonError:
+                blocked = set()
+            return invite, presence, blocked
 
         def done(result):
-            invite, presence = result
+            invite, presence, blocked = result
             self._cached_presence = presence
             self.invite_entry.set_text(invite)
+            if blocked != getattr(self, "_blocked", set()):
+                self._blocked = blocked
+                self._render_buddy_rows(blocked)
             self.refresh_presence(presence)
 
         run_async(worker, on_done=done)

@@ -1,6 +1,6 @@
 [project]
 name = "aimless-client"
-version = "0.6.2"
+version = "0.6.3"
 description = "aimless — serverless chat with an AIM heart"
 requires-python = ">=3.10"
 dependencies = ["pynacl>=1.5"]

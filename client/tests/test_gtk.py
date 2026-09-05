@@ -700,10 +700,14 @@ def test_gui_blocked_contact_renders_unblock(gtk_app):
     b_node = app["b_node"]
     win.session.client.block(b_node)
     win.contacts.refresh()
+
+    def blocked_rendered():
+        rows = _contact_rows(win)
+        b = next((r for r in rows if "Bob" in r["title"]), None)
+        return b is not None and b["btn"] == "Unblock"
+    assert _pump(win, blocked_rendered, timeout=10), "blocked contact never rendered with Unblock"
     rows = _contact_rows(win)
     bob = next(r for r in rows if "Bob" in r["title"])
-    assert bob["btn"] == "Unblock", f"blocked contact should show Unblock, got {bob['btn']!r}"
-
     bob["row"].get_child().get_children()[-1].clicked()
 
     def reverted():
@@ -719,9 +723,12 @@ def test_gui_blocked_stranger_renders_synthetic_row(gtk_app):
     stranger = "cd" * 32
     win.session.client.block(stranger)
     win.contacts.refresh()
-    rows = _contact_rows(win)
-    syn = next((r for r in rows if stranger[:20] in r["title"]), None)
-    assert syn is not None, "denied stranger has no synthetic row"
+
+    def synthetic_rendered():
+        rows = _contact_rows(win)
+        return any(stranger[:20] in r["title"] for r in rows)
+    assert _pump(win, synthetic_rendered, timeout=10), "denied stranger never got a synthetic row"
+    syn = next(r for r in _contact_rows(win) if stranger[:20] in r["title"])
     assert syn["btn"] == "Unblock"
 
     syn["row"].get_child().get_children()[-1].clicked()
