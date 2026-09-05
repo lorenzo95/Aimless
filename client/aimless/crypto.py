@@ -75,28 +75,77 @@ def load_identity(path: str, passphrase: str) -> nacl.signing.SigningKey:
 class Cache:
     def __init__(self, path: str, passphrase: str):
         self.path = path
-        salt = hashlib.sha256(b"aimless-cache" + kdf_key(passphrase, b"aimless-cache-salt")).digest()[:16]
-        self._key = kdf_key(passphrase, salt)
-        self._box = nacl.secret.SecretBox(self._key)
         self._data = {"conversations": {}, "muted": [], "pending": []}
-        self._load()
+        self._salt = None
+        self._key = None
+        self._box = None
+        self._migrated_format = False
+        self._load(passphrase)
+        if self._salt is None:
+            self._salt = nacl.utils.random(16)
+            self._key = kdf_key(passphrase, self._salt)
+            self._box = nacl.secret.SecretBox(self._key)
 
-    def _load(self) -> None:
+    @property
+    def salt(self) -> bytes:
+        """The KDF salt for this cache file (stored in the file header)."""
+        return self._salt
+
+    @staticmethod
+    def _legacy_key(passphrase: str) -> bytes:
+        # The pre-0.5.11 scheme derived a deterministic salt from the passphrase
+        # alone (kept frozen here so old cache files can be migrated).
+        salt = hashlib.sha256(b"aimless-cache" + kdf_key(passphrase, b"aimless-cache-salt")).digest()[:16]
+        return kdf_key(passphrase, salt)
+
+    @staticmethod
+    def _header(salt: bytes) -> bytes:
+        return (json.dumps({
+            "v": 2, "kdf": "scrypt", "n": KDF_N, "r": KDF_R, "p": KDF_P,
+            "salt": base64.b64encode(salt).decode(),
+        }, sort_keys=True) + "\n").encode("utf-8")
+
+    def _load(self, passphrase: str) -> None:
         if not os.path.exists(self.path):
             return
         with open(self.path, "rb") as f:
             blob = f.read()
-        nonce = blob[: nacl.secret.SecretBox.NONCE_SIZE]
-        ct = blob[nacl.secret.SecretBox.NONCE_SIZE :]
+        header = None
+        nl = blob.find(b"\n")
+        if nl > 0:
+            try:
+                cand = json.loads(blob[:nl])
+                if isinstance(cand, dict) and cand.get("salt"):
+                    header = cand
+            except (ValueError, UnicodeDecodeError):
+                pass
+        if header is not None:
+            self._salt = base64.b64decode(header["salt"])
+            self._key = kdf_key(passphrase, self._salt)
+            self._box = nacl.secret.SecretBox(self._key)
+            offset = nl + 1
+        else:
+            self._key = self._legacy_key(passphrase)
+            self._box = nacl.secret.SecretBox(self._key)
+            self._migrated_format = True
+            offset = 0
+        nonce = blob[offset: offset + nacl.secret.SecretBox.NONCE_SIZE]
+        ct = blob[offset + nacl.secret.SecretBox.NONCE_SIZE:]
         data = json.loads(self._box.decrypt(ct, nonce))
+        need_rewrite = self._migrated_format
         if "buddies" in data and "conversations" not in data:
             data = self._migrate(data)
-            self._data = data
-            self._flush()
+            need_rewrite = True
         else:
             for c in data.get("conversations", {}).values():
                 c.setdefault("scan_last", dict(c.get("recv_last", {})))
-            self._data = data
+        self._data = data
+        if need_rewrite:
+            if self._migrated_format:
+                self._salt = nacl.utils.random(16)
+                self._key = kdf_key(passphrase, self._salt)
+                self._box = nacl.secret.SecretBox(self._key)
+            self._flush()
 
     @staticmethod
     def _migrate(old: dict) -> dict:
@@ -121,6 +170,7 @@ class Cache:
         tmp = self.path + ".tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "wb") as f:
+            f.write(self._header(self._salt))
             f.write(blob)
         os.replace(tmp, self.path)
 

@@ -15,6 +15,49 @@ def _write_legacy(path, buddies, passphrase="legacy-pw"):
         f.write(box.encrypt(json.dumps({"buddies": buddies}).encode()))
 
 
+def _write_legacy_format(path, data, passphrase):
+    """Legacy on-disk format: nonce||ct with the deterministic pre-0.5.11 salt."""
+    salt = hashlib.sha256(b"aimless-cache" + kdf_key(passphrase, b"aimless-cache-salt")).digest()[:16]
+    box = nacl.secret.SecretBox(kdf_key(passphrase, salt))
+    with open(path, "wb") as f:
+        f.write(box.encrypt(json.dumps(data).encode()))
+
+
+def test_cache_salt_is_per_file(tmp_path):
+    p1 = str(tmp_path / "a.json.enc")
+    p2 = str(tmp_path / "b.json.enc")
+    c1 = crypto.Cache(p1, "same-pw")
+    c2 = crypto.Cache(p2, "same-pw")
+    assert c1.salt != c2.salt, "same passphrase must not reuse a deterministic salt"
+    assert c1._key != c2._key
+    c1.add_recv("aa", "aa", 1, 100, "hi")  # first mutation writes the file
+    c3 = crypto.Cache(p1, "same-pw")
+    assert c3.salt == c1.salt, "salt persists with the file, so reloads re-derive the same key"
+    assert c3._key == c1._key
+
+
+def test_cache_legacy_format_rewrites_with_header(tmp_path):
+    path = str(tmp_path / "legacy.json.enc")
+    data = {"conversations": {
+        "aa": {"dm": True, "members": {}, "msgs": [], "recv_last": {"aa": 1},
+               "sent_last": {}, "scan_last": {"aa": 1}}},
+        "muted": [], "pending": []}
+    _write_legacy_format(path, data, "pw")
+
+    legacy_salt = hashlib.sha256(b"aimless-cache" + kdf_key("pw", b"aimless-cache-salt")).digest()[:16]
+    c = crypto.Cache(path, "pw")
+    assert c.recv_last("aa", "aa") == 1, "legacy file must decrypt and load"
+    assert c.salt != legacy_salt, "file must be re-keyed with a fresh random salt"
+
+    with open(path, "rb") as f:
+        header_line = f.readline()
+    header = json.loads(header_line)
+    assert header["v"] == 2 and header.get("salt"), "file must be rewritten with a header"
+
+    c2 = crypto.Cache(path, "pw")
+    assert c2.recv_last("aa", "aa") == 1, "rewritten file must round-trip"
+
+
 def test_cache_add_and_persist(tmp_path):
     path = str(tmp_path / "cache.json.enc")
     c1 = crypto.Cache(path, "pw")
