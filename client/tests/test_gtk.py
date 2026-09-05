@@ -619,7 +619,7 @@ def test_gui_request_accept_and_deny(gtk_app, tmp_path, monkeypatch):
     win.surface_pending_requests()
     contacts = protocol.load_contacts(contacts_path)
     assert "Spam" not in contacts
-    assert win.session.cache.is_muted(stranger2)
+    assert not win.session.cache.is_muted(stranger2), "Deny is a one-time decline, not a mute"
     assert win.session.cache.msgs(stranger2) == []
     assert stranger2 not in win.messages.threads
 
@@ -638,12 +638,17 @@ def test_gui_deny_accept_block_responses(gtk_app, monkeypatch):
                                        "conv": None, "members": [], "seq": 5, "ts": 1000, "text": "hi"})
         win.surface_pending_requests()
 
-    # Deny: soft decline — client mute only, no daemon interaction at all
+    # Deny: one-time soft decline — no persistent state, no daemon interaction;
+    # the sender's next message re-prompts.
     stranger = "cd" * 32
     monkeypatch.setattr(win, "_ask_request", lambda r: Gtk.ResponseType.REJECT)
     send_request(stranger, "Spam")
-    assert win.session.cache.is_muted(stranger)
+    assert not win.session.cache.is_muted(stranger)
     assert blocked == [] and unblocked == [], "Deny must not touch the daemon"
+    prompts = []
+    monkeypatch.setattr(win, "_ask_request", lambda r: prompts.append(1) or Gtk.ResponseType.REJECT)
+    send_request(stranger, "Spam")
+    assert prompts, "a denied sender must be re-prompted on their next message"
 
     # Block: mute + daemon block
     bad = "ce" * 32

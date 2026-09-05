@@ -1801,7 +1801,9 @@ class AimlessWindow(Gtk.Window):
             self.daemon_block_set(req["node"], blocked=True)
             self.activity.log(f"blocked {req.get('screen') or req['node'][:8]}")
         else:
-            self.session.cache.mute(req["node"])
+            # Deny is a one-time soft decline: this request is discarded and the
+            # sender stays a stranger, so their next message re-prompts. Block is
+            # the persistent option.
             self.activity.log(f"denied {req.get('screen') or req['node'][:8]}")
         GLib.idle_add(self.surface_pending_requests)
         return GLib.SOURCE_REMOVE
