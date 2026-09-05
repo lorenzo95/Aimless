@@ -1,3 +1,3 @@
 """aimless — serverless chat with an AIM heart."""
 
-__version__ = "0.5.12"
+__version__ = "0.6.0"

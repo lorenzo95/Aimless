@@ -13,7 +13,7 @@ import (
 	"sync"
 )
 
-const buildVersion = "aimlessd/0.3.4"
+const buildVersion = "aimlessd/0.4.0"
 
 type peerStatus struct {
 	URI     string `json:"uri"`
@@ -32,6 +32,7 @@ type historyMsg struct {
 
 type apiMessage struct {
 	Op       string          `json:"op"`
+	Id       string          `json:"id,omitempty"`
 	Address  string          `json:"address,omitempty"`
 	Key      string          `json:"key,omitempty"`
 	Pid      int             `json:"pid,omitempty"`
@@ -115,7 +116,7 @@ func (s *APIServer) handleConn(conn net.Conn) {
 		}
 		var req apiMessage
 		if err := json.Unmarshal(line, &req); err != nil {
-			s.reply(conn, apiMessage{Op: "error", Error: "bad json: " + err.Error()})
+			s.replyReq(conn, req, apiMessage{Op: "error", Error: "bad json: " + err.Error()})
 			continue
 		}
 		s.dispatch(conn, req)
@@ -125,7 +126,7 @@ func (s *APIServer) handleConn(conn net.Conn) {
 func (s *APIServer) dispatch(conn net.Conn, req apiMessage) {
 	switch req.Op {
 	case "whoami":
-		s.reply(conn, apiMessage{Op: "whoami", Address: s.node.Address.String(), Key: hex.EncodeToString(s.node.Pub), Pid: os.Getpid()})
+		s.replyReq(conn, req, apiMessage{Op: "whoami", Address: s.node.Address.String(), Key: hex.EncodeToString(s.node.Pub), Pid: os.Getpid()})
 	case "status":
 		peers := s.node.Core.GetPeers()
 		out := make([]peerStatus, 0, len(peers))
@@ -139,7 +140,7 @@ func (s *APIServer) dispatch(conn net.Conn, req apiMessage) {
 				RXBytes: p.RXBytes,
 			})
 		}
-		s.reply(conn, apiMessage{
+		s.replyReq(conn, req, apiMessage{
 			Op:      "status",
 			Address: s.node.Address.String(),
 			Key:     hex.EncodeToString(s.node.Pub),
@@ -152,7 +153,7 @@ func (s *APIServer) dispatch(conn net.Conn, req apiMessage) {
 	case "history":
 		s.handleHistory(conn, req)
 	case "presence":
-		s.reply(conn, apiMessage{Op: "presence", Presence: s.presence.Snapshot()})
+		s.replyReq(conn, req, apiMessage{Op: "presence", Presence: s.presence.Snapshot()})
 	case "watch":
 		s.handleWatch(conn, req)
 	case "setstatus":
@@ -162,127 +163,127 @@ func (s *APIServer) dispatch(conn net.Conn, req apiMessage) {
 	case "unblock":
 		s.handleBlock(conn, req, false)
 	case "":
-		s.reply(conn, apiMessage{Op: "error", Error: "missing op"})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "missing op"})
 	default:
-		s.reply(conn, apiMessage{Op: "error", Error: "unknown op: " + req.Op})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "unknown op: " + req.Op})
 	}
 }
 
 func (s *APIServer) handleSend(conn net.Conn, req apiMessage) {
 	keyBytes, err := hex.DecodeString(req.To)
 	if err != nil {
-		s.reply(conn, apiMessage{Op: "error", Error: "bad key hex: " + err.Error()})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "bad key hex: " + err.Error()})
 		return
 	}
 	if len(keyBytes) != ed25519.PublicKeySize {
-		s.reply(conn, apiMessage{Op: "error", Error: fmt.Sprintf("key must be %d hex chars", 2*ed25519.PublicKeySize)})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: fmt.Sprintf("key must be %d hex chars", 2*ed25519.PublicKeySize)})
 		return
 	}
 	payload, err := base64.StdEncoding.DecodeString(req.Payload)
 	if err != nil {
-		s.reply(conn, apiMessage{Op: "error", Error: "bad payload base64: " + err.Error()})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "bad payload base64: " + err.Error()})
 		return
 	}
 	seq, err := s.mail.SendMsg(ed25519.PublicKey(keyBytes), payload)
 	if err != nil {
-		s.reply(conn, apiMessage{Op: "error", Error: "send failed: " + err.Error()})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "send failed: " + err.Error()})
 		return
 	}
-	s.reply(conn, apiMessage{Op: "queued", To: req.To, Seq: seq, Bytes: len(payload)})
+	s.replyReq(conn, req, apiMessage{Op: "queued", To: req.To, Seq: seq, Bytes: len(payload)})
 }
 
 func (s *APIServer) handleHistory(conn net.Conn, req apiMessage) {
 	keyBytes, err := hex.DecodeString(req.From)
 	if err != nil {
-		s.reply(conn, apiMessage{Op: "error", Error: "bad key hex: " + err.Error()})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "bad key hex: " + err.Error()})
 		return
 	}
 	if len(keyBytes) != ed25519.PublicKeySize {
-		s.reply(conn, apiMessage{Op: "error", Error: fmt.Sprintf("key must be %d hex chars", 2*ed25519.PublicKeySize)})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: fmt.Sprintf("key must be %d hex chars", 2*ed25519.PublicKeySize)})
 		return
 	}
 	msgs, oldest, latest, err := s.mail.History(hex.EncodeToString(keyBytes), req.Seq)
 	if err != nil {
-		s.reply(conn, apiMessage{Op: "error", Error: "history failed: " + err.Error()})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "history failed: " + err.Error()})
 		return
 	}
 	out := make([]historyMsg, 0, len(msgs))
 	for _, e := range msgs {
 		out = append(out, historyMsg{Seq: e.Seq, Ts: e.Ts, Payload: e.Payload})
 	}
-	s.reply(conn, apiMessage{Op: "history", From: req.From, Msgs: out, Oldest: oldest, Latest: latest})
+	s.replyReq(conn, req, apiMessage{Op: "history", From: req.From, Msgs: out, Oldest: oldest, Latest: latest})
 }
 
 func (s *APIServer) handleWatch(conn net.Conn, req apiMessage) {
 	keyBytes, err := hex.DecodeString(req.To)
 	if err != nil {
-		s.reply(conn, apiMessage{Op: "error", Error: "bad key hex: " + err.Error()})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "bad key hex: " + err.Error()})
 		return
 	}
 	if len(keyBytes) != ed25519.PublicKeySize {
-		s.reply(conn, apiMessage{Op: "error", Error: fmt.Sprintf("key must be %d hex chars", 2*ed25519.PublicKeySize)})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: fmt.Sprintf("key must be %d hex chars", 2*ed25519.PublicKeySize)})
 		return
 	}
 	if err := s.mail.Watch(ed25519.PublicKey(keyBytes)); err != nil {
-		s.reply(conn, apiMessage{Op: "error", Error: "watch failed: " + err.Error()})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "watch failed: " + err.Error()})
 		return
 	}
-	s.reply(conn, apiMessage{Op: "watching", To: req.To})
+	s.replyReq(conn, req, apiMessage{Op: "watching", To: req.To})
 }
 
 func (s *APIServer) handleSetStatus(conn net.Conn, req apiMessage) {
 	keyBytes, err := hex.DecodeString(req.To)
 	if err != nil {
-		s.reply(conn, apiMessage{Op: "error", Error: "bad key hex: " + err.Error()})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "bad key hex: " + err.Error()})
 		return
 	}
 	if len(keyBytes) != ed25519.PublicKeySize {
-		s.reply(conn, apiMessage{Op: "error", Error: fmt.Sprintf("key must be %d hex chars", 2*ed25519.PublicKeySize)})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: fmt.Sprintf("key must be %d hex chars", 2*ed25519.PublicKeySize)})
 		return
 	}
 	if s.mail.IsBlocked(ed25519.PublicKey(keyBytes)) {
-		s.reply(conn, apiMessage{Op: "error", Error: "peer is blocked"})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "peer is blocked"})
 		return
 	}
 	payload, err := base64.StdEncoding.DecodeString(req.Payload)
 	if err != nil {
-		s.reply(conn, apiMessage{Op: "error", Error: "bad payload base64: " + err.Error()})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "bad payload base64: " + err.Error()})
 		return
 	}
 	seq, err := s.presence.SetStatus(ed25519.PublicKey(keyBytes), payload)
 	if err != nil {
-		s.reply(conn, apiMessage{Op: "error", Error: "setstatus failed: " + err.Error()})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "setstatus failed: " + err.Error()})
 		return
 	}
-	s.reply(conn, apiMessage{Op: "statusset", To: req.To, Seq: seq})
+	s.replyReq(conn, req, apiMessage{Op: "statusset", To: req.To, Seq: seq})
 }
 
 func (s *APIServer) handleBlock(conn net.Conn, req apiMessage, block bool) {
 	keyBytes, err := hex.DecodeString(req.To)
 	if err != nil {
-		s.reply(conn, apiMessage{Op: "error", Error: "bad key hex: " + err.Error()})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "bad key hex: " + err.Error()})
 		return
 	}
 	if len(keyBytes) != ed25519.PublicKeySize {
-		s.reply(conn, apiMessage{Op: "error", Error: fmt.Sprintf("key must be %d hex chars", 2*ed25519.PublicKeySize)})
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: fmt.Sprintf("key must be %d hex chars", 2*ed25519.PublicKeySize)})
 		return
 	}
 	pub := ed25519.PublicKey(keyBytes)
 	if block {
 		if err := s.mail.Block(pub); err != nil {
-			s.reply(conn, apiMessage{Op: "error", Error: "block failed: " + err.Error()})
+			s.replyReq(conn, req, apiMessage{Op: "error", Error: "block failed: " + err.Error()})
 			return
 		}
 	} else {
 		if err := s.mail.Unblock(pub); err != nil {
-			s.reply(conn, apiMessage{Op: "error", Error: "unblock failed: " + err.Error()})
+			s.replyReq(conn, req, apiMessage{Op: "error", Error: "unblock failed: " + err.Error()})
 			return
 		}
 	}
 	if block {
-		s.reply(conn, apiMessage{Op: "blocked", To: req.To})
+		s.replyReq(conn, req, apiMessage{Op: "blocked", To: req.To})
 	} else {
-		s.reply(conn, apiMessage{Op: "unblocked", To: req.To})
+		s.replyReq(conn, req, apiMessage{Op: "unblocked", To: req.To})
 	}
 }
 
@@ -292,6 +293,14 @@ func (s *APIServer) reply(conn net.Conn, msg apiMessage) {
 		return
 	}
 	conn.Write(append(data, '\n'))
+}
+
+// replyReq echoes the request's correlation id back on the reply (and on error
+// replies) so a multiplexing client can match the response to its request.
+// Events (recv/acked) are broadcast separately and never carry ids.
+func (s *APIServer) replyReq(conn net.Conn, req apiMessage, msg apiMessage) {
+	msg.Id = req.Id
+	s.reply(conn, msg)
 }
 
 func (s *APIServer) DeliverMsg(from ed25519.PublicKey, seq uint64, ts int64, payload []byte) {

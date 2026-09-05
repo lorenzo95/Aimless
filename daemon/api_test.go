@@ -369,3 +369,26 @@ func TestBlocklistPersistsAcrossRestart(t *testing.T) {
 		t.Fatal("unblock did not survive restart")
 	}
 }
+
+func TestAPIIdEcho(t *testing.T) {
+	_, _, _, sock := startAPIFixture(t)
+	client := dialAPI(t, sock)
+
+	client.send(t, apiMessage{Op: "whoami", Id: "req-42"})
+	resp := client.read(t, 5*time.Second)
+	if resp.Op != "whoami" || resp.Id != "req-42" {
+		t.Fatalf("whoami: op=%s id=%q, want whoami/req-42", resp.Op, resp.Id)
+	}
+
+	client.send(t, apiMessage{Op: "bogus", Id: "err-7"})
+	resp = client.read(t, 5*time.Second)
+	if resp.Op != "error" || resp.Id != "err-7" {
+		t.Fatalf("error reply: op=%s id=%q, want error/err-7", resp.Op, resp.Id)
+	}
+
+	client.send(t, apiMessage{Op: "history", Id: "h-1", From: hex.EncodeToString(randomPub(t))})
+	resp = client.read(t, 5*time.Second)
+	if resp.Id != "h-1" {
+		t.Fatalf("history id = %q, want h-1", resp.Id)
+	}
+}

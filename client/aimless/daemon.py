@@ -25,6 +25,12 @@ class DaemonClient:
         self._raw: "queue.Queue[dict]" = queue.Queue()
         self._stash: list = []
         self._send_lock = threading.Lock()
+        self._roundtrip_lock = threading.Lock()
+        self._id_lock = threading.Lock()
+        self._id_counter = 0
+        self._pending = {}
+        self._pending_lock = threading.Lock()
+        self._multiplex = False
         self._stop = threading.Event()
         self._want_reconnect = threading.Event()
         self._sock = None
@@ -37,6 +43,11 @@ class DaemonClient:
             raise
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
+
+    def _new_id(self) -> str:
+        with self._id_lock:
+            self._id_counter += 1
+            return f"r{self._id_counter}"
 
     def _connect(self):
         self._sock = socket.socket(socket.AF_UNIX)
@@ -97,14 +108,29 @@ class DaemonClient:
                 continue
             if msg.get("op") in EVENT_OPS:
                 self.events.put(msg)
-            else:
-                self._raw.put(msg)
+                continue
+            rid = msg.get("id")
+            if rid is not None:
+                with self._pending_lock:
+                    mb = self._pending.get(rid)
+                if mb is not None:
+                    mb.put(msg)
+                    continue
+            self._raw.put(msg)
 
     def request(self, op: str, timeout: float = 10.0, **fields) -> dict:
+        if self._multiplex:
+            return self._request_multiplex(op, timeout, fields)
+        return self._request_legacy(op, timeout, fields)
+
+    def _request_legacy(self, op: str, timeout: float, fields: dict) -> dict:
+        """Serialize-on-lock path, used until the daemon proves it echoes request
+        ids (i.e. a pre-correlation daemon, or before the first reply arrives)."""
         req = {"op": op}
         req.update(fields)
+        req["id"] = self._new_id()
         expected = RESPONSE_MAP.get(op, op)
-        with self._send_lock:
+        with self._roundtrip_lock:
             deadline = time.monotonic() + timeout
             sent_gen = self._generation
             sent = False
@@ -139,9 +165,59 @@ class DaemonClient:
                 if msg.get("op") != expected:
                     self._stash.append(msg)
                     continue
+                if msg.get("id"):
+                    self._multiplex = True
                 if msg.get("op") == "error":
                     raise DaemonError(msg.get("error", "unknown error"))
                 return msg
+
+    def _request_multiplex(self, op: str, timeout: float, fields: dict) -> dict:
+        """Per-request id + pending-by-id registry; the send lock guards only the
+        sendall, so concurrent in-flight requests share the connection."""
+        req = {"op": op}
+        req.update(fields)
+        rid = self._new_id()
+        req["id"] = rid
+        mb = queue.Queue()
+        with self._pending_lock:
+            self._pending[rid] = mb
+        try:
+            deadline = time.monotonic() + timeout
+            sent_gen = self._generation
+            sent = False
+            while True:
+                if self._sock is None or self._want_reconnect.is_set():
+                    if not self._wait_generation_change(sent_gen, 10.0):
+                        raise DaemonError(f"daemon unreachable ({op})")
+                    deadline = time.monotonic() + timeout
+                    sent = False
+                if not sent:
+                    with self._send_lock:
+                        try:
+                            self._sock.sendall((json.dumps(req) + "\n").encode("utf-8"))
+                            sent = True
+                            sent_gen = self._generation
+                        except (OSError, AttributeError):
+                            self._want_reconnect.set()
+                            sent = False
+                    if not sent:
+                        if not self._wait_generation_change(sent_gen, 10.0):
+                            raise DaemonError(f"daemon unreachable ({op})")
+                        deadline = time.monotonic() + timeout
+                        continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DaemonError(f"timeout waiting for response to {op}")
+                try:
+                    msg = mb.get(timeout=min(0.5, remaining))
+                except queue.Empty:
+                    continue
+                if msg.get("op") == "error":
+                    raise DaemonError(msg.get("error", "unknown error"))
+                return msg
+        finally:
+            with self._pending_lock:
+                self._pending.pop(rid, None)
 
     def next_event(self, timeout: float = None):
         try:
@@ -160,12 +236,15 @@ class Client:
         self.identity = identity
         self.pubkey_hex = bytes(identity.verify_key).hex()
         self.screen_name = screen_name
+        self._node_key = None
 
     def whoami(self) -> dict:
         return self.daemon.request("whoami")
 
     def node_key(self) -> str:
-        return self.whoami()["key"]
+        if self._node_key is None:
+            self._node_key = self.whoami()["key"]
+        return self._node_key
 
     def add_contact(self, buddy_node_hex: str) -> dict:
         return self.daemon.request("watch", to=buddy_node_hex)
