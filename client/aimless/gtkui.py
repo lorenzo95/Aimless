@@ -608,6 +608,13 @@ class MessagesView(Gtk.Box):
         self.mute_btn.set_no_show_all(True)
         self.mute_btn.connect("clicked", self.on_toggle_mute)
         header_box.pack_end(self.mute_btn, False, False, 0)
+        self.block_btn = Gtk.Button(label="Block…")
+        self.block_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self.block_btn.set_valign(Gtk.Align.START)
+        self.block_btn.get_style_context().add_class("muted")
+        self.block_btn.set_no_show_all(True)
+        self.block_btn.connect("clicked", self.on_toggle_block)
+        header_box.pack_end(self.block_btn, False, False, 0)
         conversation_box.pack_start(header_box, False, False, 0)
 
         self.member_chips = Gtk.FlowBox()
@@ -924,6 +931,7 @@ class MessagesView(Gtk.Box):
             self.selected = None
             self.delete_btn.hide()
             self.mute_btn.hide()
+            self.block_btn.hide()
             self._render_member_chips(None)
             return
         conv = next((c for c, t in self.threads.items() if t.get("row") is row), None)
@@ -938,12 +946,15 @@ class MessagesView(Gtk.Box):
             self.conversation_header.set_markup(_room_header_markup(thread, self.app.session.self_node))
             self.delete_btn.show()
             self.mute_btn.show()
+            self.block_btn.hide()
             self.mute_btn.set_label("Unmute room…" if self.app.session.cache.is_conversation_muted(conv)
                                     else "Mute room…")
             self._render_member_chips(thread)
         else:
             self.delete_btn.hide()
             self.mute_btn.hide()
+            self.block_btn.show()
+            self.block_btn.set_label("Unblock…" if self.app.session.cache.is_muted(conv) else "Block…")
             self._render_member_chips(None)
             self.conversation_header.set_markup(
                 f"<big><b>{GLib.markup_escape_text(thread['screen'])}</b></big>"
@@ -1124,6 +1135,7 @@ class MessagesView(Gtk.Box):
                 self.stack.set_visible_child_name("placeholder")
                 self.delete_btn.hide()
                 self.mute_btn.hide()
+                self.block_btn.hide()
             self.app.activity.log(f"deleted room {title}")
 
         def fail(e):
@@ -1243,6 +1255,33 @@ class MessagesView(Gtk.Box):
             self.app.activity.log(f"muted {thread['screen']}")
         self.mute_btn.set_label("Unmute room…" if cache.is_conversation_muted(conv) else "Mute room…")
         self.update_thread_row(conv)
+
+    def on_toggle_block(self, *_):
+        thread = self.selected
+        if thread is None or thread.get("is_room"):
+            return
+        node = thread["conv"]
+        screen = thread["screen"]
+        cache = self.app.session.cache
+
+        def after(thread=thread):
+            # The daemon op is async; if the user switched threads (or to
+            # nothing) before it landed, don't touch a button for the wrong view.
+            if self.selected is not thread or self.selected.get("is_room"):
+                return
+            self.block_btn.set_label("Unblock…" if self.app.session.cache.is_muted(node) else "Block…")
+            self.app.contacts.refresh()
+
+        if cache.is_muted(node):
+            cache.unmute(node)
+            cache.clear_blocked_screen(node)
+            self.app.daemon_block_set(node, blocked=False, on_done=after)
+            self.app.activity.log(f"unblocked {screen}")
+        else:
+            cache.mute(node)
+            cache.set_blocked_screen(node, screen)
+            self.app.daemon_block_set(node, blocked=True, on_done=after)
+            self.app.activity.log(f"blocked {screen}")
 
     def on_composer_key(self, widget, event):
         if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and not (event.state & Gdk.ModifierType.SHIFT_MASK):
