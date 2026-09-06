@@ -16,6 +16,7 @@ type journalEntry struct {
 	Ts      int64         `json:"ts"`
 	Payload string        `json:"payload"`
 	Type    EnvelopeType  `json:"type,omitempty"`
+	SentAt  int64         `json:"sent_at,omitempty"` // transient pacing state, not persisted
 }
 
 type OutboxJournal struct {
@@ -127,6 +128,20 @@ func (j *OutboxJournal) Pending() []journalEntry {
 	out := make([]journalEntry, len(j.entries))
 	copy(out, j.entries)
 	return out
+}
+
+// MarkSent records the in-memory send time of an entry so the retry loop does
+// not re-send in-flight chunks. Transient state: on restart everything is
+// considered stale and re-sent, which is correct for durability.
+func (j *OutboxJournal) MarkSent(seq uint64, at int64) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	for i := range j.entries {
+		if j.entries[i].Seq == seq {
+			j.entries[i].SentAt = at
+			return
+		}
+	}
 }
 
 func (j *OutboxJournal) Ack(seq uint64) (bool, error) {

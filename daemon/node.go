@@ -34,6 +34,12 @@ type Node struct {
 	priv      ed25519.PrivateKey
 	listeners []*core.Listener
 	closeOnce sync.Once
+	outbox    chan outbound
+}
+
+type outbound struct {
+	pub  ed25519.PublicKey
+	data []byte
 }
 
 func LoadOrCreateKey(datadir string) (ed25519.PrivateKey, error) {
@@ -101,11 +107,13 @@ func StartNode(datadir string, peers []string, listenURLs []string, log *aimless
 		return nil, fmt.Errorf("start yggdrasil core: %w", err)
 	}
 	n := &Node{
-		Core: c,
-		priv: priv,
-		Pub:  priv.Public().(ed25519.PublicKey),
+		Core:   c,
+		priv:   priv,
+		Pub:    priv.Public().(ed25519.PublicKey),
+		outbox: make(chan outbound, 512),
 	}
 	n.Address = c.Address()
+	go n.writeLoop()
 	c.SetPathNotify(func(key ed25519.PublicKey) {
 		if n.OnPathUp != nil {
 			n.OnPathUp(key)
@@ -172,7 +180,23 @@ func (n *Node) Send(pub ed25519.PublicKey, payload []byte) (int, error) {
 	if len(payload) > int(n.Core.MTU()) {
 		return 0, fmt.Errorf("payload %d exceeds mtu %d", len(payload), n.Core.MTU())
 	}
-	return n.Core.WriteTo(payload, types.Addr(pub))
+	// Non-blocking enqueue: Core.WriteTo blocks on session flow control, and a
+	// saturated outbound link must never stall API handlers, the presence loop,
+	// or inbound ACK processing. Every send type is retryable (chunks are
+	// journaled, status is re-announced, probes are periodic), so dropping when
+	// the queue is full is safe.
+	select {
+	case n.outbox <- outbound{pub: pub, data: payload}:
+		return len(payload), nil
+	default:
+		return 0, fmt.Errorf("outbound queue full")
+	}
+}
+
+func (n *Node) writeLoop() {
+	for out := range n.outbox {
+		_, _ = n.Core.WriteTo(out.data, types.Addr(out.pub))
+	}
 }
 
 func (n *Node) Stop() {
