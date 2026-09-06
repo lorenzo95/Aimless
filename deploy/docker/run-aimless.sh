@@ -13,5 +13,5 @@ for i in $(seq 1 60); do
 done
 sleep 2   # let openbox take the root window first
 
-cd /opt/aimless
-exec /opt/aimless/aimless.pyz gui
+cd /data/bin
+exec /data/bin/aimless.pyz gui
