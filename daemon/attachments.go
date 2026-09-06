@@ -151,7 +151,24 @@ func (as *AttachmentStore) Add(tid string, index, total uint16, seq uint64, ts i
 	}
 	as.bytes += int64(len(e.Payload))
 	as.entries = append(as.entries, e)
-	return true, as.persistLocked()
+	// Append-only: a full rewrite per chunk would be O(n²) across a transfer
+	// (the receiver ACKs each chunk, and the ACK contract requires the chunk on
+	// disk first). Eviction/ack rewrite the file wholesale instead.
+	return true, as.appendLocked(e)
+}
+
+func (as *AttachmentStore) appendLocked(e attachEntry) error {
+	f, err := os.OpenFile(as.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	line, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(append(line, '\n'))
+	return err
 }
 
 // makeRoomLocked frees budget: oldest incomplete transfer wholesale first,

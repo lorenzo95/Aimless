@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,9 +36,10 @@ func base64Decode(s string) ([]byte, error) {
 }
 
 type Mailbox struct {
-	journal *OutboxJournal
-	inbox   *InboxStore
-	attach  *AttachmentStore
+	journal  *OutboxJournal
+	inbox    *InboxStore
+	attach   *AttachmentStore
+	flushing int32 // CAS guard: one outbound flush per peer at a time
 }
 
 type Mail struct {
@@ -288,7 +290,9 @@ func (m *Mail) SendMsg(to ed25519.PublicKey, payload []byte) (uint64, error) {
 	if err := box.journal.Queue(seq, env.Ts, payload); err != nil {
 		return 0, err
 	}
-	m.flushPub(to)
+	// Flush off the request path: node.Send blocks on session flow control, and
+	// blocking here would stall every later request on this API connection.
+	go m.flushPub(to)
 	return seq, nil
 }
 
@@ -309,7 +313,7 @@ func (m *Mail) SendFile(to ed25519.PublicKey, payload []byte) (uint64, error) {
 	if err := box.journal.QueueAs(seq, env.Ts, payload, TypeFile); err != nil {
 		return 0, err
 	}
-	m.flushPub(to)
+	go m.flushPub(to)
 	return seq, nil
 }
 
@@ -435,6 +439,12 @@ func (m *Mail) flushPeer(peerHex string) {
 	if !ok || m.node == nil {
 		return
 	}
+	// node.Send blocks on session flow control; coalesce concurrent flushes so a
+	// backed-up send can't pile up goroutines or duplicate traffic.
+	if !atomic.CompareAndSwapInt32(&box.flushing, 0, 1) {
+		return
+	}
+	defer atomic.StoreInt32(&box.flushing, 0)
 	pubBytes, err := hex.DecodeString(peerHex)
 	if err != nil {
 		return
