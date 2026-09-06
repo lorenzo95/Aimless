@@ -29,7 +29,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, GLib, Gdk, Pango, GdkPixbuf
+from gi.repository import Gtk, GLib, Gdk, Pango, GdkPixbuf, Gio
 
 from . import crypto, protocol, logging
 from .daemon import DaemonClient, Client, DaemonError
@@ -67,6 +67,32 @@ def _human_size(n):
         if n < 1024 or unit == "GB":
             return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024
+
+
+# Only http/https can ever become a link: the character class rules out the
+# markup-breaking bytes (<, >, ", ') up front, and everything a peer can type
+# that is NOT a matched URL is passed through markup_escape_text, so literal
+# markup in a message can never produce a live anchor.
+_URL_RE = re.compile(r"\bhttps?://[^\s<>\"']+")
+_TRAILING_PUNCT = ".,;:!?)']"
+
+
+def linkify(text: str) -> str:
+    """Escape `text` into Pango markup, turning bare http(s) URLs into anchors.
+    `https://x.example.` drops the trailing period; everything else — including
+    <a href=...> the sender literally typed — is escaped to inert text."""
+    out = []
+    pos = 0
+    for m in _URL_RE.finditer(text):
+        url = m.group(0).rstrip(_TRAILING_PUNCT)
+        if not url:
+            continue
+        out.append(GLib.markup_escape_text(text[pos:m.start()]))
+        esc = GLib.markup_escape_text(url)
+        out.append(f'<a href="{esc}">{esc}</a>')
+        pos = m.end()
+    out.append(GLib.markup_escape_text(text[pos:]))
+    return "".join(out)
 
 
 def sock_path():
@@ -1087,7 +1113,8 @@ class MessagesView(Gtk.Box):
             self._render_attachment_box(box, outgoing, attachment)
         else:
             bubble = Gtk.Label()
-            bubble.set_markup(GLib.markup_escape_text(text))
+            bubble.set_markup(linkify(text))
+            bubble.connect("activate-link", self.on_link_activated)
             bubble.set_line_wrap(True)
             bubble.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
             bubble.set_max_width_chars(48)
@@ -1106,6 +1133,16 @@ class MessagesView(Gtk.Box):
         row.add(box)
         self.conversation.add(row)
         row.show_all()
+
+    def on_link_activated(self, label, uri):
+        try:
+            ok = Gio.AppInfo.launch_default_for_uri(uri, None)
+        except GLib.Error as e:
+            self.app.activity.log(f"couldn't open link: {e}")
+            return True
+        if not ok:
+            self.app.activity.log(f"couldn't open link: no default handler for {uri}")
+        return True
 
     def _render_attachment_box(self, box, outgoing, attachment):
         path = attachment.get("path", "")

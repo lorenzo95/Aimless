@@ -6,7 +6,7 @@ import pytest
 
 gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Gdk
+from gi.repository import Gtk, Gdk, GLib, Gio
 
 import test_e2e
 from test_e2e import two_nodes  # noqa: F401
@@ -1502,3 +1502,86 @@ def test_unread_badge_increments(gtk_app):
     win.messages.thread_list.select_row(win.messages.threads[b_node]["row"])
     assert win.messages.threads[b_node]["unread"] == 0
     assert win.messages.threads[b_node]["widgets"]["badge"] is None
+
+
+def test_linkify_plain_text_is_escaped_only():
+    assert gtkui.linkify("hello <world> & friends") == \
+        GLib.markup_escape_text("hello <world> & friends")
+    assert gtkui.linkify("no urls here") == "no urls here"
+
+
+def test_linkify_single_url_makes_one_anchor():
+    out = gtkui.linkify("read https://example.com/a?b=1&c=2 now")
+    assert out.count("<a href=") == 1
+    assert '<a href="https://example.com/a?b=1&amp;c=2">' in out
+    assert "</a>" in out
+    assert "read " in out and " now" in out
+
+
+def test_linkify_non_http_schemes_never_linkified():
+    for bad in ("javascript:alert(1)", "data:text/html,<b>hi</b>",
+                "file:///etc/passwd", "chrome://settings", "aimless:x"):
+        out = gtkui.linkify(f"click {bad} here")
+        assert "<a href=" not in out, bad
+        assert GLib.markup_escape_text(bad) in out
+
+
+def test_linkify_trailing_punctuation_is_stripped():
+    out = gtkui.linkify("check this: https://example.com.")
+    assert out.count("<a href=") == 1
+    assert '<a href="https://example.com">' in out, out
+    out = gtkui.linkify("see https://example.com/x?y=1, now")
+    assert '<a href="https://example.com/x?y=1">' in out, out
+
+
+def test_linkify_injection_safety():
+    # literal markup a peer types must render inert, never as a live anchor
+    evil = '<a href="evil">click here</a>'
+    out = gtkui.linkify(evil)
+    assert "<a href=" not in out, "injected anchor must not survive"
+    assert "&lt;a href=" in out, "input markup must be escaped to inert text"
+
+    # a bare close/bare amp is harmless too
+    out2 = gtkui.linkify("</&")
+    assert "<a href=" not in out2
+    assert "&lt;/&amp;" in out2
+
+    # with a real URL alongside literal markup, exactly one anchor — the real one
+    mixed = gtkui.linkify('<a href="evil">x</a> https://real.example')
+    assert mixed.count("<a href=") == 1, mixed
+    assert '<a href="https://real.example">' in mixed
+
+    # a URL can't hide a quote to break the attribute — the regex stops at the
+    # quote, so the href is clean and the rest is escaped text
+    q = gtkui.linkify('https://example.com" onclick="bad')
+    assert q.count("<a href=") == 1
+    assert '<a href="https://example.com">' in q
+    assert "&quot; onclick=&quot;bad" in q and q.index("</a>") < q.index("&quot;")
+
+
+def test_on_link_activated_launches_and_logs(gtk_app, monkeypatch):
+    app = gtk_app
+    win = app["win"]
+    calls = []
+    monkeypatch.setattr(Gio.AppInfo, "launch_default_for_uri",
+                        lambda uri, ctx: calls.append((uri, ctx)) or True)
+    win.messages.on_link_activated("label", "https://example.com")
+    assert calls == [("https://example.com", None)]
+
+    # provider-style failure is caught and logged, not propagated
+    def boom(uri, ctx):
+        raise GLib.Error("no handler")
+
+    monkeypatch.setattr(Gio.AppInfo, "launch_default_for_uri", boom)
+    win.messages.on_link_activated("label", "https://bad.example")
+    buf = win.activity.log_view.get_buffer()
+    start, end = buf.get_bounds()
+    assert "couldn't open link" in buf.get_text(start, end, False)
+
+    # boolean false (no default handler) is logged too
+    monkeypatch.setattr(Gio.AppInfo, "launch_default_for_uri",
+                        lambda uri, ctx: False)
+    win.messages.on_link_activated("label", "https://none.example")
+    buf = win.activity.log_view.get_buffer()
+    start, end = buf.get_bounds()
+    assert "no default handler" in buf.get_text(start, end, False)
