@@ -82,7 +82,14 @@ page gets your desktop with it).
   ratchet: messages are encrypted to a static public key, so anyone holding your
   private key (or who later compromises it) can decrypt past traffic. This is a
   store-and-forward design — treat it like email, not Signal.
-- **No plaintext on disk anywhere.** History lives in an encrypted local cache (passphrase-derived scrypt key); the identity keyfile is passphrase-encrypted the same way.
+- **No plaintext on disk anywhere** (text). History lives in an encrypted local
+  cache (passphrase-derived scrypt key); the identity keyfile is passphrase-
+  encrypted the same way. **Attachments are the one exception**: the actual file
+  bytes are written to `~/.local/share/aimless/attachments/<conv>/` in plaintext
+  (an image must be renderable/saveable locally), while only metadata is in the
+  encrypted cache. Also, the daemon learns a file's transfer id and chunk
+  index/total — but never its filename, mime type, hash, or contents, which stay
+  end-to-end encrypted.
 
 ## Components
 

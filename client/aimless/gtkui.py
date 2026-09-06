@@ -10,8 +10,11 @@ Modes:
   aimless autostart  install login autostart entry for `aimless tray`
 """
 
+import base64
+import hashlib
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -26,7 +29,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, GLib, Gdk, Pango
+from gi.repository import Gtk, GLib, Gdk, Pango, GdkPixbuf
 
 from . import crypto, protocol, logging
 from .daemon import DaemonClient, Client, DaemonError
@@ -43,6 +46,26 @@ def prefs_file():
 
 def data_dir():
     return os.environ.get("AIMLESS_HOME") or os.path.expanduser("~/.local/share/aimless")
+
+
+def attachments_dir():
+    return os.path.join(data_dir(), "attachments")
+
+
+def sanitize_filename(name):
+    """Strict allowlist so a sender-controlled filename can't traverse paths."""
+    clean = re.sub(r"[^A-Za-z0-9 ._-]", "", name or "")
+    clean = clean.strip(" .")
+    if not clean:
+        clean = "file"
+    return clean[:64]
+
+
+def _human_size(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
 
 
 def sock_path():
@@ -529,6 +552,7 @@ class MessagesView(Gtk.Box):
         self._send_in_flight = False
         self._history_busy = False
         self._catchup_busy = False
+        self._file_bufs = {}
 
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
 
@@ -962,7 +986,8 @@ class MessagesView(Gtk.Box):
         clear_children(self.conversation)
         for m in sorted(self.app.session.cache.msgs(conv), key=lambda m: (m["ts"], min(m["seqs"].values()))):
             self.append_bubble(m["dir"] == "out", m["text"], m["ts"],
-                               sender=None if m["dir"] == "out" else self._sender_label(thread, m))
+                               sender=None if m["dir"] == "out" else self._sender_label(thread, m),
+                               attachment=m.get("attachment"))
         self.stack.set_visible_child_name("conversation")
         scroll_to_bottom(self.conversation_scroll)
         self.load_history_async(conv)
@@ -1029,7 +1054,8 @@ class MessagesView(Gtk.Box):
         clear_children(self.conversation)
         for m in sorted(self.app.session.cache.msgs(conv), key=lambda m: (m["ts"], min(m["seqs"].values()))):
             self.append_bubble(m["dir"] == "out", m["text"], m["ts"],
-                               sender=None if m["dir"] == "out" else self._sender_label(thread, m))
+                               sender=None if m["dir"] == "out" else self._sender_label(thread, m),
+                               attachment=m.get("attachment"))
         scroll_to_bottom(self.conversation_scroll)
         return False
 
@@ -1037,7 +1063,7 @@ class MessagesView(Gtk.Box):
         self.append_system_note(f"history unavailable: {e}")
         return False
 
-    def append_bubble(self, outgoing, text, ts, sender=None):
+    def append_bubble(self, outgoing, text, ts, sender=None, attachment=None):
         stamp = datetime.fromtimestamp(ts / 1000).strftime("%H:%M") if ts else ""
         row = Gtk.ListBoxRow()
         row.set_selectable(False)
@@ -1051,18 +1077,21 @@ class MessagesView(Gtk.Box):
             who.set_xalign(0.0)
             who.get_style_context().add_class("muted")
             box.pack_start(who, False, False, 0)
-        bubble = Gtk.Label()
-        bubble.set_markup(GLib.markup_escape_text(text))
-        bubble.set_line_wrap(True)
-        bubble.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        bubble.set_max_width_chars(48)
-        bubble.set_xalign(0.0)
-        bubble.set_selectable(True)
-        bubble.set_halign(Gtk.Align.END if outgoing else Gtk.Align.START)
-        style = bubble.get_style_context()
-        style.add_class("aimless-bubble")
-        style.add_class("aimless-bubble-out" if outgoing else "aimless-bubble-in")
-        box.pack_start(bubble, False, False, 0)
+        if attachment:
+            self._render_attachment_box(box, outgoing, attachment)
+        else:
+            bubble = Gtk.Label()
+            bubble.set_markup(GLib.markup_escape_text(text))
+            bubble.set_line_wrap(True)
+            bubble.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            bubble.set_max_width_chars(48)
+            bubble.set_xalign(0.0)
+            bubble.set_selectable(True)
+            bubble.set_halign(Gtk.Align.END if outgoing else Gtk.Align.START)
+            style = bubble.get_style_context()
+            style.add_class("aimless-bubble")
+            style.add_class("aimless-bubble-out" if outgoing else "aimless-bubble-in")
+            box.pack_start(bubble, False, False, 0)
         if stamp:
             time_label = Gtk.Label(label=stamp)
             time_label.set_xalign(1.0 if outgoing else 0.0)
@@ -1071,6 +1100,67 @@ class MessagesView(Gtk.Box):
         row.add(box)
         self.conversation.add(row)
         row.show_all()
+
+    def _render_attachment_box(self, box, outgoing, attachment):
+        path = attachment.get("path", "")
+        filename = attachment.get("filename", "file")
+        mime_hint = attachment.get("mime_hint", "")
+        size = attachment.get("size", 0)
+        name_lbl = Gtk.Label(label=filename)
+        name_lbl.set_xalign(0.0)
+        name_lbl.set_halign(Gtk.Align.END if outgoing else Gtk.Align.START)
+        box.pack_start(name_lbl, False, False, 0)
+        if mime_hint == "image" and os.path.exists(path):
+            try:
+                pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, 280, -1, True)
+                img = Gtk.Image.new_from_pixbuf(pix)
+                img.set_halign(Gtk.Align.END if outgoing else Gtk.Align.START)
+                eb = Gtk.EventBox()
+                eb.add(img)
+                eb.connect("button-press-event", self.on_expand_image, path, filename)
+                box.pack_start(eb, False, False, 0)
+            except GLib.Error:
+                pass
+        size_lbl = Gtk.Label(label=_human_size(size))
+        size_lbl.set_xalign(0.0)
+        size_lbl.get_style_context().add_class("muted")
+        box.pack_start(size_lbl, False, False, 0)
+        save = Gtk.Button(label="Save")
+        save.set_relief(Gtk.ReliefStyle.NONE)
+        save.get_style_context().add_class("muted")
+        save.connect("clicked", self.on_save_attachment, path, filename)
+        box.pack_start(save, False, False, 0)
+
+    def on_expand_image(self, _w, _ev, path, filename):
+        win = Gtk.Window(title=filename)
+        win.set_default_size(900, 700)
+        sc = Gtk.ScrolledWindow()
+        win.add(sc)
+        try:
+            pix = GdkPixbuf.Pixbuf.new_from_file(path)
+            img = Gtk.Image.new_from_pixbuf(pix)
+            sc.add(img)
+        except GLib.Error:
+            pass
+        win.show_all()
+        return False
+
+    def on_save_attachment(self, _btn, path, filename):
+        dlg = Gtk.FileChooserDialog(
+            title="Save attachment", transient_for=self.get_toplevel(),
+            action=Gtk.FileChooserAction.SAVE,
+            buttons=("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK))
+        dlg.set_current_name(filename)
+        resp = dlg.run()
+        dest = dlg.get_filename()
+        dlg.destroy()
+        if resp != Gtk.ResponseType.OK or not dest:
+            return
+        try:
+            shutil.copyfile(path, dest)
+            self.app.activity.log(f"saved {filename}")
+        except OSError as e:
+            self.app.activity.log(f"save failed: {e}")
 
     def append_system_note(self, text):
         row = Gtk.ListBoxRow()
@@ -1357,6 +1447,9 @@ class MessagesView(Gtk.Box):
         run_async(worker, on_done=done, on_error=fail)
 
     def incoming(self, ev):
+        if ev.get("type") == "file":
+            self._incoming_file(ev)
+            return
         node = ev.get("from")
         try:
             opened = self.app.session.client.decrypt_recv(ev)
@@ -1406,6 +1499,167 @@ class MessagesView(Gtk.Box):
         else:
             thread["unread"] += 1
         self.update_thread_row(conv)
+
+    def _incoming_file(self, ev):
+        node = ev.get("from")
+        try:
+            parsed = protocol.parse_file_payload(ev["payload"])
+            chunk = protocol.open_file_chunk(self.app.session.identity, parsed["sealed"])
+        except Exception:
+            return
+        if chunk.get("transfer_id") != parsed["tid"].hex() \
+                or chunk.get("index") != parsed["index"] \
+                or chunk.get("total") != parsed["total"]:
+            return  # routing header does not match the sealed body
+        conv = chunk.get("conv") or node
+        key = (conv, chunk["transfer_id"])
+        buf = self._file_bufs.get(key)
+        if buf is None:
+            buf = {"total": chunk["total"], "meta": chunk, "chunks": {}, "row": None, "failed": False}
+            self._file_bufs[key] = buf
+            if self.selected is not None and self.selected.get("conv") == conv:
+                buf["row"] = self._append_status_row(
+                    f"Receiving {chunk.get('filename') or 'file'} — 1/{chunk['total']}")
+        if buf.get("failed"):
+            return
+        buf["chunks"][chunk["index"]] = base64.b64decode(chunk["data"])
+        have = len(buf["chunks"])
+        if buf["row"] is not None:
+            self._update_status_row(buf["row"], f"Receiving {chunk.get('filename') or 'file'} — {have}/{chunk['total']}")
+            scroll_to_bottom(self.conversation_scroll)
+        if have == buf["total"]:
+            if not self._finalize_attachment(conv, node, buf, ev.get("seq", 0), ev.get("ts", 0)):
+                self._mark_file_failed(buf)
+            del self._file_bufs[key]
+
+    def _append_status_row(self, text):
+        row = Gtk.ListBoxRow()
+        row.set_selectable(False)
+        row.set_activatable(False)
+        lbl = Gtk.Label(label=text)
+        lbl.set_xalign(0.5)
+        lbl.get_style_context().add_class("muted")
+        row.add(lbl)
+        self.conversation.add(row)
+        row.show_all()
+        return row
+
+    def _update_status_row(self, row, text):
+        lbl = row.get_child()
+        if isinstance(lbl, Gtk.Label):
+            lbl.set_text(text)
+
+    def _mark_file_failed(self, buf):
+        buf["failed"] = True
+        meta = buf.get("meta") or {}
+        if buf["row"] is not None:
+            self._update_status_row(buf["row"], f"{meta.get('filename') or 'file'} — failed to receive")
+
+    def _store_attachment(self, conv, tid, filename, data):
+        d = os.path.join(attachments_dir(), conv)
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, f"{tid}-{sanitize_filename(filename)}")
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+        return path
+
+    def _finalize_attachment(self, conv, node, buf, seq, ts):
+        chunk = buf["meta"]
+        rebuilt = protocol.reassemble_file(buf["chunks"], buf["total"])
+        if rebuilt is None:
+            return False
+        if hashlib.sha256(rebuilt).hexdigest() != chunk.get("sha256", ""):
+            return False
+        filename = chunk.get("filename") or "file"
+        path = self._store_attachment(conv, chunk["transfer_id"], filename, rebuilt)
+        attachment = {"path": path, "filename": filename,
+                      "mime_hint": chunk.get("mime_hint", ""), "size": len(rebuilt)}
+        self.app.session.cache.add_recv(conv, node, seq, ts, filename, attachment=attachment)
+        if buf["row"] is not None:
+            buf["row"].destroy()
+        thread = self.threads.get(conv)
+        if thread is not None:
+            thread["preview"] = filename
+            if self.selected is thread:
+                self.append_bubble(False, filename, ts,
+                                   sender=self._sender_label(thread, {"sender": node}),
+                                   attachment=attachment)
+                scroll_to_bottom(self.conversation_scroll)
+            else:
+                thread["unread"] += 1
+            self.update_thread_row(conv)
+        run_async(lambda: self.app.session.client.ack_attachment(node, chunk["transfer_id"]))
+        return True
+
+    def _process_fetched_transfer(self, node, tid, chunks):
+        """Reassemble a transfer fetched from the daemon (startup sweep)."""
+        buf = {"total": 0, "meta": {}, "chunks": {}, "row": None, "failed": False}
+        seq, ts = 0, 0
+        for entry in chunks:
+            try:
+                parsed = protocol.parse_file_payload(entry["payload"])
+                chunk = protocol.open_file_chunk(self.app.session.identity, parsed["sealed"])
+            except Exception:
+                continue
+            if chunk.get("transfer_id") != parsed["tid"].hex() \
+                    or chunk.get("index") != parsed["index"] \
+                    or chunk.get("total") != parsed["total"]:
+                continue
+            buf["total"] = chunk["total"]
+            buf["meta"] = chunk
+            buf["chunks"][chunk["index"]] = base64.b64decode(chunk["data"])
+            if entry.get("seq", 0) > seq:
+                seq = entry["seq"]
+            if entry.get("ts", 0) > ts:
+                ts = entry["ts"]
+        if not buf["chunks"]:
+            return
+        conv = (buf["meta"].get("conv") or node)
+        if self._finalize_attachment(conv, node, buf, seq, ts):
+            pass
+
+    def catchup_attachments(self):
+        """Startup sweep: discover complete-but-unconsumed transfers on the daemon
+        and reassemble them, mirroring catchup_unread for text."""
+        if self._catchup_busy:
+            return
+        self._catchup_busy = True
+        session = self.app.session
+        nodes = set()
+        for info in session.contacts().values():
+            if info.get("node"):
+                nodes.add(info["node"])
+        for conv in session.cache.rooms():
+            for n in session.cache.members(conv):
+                if n != session.self_node:
+                    nodes.add(n)
+
+        def worker():
+            jobs = []
+            for n in nodes:
+                try:
+                    transfers = session.client.pending_attachments(n)
+                except DaemonError:
+                    continue
+                for t in transfers:
+                    try:
+                        chunks = session.client.fetch_attachment(n, t["tid"])
+                    except DaemonError:
+                        continue
+                    jobs.append((n, t["tid"], chunks))
+            return jobs
+
+        def done(jobs):
+            self._catchup_busy = False
+            for node, tid, chunks in jobs:
+                self._process_fetched_transfer(node, tid, chunks)
+
+        def fail(_e):
+            self._catchup_busy = False
+
+        run_async(worker, on_done=done, on_error=fail)
 
 
 class ContactsView(Gtk.Box):
@@ -1780,6 +2034,7 @@ class AimlessWindow(Gtk.Window):
         GLib.timeout_add_seconds(3, self.poll_presence)
         GLib.timeout_add_seconds(5, self.poll_status)
         GLib.timeout_add(1200, self._catchup_once)
+        GLib.timeout_add(2500, self._catchup_attachments_once)
 
         def watch_all():
             for info in self.session.contacts().values():
@@ -1944,6 +2199,10 @@ class AimlessWindow(Gtk.Window):
 
     def _catchup_once(self):
         self.messages.catchup_unread()
+        return GLib.SOURCE_REMOVE
+
+    def _catchup_attachments_once(self):
+        self.messages.catchup_attachments()
         return GLib.SOURCE_REMOVE
 
 

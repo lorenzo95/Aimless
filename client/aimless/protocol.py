@@ -48,10 +48,13 @@ def parse_file_payload(payload_b64: str) -> dict:
 
 
 def make_chunk(tid: str, index: int, total: int, filename: str, mime_hint: str,
-               sha256: str, size: int, data: bytes) -> dict:
-    return {"transfer_id": tid, "index": index, "total": total, "filename": filename,
-            "mime_hint": mime_hint, "sha256": sha256, "size": size,
-            "data": base64.b64encode(data).decode()}
+               sha256: str, size: int, data: bytes, conv: str = None) -> dict:
+    chunk = {"transfer_id": tid, "index": index, "total": total, "filename": filename,
+             "mime_hint": mime_hint, "sha256": sha256, "size": size,
+             "data": base64.b64encode(data).decode()}
+    if conv:
+        chunk["conv"] = conv
+    return chunk
 
 
 def seal_file_chunk(identity: nacl.signing.SigningKey, buddy_pubkey_hex: str, chunk: dict) -> bytes:

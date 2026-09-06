@@ -862,6 +862,150 @@ def test_gui_1to1_mute_toggle(gtk_app):
     assert win.messages.mute_btn.get_label() == "Mute…"
 
 
+def _make_file_events(data, filename, mime_hint="application", conv=None, identity=None, pubkey=None, sender=None):
+    """Split a file into sealed TypeFile chunk recv events (sealed to `pubkey`)."""
+    import base64 as _b64
+    import hashlib as _h
+    from aimless import protocol as _p
+
+    pieces = [data[i:i + _p.FILE_CHUNK_SIZE] for i in range(0, len(data), _p.FILE_CHUNK_SIZE)]
+    tid = _p.new_transfer_id()
+    sha = _h.sha256(data).hexdigest()
+    events = []
+    for i, piece in enumerate(pieces):
+        chunk = _p.make_chunk(tid, i, len(pieces), filename, mime_hint, sha, len(data), piece, conv=conv)
+        sealed = _p.seal_file_chunk(identity, pubkey, chunk)
+        payload = _b64.b64encode(_p.file_header(bytes.fromhex(tid), i, len(pieces)) + sealed).decode()
+        events.append({"op": "recv", "type": "file", "from": sender,
+                       "seq": 100 + i, "ts": 1000 + i, "payload": payload})
+    return tid, sha, events
+
+
+def test_gui_file_receive_renders_and_stores(gtk_app):
+    app = gtk_app
+    win = app["win"]
+    b_node = app["b_node"]
+    data = os.urandom(80_000)
+    win.messages.thread_list.select_row(win.messages.threads[b_node]["row"])
+    tid, sha, events = _make_file_events(data, "photo.jpg", "image",
+                                         identity=win.session.identity,
+                                         pubkey=win.session.client.pubkey_hex, sender=b_node)
+    for ev in events:
+        win.messages.incoming(ev)
+
+    def stored():
+        msgs = [m for m in win.session.cache.msgs(b_node) if m.get("attachment")]
+        return msgs and os.path.exists(msgs[-1]["attachment"]["path"])
+    assert _pump(win, stored, timeout=10), "attachment never stored"
+    msg = [m for m in win.session.cache.msgs(b_node) if m.get("attachment")][-1]
+    with open(msg["attachment"]["path"], "rb") as f:
+        assert f.read() == data, "file bytes must round-trip"
+    assert msg["attachment"]["filename"] == "photo.jpg"
+    assert msg["attachment"]["mime_hint"] == "image"
+
+    def save_btn_visible():
+        return any(_walk_buttons(w, "Save") for w in win.messages.conversation.get_children())
+    assert _pump(win, save_btn_visible, timeout=10), "rendered attachment must have a Save button"
+
+
+def test_gui_file_receive_out_of_order(gtk_app):
+    app = gtk_app
+    win = app["win"]
+    b_node = app["b_node"]
+    data = os.urandom(100_000)
+    win.messages.thread_list.select_row(win.messages.threads[b_node]["row"])
+    tid, _, events = _make_file_events(data, "big.bin",
+                                       identity=win.session.identity,
+                                       pubkey=win.session.client.pubkey_hex, sender=b_node)
+    for ev in reversed(events):
+        win.messages.incoming(ev)
+
+    def stored():
+        msgs = [m for m in win.session.cache.msgs(b_node) if m.get("attachment")]
+        return msgs and os.path.exists(msgs[-1]["attachment"]["path"])
+    assert _pump(win, stored, timeout=10), "out-of-order chunks never completed"
+    msg = [m for m in win.session.cache.msgs(b_node) if m.get("attachment")][-1]
+    with open(msg["attachment"]["path"], "rb") as f:
+        assert f.read() == data
+
+
+def test_gui_file_receive_checksum_mismatch(gtk_app):
+    app = gtk_app
+    win = app["win"]
+    b_node = app["b_node"]
+    data = os.urandom(40_000)
+    win.messages.thread_list.select_row(win.messages.threads[b_node]["row"])
+    # build valid events, then re-seal chunk 0 with corrupted data but the ORIGINAL sha
+    import base64 as _b64
+    import hashlib as _h
+    from aimless import protocol as _p
+    tid, sha, events = _make_file_events(data, "bad.bin",
+                                         identity=win.session.identity,
+                                         pubkey=win.session.client.pubkey_hex, sender=b_node)
+    pieces = [data[i:i + _p.FILE_CHUNK_SIZE] for i in range(0, len(data), _p.FILE_CHUNK_SIZE)]
+    corrupt = bytearray(pieces[0])
+    corrupt[0] ^= 0xFF
+    bad_chunk = _p.make_chunk(tid, 0, len(pieces), "bad.bin", "application", sha, len(data), bytes(corrupt))
+    events[0]["payload"] = _b64.b64encode(
+        _p.file_header(bytes.fromhex(tid), 0, len(pieces)) +
+        _p.seal_file_chunk(win.session.identity, win.session.client.pubkey_hex, bad_chunk)).decode()
+    for ev in events:
+        win.messages.incoming(ev)
+
+    def not_stored():
+        return not any(m.get("attachment") for m in win.session.cache.msgs(b_node))
+    assert _pump(win, not_stored, timeout=10), "checksum mismatch must not store the file"
+
+
+def _walk_buttons(widget, label):
+    if isinstance(widget, Gtk.Button) and widget.get_label() == label:
+        return True
+    if isinstance(widget, Gtk.Container):
+        return any(_walk_buttons(c, label) for c in widget.get_children())
+    return False
+
+
+def test_gui_fetched_transfer_sweep(gtk_app):
+    app = gtk_app
+    win = app["win"]
+    bob = app["bob"]
+    a_node = app["a_node"]
+    b_node = app["b_node"]
+    data = os.urandom(50_000)
+
+    import base64 as _b64
+    import hashlib as _h
+    from aimless import protocol as _p
+    pieces = [data[i:i + _p.FILE_CHUNK_SIZE] for i in range(0, len(data), _p.FILE_CHUNK_SIZE)]
+    tid = _p.new_transfer_id()
+    sha = _h.sha256(data).hexdigest()
+    for i, piece in enumerate(pieces):
+        chunk = _p.make_chunk(tid, i, len(pieces), "sweep.bin", "application", sha, len(data), piece)
+        sealed = _p.seal_file_chunk(app["bob_identity"], app["session"].client.pubkey_hex, chunk)
+        payload = _b64.b64encode(_p.file_header(bytes.fromhex(tid), i, len(pieces)) + sealed).decode()
+        bob.daemon.request("sendfile", to=a_node, payload=payload)
+
+    def pending():
+        try:
+            return win.session.client.pending_attachments(b_node)
+        except Exception:
+            return []
+    assert _pump(win, lambda: pending(), timeout=20), "transfer never landed on the daemon"
+
+    chunks = win.session.client.fetch_attachment(b_node, tid)
+    assert chunks, "fetch returned nothing"
+    win.messages._process_fetched_transfer(b_node, tid, chunks)
+
+    def consumed():
+        return win.session.client.pending_attachments(b_node) == []
+    assert _pump(win, consumed, timeout=10), "transfer not acked after consumption"
+
+    msgs = [m for m in win.session.cache.msgs(b_node) if m.get("attachment")]
+    assert msgs and os.path.exists(msgs[-1]["attachment"]["path"])
+    with open(msgs[-1]["attachment"]["path"], "rb") as f:
+        assert f.read() == data
+
+
 def test_gui_request_persists_until_answered(gtk_app):
     app = gtk_app
     win = app["win"]
