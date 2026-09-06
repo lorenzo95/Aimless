@@ -335,7 +335,7 @@ func (m *Mail) HandlePacket(from ed25519.PublicKey, payload []byte) {
 		if !ok {
 			return
 		}
-		isNew, err := box.attach.Add(tid, index, total, env.Ts, env.Payload)
+		isNew, err := box.attach.Add(tid, index, total, env.Seq, env.Ts, env.Payload)
 		if err != nil {
 			return
 		}

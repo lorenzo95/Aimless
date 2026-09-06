@@ -37,6 +37,7 @@ func parseFileHeader(payload []byte) (tid string, index, total uint16, ok bool) 
 
 type attachEntry struct {
 	Tid     string `json:"tid"`
+	Seq     uint64 `json:"seq,omitempty"`
 	Index   uint16 `json:"index"`
 	Total   uint16 `json:"total"`
 	Ts      int64  `json:"ts"`
@@ -124,7 +125,7 @@ func (as *AttachmentStore) ingestLocked(e attachEntry) {
 
 // Add stores one chunk (dedup by tid+index) after enforcing the byte budget.
 // It returns isNew=false for a duplicate chunk.
-func (as *AttachmentStore) Add(tid string, index, total uint16, ts int64, payload []byte) (bool, error) {
+func (as *AttachmentStore) Add(tid string, index, total uint16, seq uint64, ts int64, payload []byte) (bool, error) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	t := as.byTid[tid]
@@ -139,7 +140,7 @@ func (as *AttachmentStore) Add(tid string, index, total uint16, ts int64, payloa
 		delete(as.byTid, tid)
 		return false, err
 	}
-	e := attachEntry{Tid: tid, Index: index, Total: total, Ts: ts,
+	e := attachEntry{Tid: tid, Seq: seq, Index: index, Total: total, Ts: ts,
 		Payload: base64.StdEncoding.EncodeToString(payload)}
 	if t.firstTs == 0 || ts < t.firstTs {
 		t.firstTs = ts
