@@ -1,9 +1,9 @@
 # aimless
 
-Serverless chat with an AIM face: decentralized and end-to-end encrypted with
-durable store-and-forward — screen names, buddy lists and away messages, plus
-group rooms, file attachments, and clickable links. No servers, no ports to
-forward; the transport is an embedded Yggdrasil overlay.
+Serverless, decentralized, end-to-end-encrypted chat with durable
+store-and-forward. Converse 1:1 or in group rooms, send file attachments, and
+share clickable links — no servers, no accounts, no ports to forward. The
+transport is an embedded Yggdrasil overlay.
 
 ## Try it in your browser (Docker)
 
@@ -208,4 +208,15 @@ python3 deploy/check_dist.py    # release gate: committed dist artifacts match t
 
 ## Status
 
-Experimental. Both Yggdrasil and aimless are alpha software — do not use for security-critical purposes.
+Experimental. Both Yggdrasil and aimless are alpha software — do not use for
+security-critical purposes.
+
+---
+
+*Notably, this project is developed with heavy assistance from AI.* Most of
+the code, the packaging/build tooling, and this README are produced
+collaboratively with large language models — treat the codebase accordingly,
+review carefully, and don't hesitate to ask questions. All releases, tests,
+and container images are human-reviewed and run through the test suites before
+being published, but there is no substitute for your own audit of what you're
+running.
