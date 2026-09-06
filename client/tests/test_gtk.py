@@ -1530,8 +1530,25 @@ def test_linkify_trailing_punctuation_is_stripped():
     out = gtkui.linkify("check this: https://example.com.")
     assert out.count("<a href=") == 1
     assert '<a href="https://example.com">' in out, out
-    out = gtkui.linkify("see https://example.com/x?y=1, now")
-    assert '<a href="https://example.com/x?y=1">' in out, out
+    out2 = gtkui.linkify("see https://example.com/x?y=1, now")
+    assert '<a href="https://example.com/x?y=1">' in out2, out2
+
+
+def test_linkify_trailing_punctuation_preserved_in_output():
+    # the stripped punctuation must survive OUTSIDE the link, not vanish
+    cases = {
+        "see https://example.com. thanks": ["</a>.", "</a>."],
+        "go to https://x.com, ok?": ["</a>,", "</a>,"],
+        "did you see https://a.io? it's cool": ["</a>?", "</a>?"],
+    }
+    for msg, needles in cases.items():
+        out = gtkui.linkify(msg)
+        for n in needles:
+            assert n in out, f"{msg!r}: {n!r} missing from {out!r}"
+        # and the preceding text is intact
+        for prefix in ("see ", "go to ", "did you see "):
+            if msg.startswith(prefix):
+                assert prefix in out
 
 
 def test_linkify_injection_safety():

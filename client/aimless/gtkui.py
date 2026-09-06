@@ -90,7 +90,9 @@ def linkify(text: str) -> str:
         out.append(GLib.markup_escape_text(text[pos:m.start()]))
         esc = GLib.markup_escape_text(url)
         out.append(f'<a href="{esc}">{esc}</a>')
-        pos = m.end()
+        # advance past the SHORTENED url so stripped trailing punctuation is not
+        # silently dropped from the message — it's picked up by the next segment
+        pos = m.start() + len(url)
     out.append(GLib.markup_escape_text(text[pos:]))
     return "".join(out)
 
