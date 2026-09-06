@@ -49,14 +49,17 @@ cd ../client && pip install . && aimless
 
 ## Run it in a browser — Docker web desktop
 
-`deploy/docker/` runs the aimless GUI in a browser from a minimal Alpine
+The webtop image runs the aimless GUI in a browser from a minimal Alpine
 container: Xvfb + the tiny `openbox` window manager + `x11vnc` + `noVNC`,
 everything supervised and non-root (uid 1000) — the same pattern as the
 `bitmessage-docker` project.
 
 ```sh
-cd deploy/docker
-./build.sh                  # syncs dist/aimless.pyz + daemon sources, builds, starts
+docker run -d --name aimless-webtop --restart unless-stopped \
+  -p 127.0.0.1:8080:8080 -p 127.0.0.1:5900:5900 \
+  -e VNC_PASS="${VNC_PASS:-aimless}" \
+  -v "$PWD/aimless-data:/data" \
+  ghcr.io/lorenzo95/aimless/aimless-webtop:latest
 # then open http://localhost:8080/vnc.html  (noVNC password: VNC_PASS, default "aimless")
 ```
 
@@ -64,11 +67,15 @@ First run shows the same *create your identity* dialog in the browser window.
 There is no system tray in the container, so closing the window (or cancelling
 the identity dialog) quits the app and supervisord restarts it within a second —
 the aimless window is effectively always on, and you can never end up on a black
-screen. Everything persists in `deploy/docker/aimless-data/` (identity,
-contacts, encrypted cache, node key).
+screen. Everything persists in `./aimless-data/` (identity, contacts, encrypted
+cache, node key).
 
-The container builds the daemon from source (`CGO_ENABLED=0`, static, any arch),
-and the compose file binds the ports to `127.0.0.1` only. If you expose it on a
+The image is a fixed **environment**; the client (`aimless.pyz`) and the static
+daemon are fetched from the git `dist/` artifacts on first start into
+`./aimless-data/bin/`, so a new release needs no rebuild — just
+`AIMLESS_FETCH=always docker restart aimless-webtop` (or pin a ref via
+`AIMLESS_VERSION`). The compose file (`deploy/docker/docker-compose.yml`) also
+pulls this image and binds the ports to `127.0.0.1` only. If you expose it on a
 public host, put it behind a TLS reverse proxy with auth or an SSH tunnel —
 and **change `VNC_PASS`** (`aimless` is only the default; whoever can reach the
 page gets your desktop with it).
