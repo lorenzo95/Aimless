@@ -1,7 +1,6 @@
 services:
   aimless-webtop:
-    build: .
-    image: aimless-webtop:local
+    image: ${AIMLESS_IMAGE:-ghcr.io/lorenzo95/aimless-webtop:latest}
     container_name: aimless-webtop
     ports:
       - 127.0.0.1:8080:8080   # noVNC web UI (http://localhost:8080/vnc.html)

@@ -1,0 +1,6 @@
+# Override to build the image locally instead of pulling from GHCR.
+# usage: docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  aimless-webtop:
+    build: .
+    image: ghcr.io/lorenzo95/aimless-webtop:latest

@@ -22,11 +22,29 @@ uses the built-in public Yggdrasil relay (see `daemon/main.go` `defaultPeers`).
 
 ## Setup (one time)
 
+### Option A — pull from GHCR (recommended)
+
 ```bash
-# From the aimless repo root
+docker run -d --name aimless-webtop --restart unless-stopped \
+  -p 127.0.0.1:8080:8080 -p 127.0.0.1:5900:5900 \
+  -e VNC_PASS="${VNC_PASS:-aimless}" \
+  -v "$PWD/aimless-data:/data" \
+  ghcr.io/lorenzo95/aimless-webtop:latest
+```
+
+or with compose (the repo's `deploy/docker/docker-compose.yml` already points at
+the GHCR image):
+
+```bash
 cd deploy/docker
-docker compose build
 docker compose up -d
+```
+
+### Option B — build locally
+
+```bash
+cd deploy/docker
+./build.sh     # docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
 The container is a fixed **environment**; the client (`aimless.pyz`) and the
@@ -40,11 +58,15 @@ dialog (passphrase + confirm + screen name). Fill it in and you're set.
 
 ## Updating to a new aimless release
 
-No image rebuild — just tell the entrypoint to fetch a new version:
+No image rebuild — just fetch a newer client/daemon (and, when a new container
+release exists, pull the fresh image):
 
 ```bash
-# latest on main
+# latest client+daemon on main, existing image
 AIMLESS_FETCH=always docker compose up -d --force-recreate
+
+# pull the newest published container, then latest artifacts
+docker compose pull && AIMLESS_FETCH=always docker compose up -d --force-recreate
 
 # or pin to a specific git ref (branch / commit sha)
 AIMLESS_VERSION=v0.8.0 docker compose up -d --force-recreate
