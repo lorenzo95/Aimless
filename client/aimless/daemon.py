@@ -13,8 +13,12 @@ EVENT_OPS = ("recv", "acked")
 
 RESPONSE_MAP = {
     "send": "queued",
+    "sendfile": "queued",
     "watch": "watching",
     "setstatus": "statusset",
+    "pendingattachments": "pendingattachments",
+    "fetchattachment": "fetchattachment",
+    "ackfile": "ackfile",
 }
 
 
@@ -263,6 +267,30 @@ class Client:
         payload = protocol.seal_message(self.identity, buddy_client_hex, text, ts,
                                         screen=self.screen_name)
         return self.daemon.request("send", to=buddy_node_hex, payload=payload)
+
+    def send_file(self, buddy_node_hex: str, payload_b64: str) -> dict:
+        """Send one pre-built TypeFile chunk (20-byte header + sealed body)."""
+        return self.daemon.request("sendfile", to=buddy_node_hex, payload=payload_b64)
+
+    def send_file_room(self, members: list, conv: str, payload_b64: str) -> dict:
+        """Fan a TypeFile chunk out to every room member except self."""
+        my_node = self.node_key()
+        seqs = {}
+        for m in members:
+            if m["node"] == my_node:
+                continue
+            resp = self.daemon.request("sendfile", to=m["node"], payload=payload_b64)
+            seqs[m["node"]] = resp.get("seq", 0)
+        return seqs
+
+    def pending_attachments(self, node_hex: str) -> list:
+        return self.daemon.request("pendingattachments", **{"from": node_hex}, timeout=5).get("transfers", [])
+
+    def fetch_attachment(self, node_hex: str, tid: str) -> list:
+        return self.daemon.request("fetchattachment", **{"from": node_hex}, tid=tid, timeout=30).get("chunks", [])
+
+    def ack_attachment(self, node_hex: str, tid: str) -> dict:
+        return self.daemon.request("ackfile", **{"from": node_hex}, tid=tid)
 
     def send_room(self, members: list, conv: str, text: str, ts: int) -> dict:
         """members: full member set [{node, pubkey, screen}] including self; one sealed

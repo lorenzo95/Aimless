@@ -224,23 +224,30 @@ class Cache:
     def members(self, conv_id: str) -> dict:
         return dict(self.conversation(conv_id)["members"])
 
-    def add_recv(self, conv_id: str, sender_node: str, seq: int, ts: int, text: str) -> bool:
+    def add_recv(self, conv_id: str, sender_node: str, seq: int, ts: int, text: str,
+                 attachment: dict = None) -> bool:
         c = self.conversation(conv_id)
         if any(m["dir"] == "in" and m["seqs"].get(sender_node) == seq for m in c["msgs"]):
             return False
-        c["msgs"].append({"dir": "in", "seqs": {sender_node: seq}, "ts": ts, "text": text,
-                          "sender": sender_node})
+        msg = {"dir": "in", "seqs": {sender_node: seq}, "ts": ts, "text": text,
+               "sender": sender_node}
+        if attachment:
+            msg["attachment"] = attachment
+        c["msgs"].append(msg)
         if seq > c["recv_last"].get(sender_node, 0):
             c["recv_last"][sender_node] = seq
         self._flush()
         return True
 
-    def add_sent(self, conv_id: str, seqs: dict, ts: int, text: str) -> bool:
+    def add_sent(self, conv_id: str, seqs: dict, ts: int, text: str, attachment: dict = None) -> bool:
         c = self.conversation(conv_id)
         for m in c["msgs"]:
             if m["dir"] == "out" and all(m["seqs"].get(n) == s for n, s in seqs.items()):
                 return False
-        c["msgs"].append({"dir": "out", "seqs": dict(seqs), "ts": ts, "text": text, "sender": "self"})
+        msg = {"dir": "out", "seqs": dict(seqs), "ts": ts, "text": text, "sender": "self"}
+        if attachment:
+            msg["attachment"] = attachment
+        c["msgs"].append(msg)
         for n, s in seqs.items():
             if s > c["sent_last"].get(n, 0):
                 c["sent_last"][n] = s

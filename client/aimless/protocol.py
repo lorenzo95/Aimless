@@ -2,6 +2,8 @@ import base64
 import hashlib
 import json
 import os
+import struct
+import uuid
 
 import nacl.exceptions
 import nacl.public
@@ -13,6 +15,81 @@ from . import crypto
 
 INVITE_PREFIX = "aimless1:"
 MAGIC = b"aimless\x01"
+
+FILE_CHUNK_SIZE = 32 * 1024
+MAX_SEND_BYTES = 20 * 1024 * 1024
+
+
+def new_transfer_id() -> str:
+    """16-byte transfer id as hex (also carried raw in the 20-byte wire header)."""
+    return uuid.uuid4().hex
+
+
+def file_header(tid_bytes: bytes, index: int, total: int) -> bytes:
+    if len(tid_bytes) != 16:
+        raise ValueError("transfer id must be 16 bytes")
+    if not (0 <= index < total):
+        raise ValueError("chunk index out of range")
+    return tid_bytes + struct.pack("<HH", index, total)
+
+
+def parse_file_payload(payload_b64: str) -> dict:
+    """Split a received TypeFile payload into its 20-byte routing header (raw
+    tid bytes + index/total) and the sealed chunk body. The client must
+    cross-check the header against the decrypted body."""
+    raw = base64.b64decode(payload_b64)
+    if len(raw) < 20:
+        raise ValueError("truncated file payload")
+    tid = raw[:16]
+    index, total = struct.unpack("<HH", raw[16:20])
+    if total == 0 or index >= total:
+        raise ValueError("bad file chunk index/total")
+    return {"tid": tid, "index": index, "total": total, "sealed": raw[20:]}
+
+
+def make_chunk(tid: str, index: int, total: int, filename: str, mime_hint: str,
+               sha256: str, size: int, data: bytes) -> dict:
+    return {"transfer_id": tid, "index": index, "total": total, "filename": filename,
+            "mime_hint": mime_hint, "sha256": sha256, "size": size,
+            "data": base64.b64encode(data).decode()}
+
+
+def seal_file_chunk(identity: nacl.signing.SigningKey, buddy_pubkey_hex: str, chunk: dict) -> bytes:
+    """Seal one file chunk (kind:"file", same convention as text) into raw bytes.
+    Callers prepend the 20-byte routing header before handing it to the daemon."""
+    body = json.dumps(chunk, sort_keys=True).encode("utf-8")
+    sig = _sign(identity, body)
+    inner = json.dumps({
+        "v": 1, "kind": "file", "from": bytes(identity.verify_key).hex(),
+        "body": body.decode(), "sig": sig,
+    }).encode("utf-8")
+    curve_pk = nacl.bindings.crypto_sign_ed25519_pk_to_curve25519(bytes.fromhex(buddy_pubkey_hex))
+    return nacl.public.SealedBox(nacl.public.PublicKey(curve_pk)).encrypt(inner)
+
+
+def open_file_chunk(identity: nacl.signing.SigningKey, sealed: bytes) -> dict:
+    _, curve_sk = crypto.curve_keys(identity)
+    inner = nacl.public.SealedBox(nacl.public.PrivateKey(curve_sk)).decrypt(sealed)
+    msg = json.loads(inner)
+    if msg.get("kind") != "file" or "from" not in msg or "body" not in msg or "sig" not in msg:
+        raise ValueError("malformed file chunk")
+    chunk = json.loads(msg["body"])
+    if not _verify(msg["from"], msg["body"].encode("utf-8"), msg["sig"]):
+        raise ValueError("bad signature")
+    chunk["from"] = msg["from"]
+    return chunk
+
+
+def reassemble_file(chunks: dict, total: int) -> bytes:
+    """Concatenate a chunk map in index order; returns None if incomplete."""
+    if len(chunks) != total or any(i not in chunks for i in range(total)):
+        return None
+    return b"".join(chunks[i] for i in range(total))
+
+
+def validate_send_size(size: int) -> None:
+    if size > MAX_SEND_BYTES:
+        raise ValueError(f"file is {size:,} bytes — aimless caps attachments at {MAX_SEND_BYTES:,} bytes")
 
 
 def save_contacts(path: str, contacts: dict) -> None:
