@@ -136,9 +136,21 @@ func (as *AttachmentStore) Add(tid string, index, total uint16, seq uint64, ts i
 	if _, exists := t.chunks[index]; exists {
 		return false, nil
 	}
-	if err := as.makeRoomLocked(int64(len(payload))); err != nil {
-		delete(as.byTid, tid)
+	if err := as.makeRoomLocked(int64(len(payload)), tid); err != nil {
+		// Budget failure: keep any chunks of this transfer already stored (they
+		// stay tracked and evictable); only drop the empty husk a failed first
+		// chunk would otherwise leave behind.
+		if t2 := as.byTid[tid]; t2 != nil && len(t2.chunks) == 0 {
+			delete(as.byTid, tid)
+		}
 		return false, err
+	}
+	// makeRoom may have evicted and recreated bookkeeping — re-fetch so the
+	// chunk can never land in a struct nothing references anymore.
+	t = as.byTid[tid]
+	if t == nil {
+		t = &attachTransfer{total: total, chunks: make(map[uint16]attachEntry)}
+		as.byTid[tid] = t
 	}
 	e := attachEntry{Tid: tid, Seq: seq, Index: index, Total: total, Ts: ts,
 		Payload: base64.StdEncoding.EncodeToString(payload)}
@@ -172,16 +184,18 @@ func (as *AttachmentStore) appendLocked(e attachEntry) error {
 }
 
 // makeRoomLocked frees budget: oldest incomplete transfer wholesale first,
-// then oldest complete-but-unconsumed. Returns an error only if a single chunk
-// is larger than the whole budget.
-func (as *AttachmentStore) makeRoomLocked(need int64) error {
+// then oldest complete-but-unconsumed. The transfer being added (exclude) is
+// never an eviction target — evicting it mid-Add would strand its earlier
+// chunks and orphan the chunk being stored. Returns an error only if a single
+// chunk is larger than the whole budget (excluding the current transfer).
+func (as *AttachmentStore) makeRoomLocked(need int64, exclude string) error {
 	if need > as.capBytes {
 		return errAttachBudget
 	}
 	for as.bytes+need > as.capBytes {
-		tid := as.oldestLocked(false)
+		tid := as.oldestLocked(false, exclude)
 		if tid == "" {
-			tid = as.oldestLocked(true)
+			tid = as.oldestLocked(true, exclude)
 		}
 		if tid == "" {
 			return errAttachBudget
@@ -192,11 +206,19 @@ func (as *AttachmentStore) makeRoomLocked(need int64) error {
 }
 
 // oldestLocked returns the tid of the oldest transfer whose completion state
-// matches `complete`, or "" if none.
-func (as *AttachmentStore) oldestLocked(complete bool) string {
+// matches `complete`, or "" if none. Empty transfers (created but not yet
+// stored) hold no bytes and must never be eviction targets: "evicting" one
+// frees nothing and orphans the chunk Add() is about to store into it.
+func (as *AttachmentStore) oldestLocked(complete bool, exclude string) string {
 	var best string
 	var bestTs int64
 	for tid, t := range as.byTid {
+		if len(t.chunks) == 0 {
+			continue
+		}
+		if tid == exclude {
+			continue
+		}
 		if t.complete != complete {
 			continue
 		}

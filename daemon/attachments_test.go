@@ -141,6 +141,90 @@ func TestAttachmentStorePersistsAndReloads(t *testing.T) {
 	}
 }
 
+func TestAttachmentStoreFirstChunkUnderBudgetPressure(t *testing.T) {
+	dir := t.TempDir()
+	peer := "aabb"
+	// budget fills to exactly 4 stored chunks before "ef" starts
+	as, err := NewAttachmentStore(dir, peer, 48*4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk := make([]byte, 16)
+	// "gh": incomplete (total 2, only chunk 1 arrives) — the intended eviction victim
+	if _, err := as.Add("gh", 1, 2, uint64(20), int64(20), filePayload("gh", 1, 2, chunk)); err != nil {
+		t.Fatal(err)
+	}
+	// "cd": complete (2 chunks)
+	for i := 1; i <= 2; i++ {
+		if _, err := as.Add("cd", uint16(i), 2, uint64(10+i), int64(10+i), filePayload("cd", uint16(i), 2, chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// "ij": incomplete (1 chunk) — budget now full (192 bytes)
+	if _, err := as.Add("ij", 1, 2, uint64(30), int64(30), filePayload("ij", 1, 2, chunk)); err != nil {
+		t.Fatal(err)
+	}
+	// "ef" chunk 1 (of 3): budget pressure while ef's fresh, empty transfer sits
+	// in byTid with firstTs=0 — pre-fix it was chosen as the eviction target,
+	// orphaning the chunk that this very Add() went on to store.
+	if isNew, err := as.Add("ef", 1, 3, uint64(40), int64(40), filePayload("ef", 1, 3, chunk)); err != nil || !isNew {
+		t.Fatalf("add ef chunk 1: new=%v err=%v", isNew, err)
+	}
+	// remaining chunks must still complete the transfer
+	for i := 2; i <= 3; i++ {
+		if isNew, err := as.Add("ef", uint16(i), 3, uint64(40+i), int64(40+i), filePayload("ef", uint16(i), 3, chunk)); err != nil || !isNew {
+			t.Fatalf("add ef chunk %d: new=%v err=%v", i, isNew, err)
+		}
+	}
+	if got := len(as.FetchTid("ef")); got != 3 {
+		t.Fatalf("FetchTid(ef) = %d chunks, want 3 (transfer stranded)", got)
+	}
+	found := false
+	for _, p := range as.Pending() {
+		if p.Tid == "ef" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ef never reached Pending(): %+v", as.Pending())
+	}
+	// the intended victim ("gh", oldest incomplete) is what got evicted
+	if got := len(as.FetchTid("gh")); got != 0 {
+		t.Fatalf("gh should have been the eviction victim (chunks=%d)", got)
+	}
+}
+
+func TestAttachmentStoreTightBudgetFailsCleanly(t *testing.T) {
+	dir := t.TempDir()
+	peer := "aabb"
+	// budget fits 2 chunks; the transfer needs 3 — larger than the whole budget
+	// once it starts, so Add must fail cleanly instead of stranding chunks
+	as, err := NewAttachmentStore(dir, peer, 48*2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := as.Add("ef", 1, 3, uint64(1), int64(1), filePayload("ef", 1, 3, make([]byte, 16))); err != nil {
+		t.Fatalf("first chunk should fit: %v", err)
+	}
+	if _, err := as.Add("ef", 2, 3, uint64(2), int64(2), filePayload("ef", 2, 3, make([]byte, 16))); err != nil {
+		t.Fatalf("second chunk should fit: %v", err)
+	}
+	if _, err := as.Add("ef", 3, 3, uint64(3), int64(3), filePayload("ef", 3, 3, make([]byte, 16))); err == nil {
+		t.Fatal("Add must fail cleanly when the budget cannot hold the chunk")
+	}
+	if got := len(as.FetchTid("ef")); got != 2 {
+		t.Fatalf("stored chunks = %d, want 2 (the two that fit)", got)
+	}
+	// the incomplete transfer survives a restart, still tracked and evictable
+	as2, err := NewAttachmentStore(dir, peer, 48*2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(as2.FetchTid("ef")); got != 2 {
+		t.Fatalf("stored chunks after reload = %d, want 2", got)
+	}
+}
+
 func TestAttachmentStoreDedupAndBudgetStable(t *testing.T) {
 	dir := t.TempDir()
 	peer := "aabb"
