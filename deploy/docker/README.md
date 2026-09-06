@@ -25,11 +25,35 @@ uses the built-in public Yggdrasil relay (see `daemon/main.go` `defaultPeers`).
 ```bash
 # From the aimless repo root
 cd deploy/docker
-./build.sh            # syncs dist/aimless.pyz + daemon sources, then compose up
+docker compose build
+docker compose up -d
 ```
+
+The container is a fixed **environment**; the client (`aimless.pyz`) and the
+daemon (`aimlessd-linux-amd64`, a static binary) are **fetched from the git
+`dist/` artifacts on first start** into `./aimless-data/bin/` (a bind-mounted
+volume), so they persist across restarts and you never rebuild the image for a
+new aimless release.
 
 No extra steps needed: on first run the browser window shows a **create identity**
 dialog (passphrase + confirm + screen name). Fill it in and you're set.
+
+## Updating to a new aimless release
+
+No image rebuild — just tell the entrypoint to fetch a new version:
+
+```bash
+# latest on main
+AIMLESS_FETCH=always docker compose up -d --force-recreate
+
+# or pin to a specific git ref (branch / commit sha)
+AIMLESS_VERSION=v0.8.0 docker compose up -d --force-recreate
+```
+
+`AIMLESS_FETCH=always` forces a re-fetch on the next start; otherwise the
+fetched artifacts are reused until the pinned `AIMLESS_VERSION` changes or you
+delete them (`rm aimless-data/bin/*`). The `AIMLESS_VERSION` env is the seam a
+future auto-updater can drive.
 
 ## Use
 
@@ -75,9 +99,9 @@ rm -rf aimless-data   # (from deploy/docker)
 
 ## Notes
 
-- **arm64 hosts**: work out of the box — the daemon is built from source in the
-  image's `golang:alpine` stage with `CGO_ENABLED=0`, so the platform matches
-  whatever host builds it. No host toolchain needed.
+- **Architecture**: the fetched daemon is the released `aimlessd-linux-amd64`
+  (static, x86-64); the container is therefore x86-64 only. If you need arm64,
+  the daemon is a trivial `CGO_ENABLED=0 go build` — see the repo `daemon/`.
 - **Internet exposure**: a VPS on the public internet should sit behind a
   reverse proxy with TLS + basic auth (or SSH tunnel), since noVNC + the VNC
   password alone are thin protection for a remote host.
