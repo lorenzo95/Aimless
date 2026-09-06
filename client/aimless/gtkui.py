@@ -193,8 +193,10 @@ menuitem:hover { background-color: #33363f; }
 .aimless-chat separator { background-color: #2a2d37; min-height: 1px; }
 
 .aimless-bubble { padding: 8px 12px; border-radius: 14px; }
-.aimless-bubble-in { background-color: #31343d; color: #e8eaf0; }
-.aimless-bubble-out { background-color: #8ab4f8; color: #10131a; }
+.aimless-bubble-in { background-color: #31343d; }
+.aimless-bubble-out { background-color: #8ab4f8; }
+.aimless-chat row .aimless-bubble-in { color: #e8eaf0; }
+.aimless-chat row .aimless-bubble-out { color: #10131a; }
 .aimless-bubble-out link, .aimless-bubble-out link:visited { color: #0b3d91; }
 .aimless-bubble-in link, .aimless-bubble-in link:visited { color: #8ab4f8; }
 
