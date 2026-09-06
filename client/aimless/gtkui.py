@@ -195,6 +195,8 @@ menuitem:hover { background-color: #33363f; }
 .aimless-bubble { padding: 8px 12px; border-radius: 14px; }
 .aimless-bubble-in { background-color: #31343d; color: #e8eaf0; }
 .aimless-bubble-out { background-color: #8ab4f8; color: #10131a; }
+.aimless-bubble-out link, .aimless-bubble-out link:visited { color: #0b3d91; }
+.aimless-bubble-in link, .aimless-bubble-in link:visited { color: #8ab4f8; }
 
 .aimless-badge {
     background-color: #7fa8f0;
