@@ -452,7 +452,7 @@ func (m *Mail) flushPeer(peerHex string) {
 	pub := ed25519.PublicKey(pubBytes)
 	now := time.Now().UnixMilli()
 	staleMs := m.retryInterval.Milliseconds()
-	for _, entry := range box.journal.Pending() {
+		for _, entry := range box.journal.Pending() {
 		// Windowed retry: never re-send a chunk still in flight from a recent
 		// attempt — a full-journal re-flood every tick saturates the link and
 		// starves ACKs, probes and status sends sharing the same wire.
@@ -464,10 +464,16 @@ func (m *Mail) flushPeer(peerHex string) {
 			continue
 		}
 		env := &Envelope{Version: envelopeVersion, Type: entry.Type, Seq: entry.Seq, Ts: entry.Ts, Payload: payload}
-		if data, err := env.Encode(); err == nil {
-			_, _ = m.node.Send(pub, data)
-			box.journal.MarkSent(entry.Seq, time.Now().UnixMilli())
+		data, err := env.Encode()
+		if err != nil {
+			continue
 		}
+		if entry.Type == TypeFile {
+			_, _ = m.node.SendBulk(pub, data)
+		} else {
+			_, _ = m.node.Send(pub, data)
+		}
+		box.journal.MarkSent(entry.Seq, time.Now().UnixMilli())
 	}
 }
 

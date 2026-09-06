@@ -4,8 +4,11 @@ import (
 	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -199,5 +202,80 @@ func sendUntilReceived(t *testing.T, from *Node, to ed25519.PublicKey, payload [
 		case <-deadline:
 			t.Fatalf("no delivery within %s", timeout)
 		}
+	}
+}
+
+// The writeFn seam + a bare &Node{} let these tests run without a real core.
+
+func TestOutboundControlPriority(t *testing.T) {
+	pub := make(ed25519.PublicKey, 32)
+	n := &Node{
+		control: make(chan outbound, 64),
+		bulk:    make(chan outbound, 512),
+	}
+	var mu sync.Mutex
+	var order []string
+	bulkStarted := make(chan struct{}, 1)
+	release := make(chan struct{})
+	n.writeFn = func(_ ed25519.PublicKey, payload []byte) {
+		mu.Lock()
+		order = append(order, string(payload))
+		mu.Unlock()
+		if string(payload) == "bulk-1" {
+			select {
+			case bulkStarted <- struct{}{}:
+			default:
+			}
+			<-release // hold bulk-1 in flight so the backlog is real
+		}
+	}
+	go n.writeLoop()
+
+	for i := 1; i <= 5; i++ {
+		if _, err := n.SendBulk(pub, []byte(fmt.Sprintf("bulk-%d", i))); err != nil {
+			t.Fatalf("bulk %d: %v", i, err)
+		}
+	}
+	<-bulkStarted // bulk-1 is mid-write; the writer cannot reach the select
+	if _, err := n.Send(pub, []byte("control")); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		done := len(order) == 6
+		mu.Unlock()
+		if done || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"bulk-1", "control", "bulk-2", "bulk-3", "bulk-4", "bulk-5"}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("write order = %v, want %v (control must jump the bulk backlog)", order, want)
+	}
+}
+
+func TestBulkQueueFullLeavesControlHeadroom(t *testing.T) {
+	pub := make(ed25519.PublicKey, 32)
+	n := &Node{
+		control: make(chan outbound, 64),
+		bulk:    make(chan outbound, 2),
+		writeFn: func(_ ed25519.PublicKey, _ []byte) {},
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := n.SendBulk(pub, []byte("x")); err != nil {
+			t.Fatalf("bulk %d: %v", i, err)
+		}
+	}
+	if _, err := n.SendBulk(pub, []byte("y")); err == nil {
+		t.Fatal("full bulk queue must drop with an error")
+	}
+	if _, err := n.Send(pub, []byte("control")); err != nil {
+		t.Fatalf("control enqueue must be independent of a full bulk queue: %v", err)
 	}
 }

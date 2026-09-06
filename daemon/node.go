@@ -34,7 +34,9 @@ type Node struct {
 	priv      ed25519.PrivateKey
 	listeners []*core.Listener
 	closeOnce sync.Once
-	outbox    chan outbound
+	control   chan outbound // small, latency-sensitive: ACKs, status, probes, text
+	bulk      chan outbound // large: TypeFile chunks
+	writeFn   func(pub ed25519.PublicKey, payload []byte)
 }
 
 type outbound struct {
@@ -107,12 +109,16 @@ func StartNode(datadir string, peers []string, listenURLs []string, log *aimless
 		return nil, fmt.Errorf("start yggdrasil core: %w", err)
 	}
 	n := &Node{
-		Core:   c,
-		priv:   priv,
-		Pub:    priv.Public().(ed25519.PublicKey),
-		outbox: make(chan outbound, 512),
+		Core:    c,
+		priv:    priv,
+		Pub:     priv.Public().(ed25519.PublicKey),
+		control: make(chan outbound, 64),
+		bulk:    make(chan outbound, 512),
 	}
 	n.Address = c.Address()
+	n.writeFn = func(pub ed25519.PublicKey, payload []byte) {
+		_, _ = c.WriteTo(payload, types.Addr(pub))
+	}
 	go n.writeLoop()
 	c.SetPathNotify(func(key ed25519.PublicKey) {
 		if n.OnPathUp != nil {
@@ -173,20 +179,29 @@ func (n *Node) readLoop() {
 	}
 }
 
+// Send enqueues a latency-sensitive packet (text, ACK, status, probe) on the
+// control queue.
 func (n *Node) Send(pub ed25519.PublicKey, payload []byte) (int, error) {
+	return n.enqueue(pub, payload, n.control)
+}
+
+// SendBulk enqueues a TypeFile chunk on the bulk queue — file traffic yields to
+// control traffic and is paced by the link through the single writer.
+func (n *Node) SendBulk(pub ed25519.PublicKey, payload []byte) (int, error) {
+	return n.enqueue(pub, payload, n.bulk)
+}
+
+func (n *Node) enqueue(pub ed25519.PublicKey, payload []byte, q chan outbound) (int, error) {
 	if len(pub) != ed25519.PublicKeySize {
 		return 0, fmt.Errorf("bad public key size: %d", len(pub))
 	}
-	if len(payload) > int(n.Core.MTU()) {
+	// Core is always set by StartNode in production; the nil check exists so the
+	// priority-ordering test can construct a bare Node with a stub writer.
+	if n.Core != nil && len(payload) > int(n.Core.MTU()) {
 		return 0, fmt.Errorf("payload %d exceeds mtu %d", len(payload), n.Core.MTU())
 	}
-	// Non-blocking enqueue: Core.WriteTo blocks on session flow control, and a
-	// saturated outbound link must never stall API handlers, the presence loop,
-	// or inbound ACK processing. Every send type is retryable (chunks are
-	// journaled, status is re-announced, probes are periodic), so dropping when
-	// the queue is full is safe.
 	select {
-	case n.outbox <- outbound{pub: pub, data: payload}:
+	case q <- outbound{pub: pub, data: payload}:
 		return len(payload), nil
 	default:
 		return 0, fmt.Errorf("outbound queue full")
@@ -194,8 +209,20 @@ func (n *Node) Send(pub ed25519.PublicKey, payload []byte) (int, error) {
 }
 
 func (n *Node) writeLoop() {
-	for out := range n.outbox {
-		_, _ = n.Core.WriteTo(out.data, types.Addr(out.pub))
+	for {
+		// Drain latency-sensitive control traffic before touching bulk.
+		select {
+		case out := <-n.control:
+			n.writeFn(out.pub, out.data)
+			continue
+		default:
+		}
+		select {
+		case out := <-n.control:
+			n.writeFn(out.pub, out.data)
+		case out := <-n.bulk:
+			n.writeFn(out.pub, out.data)
+		}
 	}
 }
 
