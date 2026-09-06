@@ -29,7 +29,7 @@ docker run -d --name aimless-webtop --restart unless-stopped \
   -p 127.0.0.1:8080:8080 -p 127.0.0.1:5900:5900 \
   -e VNC_PASS="${VNC_PASS:-aimless}" \
   -v "$PWD/aimless-data:/data" \
-  ghcr.io/lorenzo95/aimless-webtop:latest
+  ghcr.io/lorenzo95/aimless/aimless-webtop:latest
 ```
 
 or with compose (the repo's `deploy/docker/docker-compose.yml` already points at

@@ -3,4 +3,4 @@
 services:
   aimless-webtop:
     build: .
-    image: ghcr.io/lorenzo95/aimless-webtop:latest
+    image: ghcr.io/lorenzo95/aimless/aimless-webtop:latest
