@@ -183,7 +183,7 @@ func (as *AttachmentStore) oldestLocked(complete bool) string {
 		if t.complete != complete {
 			continue
 		}
-		if best == "" || t.firstTs < bestTs {
+		if best == "" || t.firstTs < bestTs || (t.firstTs == bestTs && tid < best) {
 			best, bestTs = tid, t.firstTs
 		}
 	}

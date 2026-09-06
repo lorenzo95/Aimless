@@ -59,8 +59,12 @@ func TestAttachmentStoreEvictsOldestCompleteWhenOnlyCompleteRemain(t *testing.T)
 	chunk := make([]byte, 16)
 	// two complete transfers, 2 chunks each — fills the 4-chunk budget
 	for _, tid := range []string{"aa", "bb"} {
+		base := int64(0)
+		if tid == "bb" {
+			base = 10
+		}
 		for i := 1; i <= 2; i++ {
-			if _, err := as.Add(tid, uint16(i), 2, uint64(i), int64(i), filePayload(tid, uint16(i), 2, chunk)); err != nil {
+			if _, err := as.Add(tid, uint16(i), 2, uint64(base+int64(i)), base+int64(i), filePayload(tid, uint16(i), 2, chunk)); err != nil {
 				t.Fatal(err)
 			}
 		}
