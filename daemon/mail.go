@@ -444,7 +444,7 @@ func (m *Mail) flushPeer(peerHex string) {
 	if !atomic.CompareAndSwapInt32(&box.flushing, 0, 1) {
 		return
 	}
-		defer atomic.StoreInt32(&box.flushing, 0)
+	defer atomic.StoreInt32(&box.flushing, 0)
 	pubBytes, err := hex.DecodeString(peerHex)
 	if err != nil {
 		return
@@ -452,7 +452,7 @@ func (m *Mail) flushPeer(peerHex string) {
 	pub := ed25519.PublicKey(pubBytes)
 	now := time.Now().UnixMilli()
 	staleMs := m.retryInterval.Milliseconds()
-		for _, entry := range box.journal.Pending() {
+	for _, entry := range box.journal.Pending() {
 		// Windowed retry: never re-send a chunk still in flight from a recent
 		// attempt — a full-journal re-flood every tick saturates the link and
 		// starves ACKs, probes and status sends sharing the same wire.
@@ -468,7 +468,7 @@ func (m *Mail) flushPeer(peerHex string) {
 		if err != nil {
 			continue
 		}
-						var sendErr error
+		var sendErr error
 		if entry.Type == TypeFile {
 			_, sendErr = m.node.SendBulk(pub, data)
 		} else {

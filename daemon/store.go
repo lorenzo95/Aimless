@@ -12,11 +12,11 @@ import (
 )
 
 type journalEntry struct {
-	Seq     uint64        `json:"seq"`
-	Ts      int64         `json:"ts"`
-	Payload string        `json:"payload"`
-	Type    EnvelopeType  `json:"type,omitempty"`
-	SentAt  int64         `json:"sent_at,omitempty"` // transient pacing state, not persisted
+	Seq     uint64       `json:"seq"`
+	Ts      int64        `json:"ts"`
+	Payload string       `json:"payload"`
+	Type    EnvelopeType `json:"type,omitempty"`
+	SentAt  int64        `json:"sent_at,omitempty"` // transient pacing state, not persisted
 }
 
 type OutboxJournal struct {

@@ -31,30 +31,30 @@ type historyMsg struct {
 }
 
 type apiMessage struct {
-	Op       string          `json:"op"`
-	Id       string          `json:"id,omitempty"`
-	Address  string          `json:"address,omitempty"`
-	Key      string          `json:"key,omitempty"`
-	Pid      int             `json:"pid,omitempty"`
-	To       string          `json:"to,omitempty"`
-	From     string          `json:"from,omitempty"`
-	Payload  string          `json:"payload,omitempty"`
-	Bytes    int             `json:"bytes,omitempty"`
-	Seq      uint64          `json:"seq,omitempty"`
-	Ts       int64           `json:"ts,omitempty"`
-	Error    string          `json:"error,omitempty"`
-	Peers    []peerStatus    `json:"peers,omitempty"`
-	MTU      int             `json:"mtu,omitempty"`
-	Build    string          `json:"build,omitempty"`
-	Msgs     []historyMsg    `json:"msgs,omitempty"`
-	Oldest   uint64          `json:"oldest,omitempty"`
-	Latest   uint64          `json:"latest,omitempty"`
-	Presence []presenceEntry `json:"presence,omitempty"`
-	Blocked  []string        `json:"blocked,omitempty"`
-	Type     string          `json:"type,omitempty"`
+	Op        string          `json:"op"`
+	Id        string          `json:"id,omitempty"`
+	Address   string          `json:"address,omitempty"`
+	Key       string          `json:"key,omitempty"`
+	Pid       int             `json:"pid,omitempty"`
+	To        string          `json:"to,omitempty"`
+	From      string          `json:"from,omitempty"`
+	Payload   string          `json:"payload,omitempty"`
+	Bytes     int             `json:"bytes,omitempty"`
+	Seq       uint64          `json:"seq,omitempty"`
+	Ts        int64           `json:"ts,omitempty"`
+	Error     string          `json:"error,omitempty"`
+	Peers     []peerStatus    `json:"peers,omitempty"`
+	MTU       int             `json:"mtu,omitempty"`
+	Build     string          `json:"build,omitempty"`
+	Msgs      []historyMsg    `json:"msgs,omitempty"`
+	Oldest    uint64          `json:"oldest,omitempty"`
+	Latest    uint64          `json:"latest,omitempty"`
+	Presence  []presenceEntry `json:"presence,omitempty"`
+	Blocked   []string        `json:"blocked,omitempty"`
+	Type      string          `json:"type,omitempty"`
 	Transfers []AttachPending `json:"transfers,omitempty"`
-	Chunks   []attachEntry   `json:"chunks,omitempty"`
-	Tid      string          `json:"tid,omitempty"`
+	Chunks    []attachEntry   `json:"chunks,omitempty"`
+	Tid       string          `json:"tid,omitempty"`
 }
 
 type APIServer struct {

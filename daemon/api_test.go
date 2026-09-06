@@ -429,4 +429,3 @@ func TestAPIBlocklistOp(t *testing.T) {
 		t.Fatalf("blocked after unblock = %v, want [%s]", resp.Blocked, hex2)
 	}
 }
-
