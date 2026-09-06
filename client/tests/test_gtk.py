@@ -241,6 +241,22 @@ def test_gui_version_display(gtk_app):
     assert "old build" in label
 
 
+def test_gui_old_daemon_warns(gtk_app):
+    app = gtk_app
+    win = app["win"]
+
+    win.activity.refresh_info({"build": "aimlessd/0.4.1", "peers_up": 1, "peers_total": 2,
+                               "address": "x", "mtu": 65535})
+    label = win.activity.info_label.get_text()
+    assert "too old" in label, "an old daemon build must warn in the status line"
+    assert "0.5.2" in label, "warning must name the minimum build"
+
+    win.activity.refresh_info({"build": "aimlessd/0.5.2", "peers_up": 1, "peers_total": 2,
+                               "address": "x", "mtu": 65535})
+    label = win.activity.info_label.get_text()
+    assert "too old" not in label, "a current daemon must not warn"
+
+
 def test_gui_away_banner(gtk_app):
     app = gtk_app
     win = app["win"]

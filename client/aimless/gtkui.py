@@ -34,6 +34,7 @@ from gi.repository import Gtk, GLib, Gdk, Pango, GdkPixbuf
 from . import crypto, protocol, logging
 from .daemon import DaemonClient, Client, DaemonError
 from . import __version__ as client_version
+from . import MIN_DAEMON_BUILD
 
 APP_NAME = "AIMless"
 CONFIG_DIR = os.environ.get("AIMLESS_CONFIG") or os.path.expanduser("~/.config/aimless")
@@ -2014,6 +2015,20 @@ class ActivityView(Gtk.Box):
             version_note = ("\n<span foreground='#f38ba8'>this daemon is an old build — "
                             "run `aimless stop`, then reopen aimless to update</span>")
             build = "unknown"
+        else:
+            try:
+                dv = tuple(int(x) for x in build.split("/", 1)[1].split("."))
+            except (IndexError, ValueError):
+                dv = None
+            if dv is not None and dv < MIN_DAEMON_BUILD:
+                need = ".".join(str(x) for x in MIN_DAEMON_BUILD)
+                version_note = ("\n<span foreground='#f38ba8'>daemon {b} is too old for this client "
+                                "(needs ≥ {n}) — update aimlessd-linux-amd64, then `aimless stop` and "
+                                "reopen</span>".format(b=build, n=need))
+                if not getattr(self, "_version_warned", False):
+                    self._version_warned = True
+                    self.log(f"⚠ daemon {build} is too old for this client (needs ≥ {need}) "
+                             f"— update aimlessd-linux-amd64, then `aimless stop` and reopen")
         state = ("<span foreground='#a6e3a1'>●  you are online</span>" if st["peers_up"] > 0
                  else "<span foreground='#fab387'>●  connecting — no Yggdrasil peers yet</span>")
         self.info_label.set_markup(
