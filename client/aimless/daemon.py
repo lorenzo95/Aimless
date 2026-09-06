@@ -272,14 +272,21 @@ class Client:
         """Send one pre-built TypeFile chunk (20-byte header + sealed body)."""
         return self.daemon.request("sendfile", to=buddy_node_hex, payload=payload_b64)
 
-    def send_file_room(self, members: list, conv: str, payload_b64: str) -> dict:
-        """Fan a TypeFile chunk out to every room member except self."""
+    def send_file_room(self, members: list, conv: str, chunk: dict) -> dict:
+        """Seal one TypeFile chunk per member (each has its own key) and fan it out."""
+        from . import protocol
+        import base64
         my_node = self.node_key()
         seqs = {}
+        body = dict(chunk)
+        body["conv"] = conv
+        header = protocol.file_header(bytes.fromhex(body["transfer_id"]), body["index"], body["total"])
         for m in members:
             if m["node"] == my_node:
                 continue
-            resp = self.daemon.request("sendfile", to=m["node"], payload=payload_b64)
+            sealed = protocol.seal_file_chunk(self.identity, m["pubkey"], body)
+            payload = base64.b64encode(header + sealed).decode()
+            resp = self.daemon.request("sendfile", to=m["node"], payload=payload)
             seqs[m["node"]] = resp.get("seq", 0)
         return seqs
 

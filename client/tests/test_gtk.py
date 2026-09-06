@@ -1006,6 +1006,34 @@ def test_gui_fetched_transfer_sweep(gtk_app):
         assert f.read() == data
 
 
+def test_gui_file_send_queues_and_renders(gtk_app, tmp_path):
+    app = gtk_app
+    win = app["win"]
+    bob = app["bob"]
+    a_node = app["a_node"]
+    b_node = app["b_node"]
+    f = tmp_path / "hello.txt"
+    f.write_bytes(b"hello attachment " * 5000)
+    win.messages.thread_list.select_row(win.messages.threads[b_node]["row"])
+    win.messages._send_file(win.messages.selected, str(f), "hello.txt", os.path.getsize(str(f)))
+
+    def sent():
+        return [m for m in win.session.cache.msgs(b_node)
+                if m.get("attachment") and m["dir"] == "out"]
+    assert _pump(win, sent, timeout=10), "sent attachment never cached"
+
+    def landed():
+        try:
+            return bool(bob.daemon.request("pendingattachments", **{"from": a_node}, timeout=5))
+        except Exception:
+            return False
+    assert _pump(win, landed, timeout=20), "chunks never reached bob's daemon"
+
+    def save_btn():
+        return any(_walk_buttons(w, "Save") for w in win.messages.conversation.get_children())
+    assert _pump(win, save_btn, timeout=10), "sent attachment must render with a Save button"
+
+
 def test_gui_request_persists_until_answered(gtk_app):
     app = gtk_app
     win = app["win"]

@@ -57,6 +57,14 @@ def make_chunk(tid: str, index: int, total: int, filename: str, mime_hint: str,
     return chunk
 
 
+def build_file_payload(identity: nacl.signing.SigningKey, recipient_pubkey_hex: str, chunk: dict) -> str:
+    """The full wire payload for one chunk: 20-byte routing header + sealed body,
+    base64 for the daemon's sendfile op."""
+    sealed = seal_file_chunk(identity, recipient_pubkey_hex, chunk)
+    header = file_header(bytes.fromhex(chunk["transfer_id"]), chunk["index"], chunk["total"])
+    return base64.b64encode(header + sealed).decode()
+
+
 def seal_file_chunk(identity: nacl.signing.SigningKey, buddy_pubkey_hex: str, chunk: dict) -> bytes:
     """Seal one file chunk (kind:"file", same convention as text) into raw bytes.
     Callers prepend the 20-byte routing header before handing it to the daemon."""

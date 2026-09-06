@@ -678,6 +678,11 @@ class MessagesView(Gtk.Box):
         self.send_button.get_style_context().add_class("aimless-send")
         self.send_button.connect("clicked", lambda *_: self.send_message())
         composer_box.pack_start(self.send_button, False, False, 0)
+        self.attach_button = Gtk.Button(label="Attach")
+        self.attach_button.set_valign(Gtk.Align.END)
+        self.attach_button.get_style_context().add_class("muted")
+        self.attach_button.connect("clicked", self.on_attach)
+        composer_box.pack_start(self.attach_button, False, False, 0)
         conversation_box.pack_start(composer_box, False, False, 0)
 
         self.stack.add_titled(conversation_box, "conversation", "conversation")
@@ -1442,6 +1447,101 @@ class MessagesView(Gtk.Box):
             self._send_in_flight = False
             self.send_button.set_sensitive(True)
             self.append_system_note(f"⚠ send failed: {e} — the message was not queued")
+            self.app.activity.log(f"send failed: {e}")
+
+        run_async(worker, on_done=done, on_error=fail)
+
+    def on_attach(self, *_):
+        thread = self.selected
+        if thread is None:
+            return
+        dlg = Gtk.FileChooserDialog(
+            title="Attach a file", transient_for=self.get_toplevel(),
+            action=Gtk.FileChooserAction.OPEN,
+            buttons=("Cancel", Gtk.ResponseType.CANCEL, "Attach", Gtk.ResponseType.OK))
+        resp = dlg.run()
+        path = dlg.get_filename()
+        dlg.destroy()
+        if resp != Gtk.ResponseType.OK or not path:
+            return
+        try:
+            size = os.path.getsize(path)
+            protocol.validate_send_size(size)
+        except (OSError, ValueError) as e:
+            self.append_system_note(f"attach failed: {e}")
+            return
+        filename = os.path.basename(path)
+        if thread.get("is_room") and size > 5 * 1024 * 1024 and len(thread.get("members", {})) > 3:
+            if not self._confirm_large_room_send(filename, size, len(thread["members"])):
+                return
+        self._send_file(thread, path, filename, size)
+
+    def _confirm_large_room_send(self, filename, size, members):
+        dlg = Gtk.MessageDialog(transient_for=self.get_toplevel(), modal=True,
+                                message_type=Gtk.MessageType.WARNING,
+                                text=f"Send {filename} ({_human_size(size)}) to {members} members?",
+                                buttons=Gtk.ButtonsType.OK_CANCEL)
+        dlg.format_secondary_text(
+            "Every member receives a full copy — a large transfer to a big room uses "
+            "real bandwidth, just like text does, scaled per file.")
+        dlg.set_default_response(Gtk.ResponseType.CANCEL)
+        resp = dlg.run()
+        dlg.destroy()
+        return resp == Gtk.ResponseType.OK
+
+    def _send_file(self, thread, path, filename, size):
+        conv = thread["conv"]
+        is_room = thread.get("is_room")
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            self.append_system_note(f"attach failed: {e}")
+            return
+        tid = protocol.new_transfer_id()
+        sha = hashlib.sha256(data).hexdigest()
+        mime_hint = ("image" if filename.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
+                     else "application")
+        pieces = [data[i:i + protocol.FILE_CHUNK_SIZE] for i in range(0, len(data), protocol.FILE_CHUNK_SIZE)]
+        total = len(pieces)
+        session = self.app.session
+        client = session.client
+        row = self._append_status_row(f"Sending {filename} — 0/{total}")
+        attachment = {"path": path, "filename": filename, "mime_hint": mime_hint, "size": size}
+
+        def worker():
+            seqs = {}
+            for i, piece in enumerate(pieces):
+                chunk = protocol.make_chunk(tid, i, total, filename, mime_hint, sha, size, piece,
+                                            conv=conv if is_room else None)
+                if is_room:
+                    seqs.update(client.send_file_room(thread["members"], conv, chunk))
+                else:
+                    payload = protocol.build_file_payload(
+                        session.identity, thread["contact"]["pubkey"], chunk)
+                    resp = client.send_file(conv, payload)
+                    seqs[conv] = resp.get("seq", 0)
+                GLib.idle_add(_progress, i + 1)
+            return seqs
+
+        def _progress(done):
+            self._update_status_row(row, f"Sending {filename} — {done}/{total}")
+            return False
+
+        def done(seqs):
+            if row is not None:
+                row.destroy()
+            ts = int(time.time() * 1000)
+            self.append_bubble(True, filename, ts, attachment=attachment)
+            session.cache.add_sent(conv, seqs, ts, filename, attachment=attachment)
+            if thread is self.selected:
+                thread["preview"] = filename
+                self.update_thread_row(conv)
+            scroll_to_bottom(self.conversation_scroll)
+
+        def fail(e):
+            if row is not None:
+                self._update_status_row(row, f"{filename} — send failed: {e}")
             self.app.activity.log(f"send failed: {e}")
 
         run_async(worker, on_done=done, on_error=fail)
