@@ -468,12 +468,18 @@ func (m *Mail) flushPeer(peerHex string) {
 		if err != nil {
 			continue
 		}
+						var sendErr error
 		if entry.Type == TypeFile {
-			_, _ = m.node.SendBulk(pub, data)
+			_, sendErr = m.node.SendBulk(pub, data)
 		} else {
-			_, _ = m.node.Send(pub, data)
+			_, sendErr = m.node.Send(pub, data)
 		}
-		box.journal.MarkSent(entry.Seq, time.Now().UnixMilli())
+		// SentAt means "last successfully enqueued" — a chunk that bounced off a
+		// full queue must stay eligible for the very next tick instead of being
+		// falsely parked for a whole retry window it never used.
+		if sendErr == nil {
+			box.journal.MarkSent(entry.Seq, time.Now().UnixMilli())
+		}
 	}
 }
 
