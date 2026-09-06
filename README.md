@@ -2,6 +2,24 @@
 
 Serverless chat with an AIM heart. Bitmessage's architecture (decentralized, end-to-end encrypted, store-and-forward), AIM's face (screen names, buddy list, away messages), Yggdrasil's legs (embedded transport — no TUN, no NAT traversal, no ports to forward).
 
+## Try it in your browser (Docker)
+
+Want to see it without installing anything? Run the web desktop container —
+it gives you the full aimless GUI in a browser at `http://localhost:8080`:
+
+```sh
+docker run -d --name aimless-webtop --restart unless-stopped \
+  -p 127.0.0.1:8080:8080 -p 127.0.0.1:5900:5900 \
+  -e VNC_PASS="aimless" \
+  -v "$PWD/aimless-data:/data" \
+  ghcr.io/lorenzo95/aimless/aimless-webtop:latest
+```
+
+Open <http://localhost:8080/vnc.html> and enter the VNC password (`aimless`
+unless you changed `VNC_PASS`). First run walks you through creating your
+identity in the browser — no command-line setup. More on this below in
+[Run it in a browser — Docker web desktop](#run-it-in-a-browser--docker-web-desktop).
+
 ## Download and run
 
 ```sh
@@ -52,16 +70,8 @@ cd ../client && pip install . && aimless
 The webtop image runs the aimless GUI in a browser from a minimal Alpine
 container: Xvfb + the tiny `openbox` window manager + `x11vnc` + `noVNC`,
 everything supervised and non-root (uid 1000) — the same pattern as the
-`bitmessage-docker` project.
-
-```sh
-docker run -d --name aimless-webtop --restart unless-stopped \
-  -p 127.0.0.1:8080:8080 -p 127.0.0.1:5900:5900 \
-  -e VNC_PASS="${VNC_PASS:-aimless}" \
-  -v "$PWD/aimless-data:/data" \
-  ghcr.io/lorenzo95/aimless/aimless-webtop:latest
-# then open http://localhost:8080/vnc.html  (noVNC password: VNC_PASS, default "aimless")
-```
+`bitmessage-docker` project. The one-liner at the top of this page gets you
+started; this section covers how it works.
 
 First run shows the same *create your identity* dialog in the browser window.
 There is no system tray in the container, so closing the window (or cancelling
