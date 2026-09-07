@@ -9,6 +9,7 @@ services:
       - VNC_PASS=${VNC_PASS:-aimless}          # password for the noVNC connection prompt
       - AIMLESS_VERSION=${AIMLESS_VERSION:-main}  # git ref to fetch dist artifacts from (branch/commit/tag)
       - AIMLESS_FETCH=${AIMLESS_FETCH:-missing}   # set to 'always' to force a re-fetch on start
+      - AIMLESS_MODE=${AIMLESS_MODE:-webtop}      # 'daemon_only' = daemon only (no GUI/X/VNC), for SSH remote access
     restart: unless-stopped
     shm_size: "512mb"   # GTK + Xvfb need /dev/shm
     volumes:

@@ -93,6 +93,43 @@ plain window mode):
   quit the app; supervisord restarts it within a second. You can never be stuck
   on a black screen — a dialog or window is always up.
 
+## Daemon-only mode (`AIMLESS_MODE=daemon_only`)
+
+Set `AIMLESS_MODE=daemon_only` to run **just the daemon** — no Xvfb, no openbox,
+no VNC, no noVNC, no GUI. That leaves a single `aimlessd` process (supervised,
+autorestart) acting as a 24/7 mailbox. It's the RAM-cheap way to keep your node
+reachable and store messages while your laptop is off.
+
+```bash
+AIMLESS_MODE=daemon_only docker compose up -d --force-recreate
+```
+
+The daemon writes its socket to `<datadir>/api.sock`, i.e. the host bind-mount
+path `aimless-data/state/api.sock`. From your laptop, connect the desktop GUI
+to it over an SSH tunnel (see below) — no ports exposed.
+
+### Typical workflow — init in the browser, then go headless
+
+1. Start with the default `webtop` mode and create your identity through the
+   browser UI (`http://localhost:8080/vnc.html`). This initialises
+   `aimless-data/state/` (identity, keys, config).
+2. Set `AIMLESS_MODE=daemon_only` in your compose `.env` (or run with the env
+   var) and `docker compose up -d --force-recreate` again.
+3. On your laptop, run the desktop GUI and enable **Remote daemon (SSH)** from
+   the hamburger menu (see the client README). Point it at the SSH host and the
+   `api.sock` path on the host (`…/aimless-data/state/api.sock`). The client
+   opens the tunnel and talks to the remote daemon as if it were local.
+
+The web/VNC ports are still bound loopback-only in daemon-only mode; they're
+just idle.
+
+> **One GUI per daemon socket.** Don't run two GUIs against the same daemon
+> socket at the same time (e.g. the webtop GUI *and* your laptop GUI
+> simultaneously). Both receive every message and both may ACK attachments, so
+> the first to finish a file transfer frees the daemon's copy before the other
+> can fetch it. Use one at a time — either the webtop GUI or the remote laptop
+> GUI.
+
 Useful while the container runs:
 
 ```bash

@@ -33,6 +33,7 @@ from gi.repository import Gtk, GLib, Gdk, Pango, GdkPixbuf, Gio
 
 from . import crypto, protocol, logging
 from .daemon import DaemonClient, Client, DaemonError
+from .ssh_tunnel import SSHTunnel
 from . import __version__ as client_version
 from . import MIN_DAEMON_BUILD
 
@@ -97,8 +98,31 @@ def linkify(text: str) -> str:
     return "".join(out)
 
 
+def ssh_prefs():
+    prefs = load_prefs()
+    ssh = prefs.get("ssh") if isinstance(prefs.get("ssh"), dict) else {}
+    return ssh
+
+
+def ssh_tunnel():
+    """SSHTunnel for the configured remote daemon, or None when SSH mode is off."""
+    ssh = ssh_prefs()
+    if not (ssh.get("enabled") and ssh.get("host") and ssh.get("remote_socket")):
+        return None
+    local = ssh.get("local_socket") or os.path.join(CONFIG_DIR, "remote-api.sock")
+    return SSHTunnel(ssh["host"], ssh["remote_socket"], local,
+                     identity=ssh.get("identity") or None)
+
+
 def sock_path():
-    return os.environ.get("AIMLESS_SOCK") or os.path.join(data_dir(), "api.sock")
+    env = os.environ.get("AIMLESS_SOCK")
+    if env:
+        return env
+    if ssh_tunnel() is not None:
+        # SSH mode: the tunnel creates this local socket (remote-api.sock),
+        # never the local daemon's api.sock, so the two can't collide.
+        return ssh_tunnel().local_socket
+    return os.path.join(data_dir(), "api.sock")
 
 
 def contacts_path():
@@ -355,11 +379,24 @@ class DaemonSupervisor:
         self.datadir = data_dir()
         self.sock = sock_path()
         self.child = None
+        self.tunnel = ssh_tunnel()
+
+    @property
+    def remote(self):
+        return self.tunnel is not None
 
     def binary(self):
         return daemon_binary()
 
     def is_running(self):
+        if self.remote:
+            if not self.tunnel.is_ready():
+                return False
+            try:
+                DaemonClient(self.sock).close()
+                return True
+            except Exception:
+                return False
         try:
             DaemonClient(self.sock).close()
             return True
@@ -417,6 +454,20 @@ class DaemonSupervisor:
     def ensure(self, log=None):
         if self.is_running():
             return True
+        if self.remote:
+            if log:
+                log(f"connecting to remote daemon via ssh ({self.tunnel.host})")
+            try:
+                self.tunnel.start(log=log)
+            except RuntimeError as e:
+                if log:
+                    log(f"ssh tunnel failed: {e}")
+                raise
+            if self.is_running():
+                if log:
+                    log("remote daemon connected")
+                return True
+            raise RuntimeError("ssh tunnel is up but the remote daemon is not answering")
         if log:
             log("starting aimlessd …")
         self.spawn()
@@ -432,6 +483,13 @@ class DaemonSupervisor:
         raise RuntimeError("daemon did not come up within 20s")
 
     def stop(self):
+        if self.remote:
+            self.tunnel.stop()
+            try:
+                os.remove(AIMLESSD_PID_FILE)
+            except OSError:
+                pass
+            return
         pid = daemon_pid_from_socket()
         if pid is None:
             pid = read_pid(AIMLESSD_PID_FILE)
@@ -2169,6 +2227,10 @@ class AimlessWindow(Gtk.Window):
         avail_item.connect("activate", lambda *_: self.set_away(None))
         options_menu.append(avail_item)
         options_menu.append(Gtk.SeparatorMenuItem())
+        ssh_item = Gtk.MenuItem(label="Remote daemon (SSH) …")
+        ssh_item.connect("activate", self.on_ssh_settings)
+        options_menu.append(ssh_item)
+        options_menu.append(Gtk.SeparatorMenuItem())
         quit_item = Gtk.MenuItem(label="Close window")
         quit_item.connect("activate", lambda *_: self.close())
         options_menu.append(quit_item)
@@ -2293,6 +2355,95 @@ class AimlessWindow(Gtk.Window):
     def on_set_away(self, *_):
         away = ask_text(self, "Away message", "Away message (empty = available):")
         self.set_away(away.strip() if away and away.strip() else None)
+
+    def on_ssh_settings(self, *_):
+        ssh = ssh_prefs()
+        dlg = Gtk.Dialog(title="Remote daemon (SSH)", transient_for=self, modal=True)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        box = dlg.get_content_area()
+        box.set_spacing(8)
+        box.set_border_width(10)
+
+        def row(label, default, is_password=False):
+            h = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            h.pack_start(Gtk.Label(label=label, xalign=0.0, width_chars=18), False, False, 0)
+            e = Gtk.Entry()
+            if is_password:
+                e.set_visibility(False)
+            e.set_text(default or "")
+            e.set_hexpand(True)
+            h.pack_start(e, True, True, 0)
+            box.add(h)
+            return e
+
+        enabled = Gtk.CheckButton(label="Use SSH tunnel to a remote daemon")
+        enabled.set_active(bool(ssh.get("enabled")))
+        box.add(enabled)
+        host = row("Host", ssh.get("host") or "", "user@host")
+        remote = row("Remote socket path", ssh.get("remote_socket") or "",
+                     "/abs/path/to/api.sock")
+        ident = row("Identity key (optional)", ssh.get("identity") or "", "~/.ssh/id_ed25519")
+        hint = Gtk.Label(label=("Remote socket is the api.sock path on the SSH host.\n"
+                                "Local socket is kept at %s." %
+                                os.path.join(CONFIG_DIR, "remote-api.sock")),
+                         xalign=0.0)
+        hint.set_line_wrap(True)
+        box.add(hint)
+
+        test_btn = Gtk.Button(label="Test connection")
+        box.add(test_btn)
+
+        result_label = Gtk.Label(label="", xalign=0.0)
+        result_label.set_line_wrap(True)
+        box.add(result_label)
+
+        def do_test(*_):
+            h, r, i = host.get_text().strip(), remote.get_text().strip(), ident.get_text().strip()
+            if not enabled.get_active() or not h or not r:
+                result_label.set_text("enable + fill host and remote socket path first")
+                return
+            t = SSHTunnel(h, r, os.path.join(CONFIG_DIR, "remote-api.sock.tmp"),
+                          identity=i or None)
+            result_label.set_text(f"connecting to {h} …")
+            try:
+                t.start()
+                result_label.set_text("connected OK")
+            except RuntimeError as e:
+                result_label.set_text(str(e))
+            finally:
+                t.stop()
+
+        test_btn.connect("clicked", do_test)
+        dlg.show_all()
+        resp = dlg.run()
+        dlg.destroy()
+        if resp != Gtk.ResponseType.OK:
+            return
+        new_ssh = {
+            "enabled": bool(enabled.get_active()),
+            "host": host.get_text().strip(),
+            "remote_socket": remote.get_text().strip(),
+        }
+        ident_text = ident.get_text().strip()
+        if ident_text:
+            new_ssh["identity"] = ident_text
+        if not new_ssh["host"] or not new_ssh["remote_socket"]:
+            new_ssh["enabled"] = False
+        old = ssh_prefs()
+        self.prefs["ssh"] = new_ssh
+        save_prefs(self.prefs)
+        changed = (old.get("enabled") != new_ssh["enabled"]
+                   or old.get("host") != new_ssh["host"]
+                   or old.get("remote_socket") != new_ssh["remote_socket"]
+                   or old.get("identity") != new_ssh.get("identity"))
+        if changed:
+            dlg2 = Gtk.MessageDialog(transient_for=self, modal=True,
+                                     message_type=Gtk.MessageType.INFO,
+                                     buttons=Gtk.ButtonsType.OK,
+                                     text="Restart the app to apply the new SSH settings.")
+            dlg2.run()
+            dlg2.destroy()
 
     def set_away(self, away):
         self._apply_away_banner(away)

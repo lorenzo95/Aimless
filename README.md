@@ -61,6 +61,34 @@ If an older pip-installed aimless exists on the machine, remove it first — its
    in RAM only                journals on disk                  journals on disk          in RAM only
 ```
 
+## Reach a remote daemon over SSH
+
+Aimless normally runs the daemon as a child of the desktop app, so when your
+laptop is off, your node is offline too. To keep a node online 24/7 — and have
+it store-and-forward while you're away — run a daemon somewhere always-on (a
+VPS, or the webtop container in `AIMLESS_MODE=daemon_only`, see the docker
+README) and point the desktop GUI at it over an **SSH tunnel**.
+
+The daemon's API is a Unix socket (`api.sock`). The GUI's **Remote daemon
+(SSH)** settings (hamburger menu) opens a tunnel that creates a local
+`remote-api.sock` whose traffic is forwarded, encrypted, to the remote socket —
+so no API port is ever exposed, and auth is your normal SSH key/agent.
+
+- In the settings dialog, fill in the SSH **host** (`user@host`), the **remote
+  socket path** (the `api.sock` path on the SSH host, e.g. `…/aimless-data/
+  state/api.sock` for the container's bind mount), optionally an identity key,
+  and hit **Test connection**.
+- On save, restart the app to apply. The local daemon stays dormant; the GUI
+  talks to the remote one.
+- Everything that needs the daemon (history, attachments, presence) works over
+  the tunnel exactly as if it were local.
+
+> **One GUI per daemon socket.** Don't run two GUIs against the same daemon
+> socket at the same time — e.g. the webtop GUI *and* your laptop GUI
+> simultaneously. Both receive every message and both may ACK attachments, so
+> the first to finish a file transfer frees the daemon's copy before the other
+> can fetch it. Use one at a time.
+
 ## Build from source
 
 ```sh
@@ -92,6 +120,11 @@ pulls this image and binds the ports to `127.0.0.1` only. If you expose it on a
 public host, put it behind a TLS reverse proxy with auth or an SSH tunnel —
 and **change `VNC_PASS`** (`aimless` is only the default; whoever can reach the
 page gets your desktop with it).
+
+Set **`AIMLESS_MODE=daemon_only`** to run just the daemon — no X/VNC/GUI — as a
+RAM-cheap 24/7 mailbox that your laptop GUI reaches over SSH (see *Reach a
+remote daemon over SSH* above). Init your identity in the browser first, then
+flip the mode.
 
 ## Security model
 

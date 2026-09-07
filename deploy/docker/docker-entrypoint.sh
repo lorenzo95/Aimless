@@ -29,6 +29,20 @@ fetch() {
 fetch /data/bin/aimless.pyz          "$BASE/aimless.pyz"
 fetch /data/bin/aimlessd-linux-amd64 "$BASE/aimlessd-linux-amd64"
 
+# AIMLESS_MODE=daemon_only runs just the daemon (no X/VNC/GUI stack), for use
+# as a 24/7 remote mailbox reached over an SSH tunnel. Any other value (or
+# unset) keeps the full supervised webtop. supervisord expands %(ENV_RUN_GUI)s
+# in autostart, so the toggle is computed here as a boolean string.
+if [ "${AIMLESS_MODE:-webtop}" = "daemon_only" ]; then
+    export RUN_GUI=false
+else
+    export RUN_GUI=true
+fi
+
+# supervisord refuses to start unless every %(ENV_...)s it references is set —
+# including VNC_PASS, which only matters when the GUI stack is running.
+export VNC_PASS="${VNC_PASS:-}"
+
 chown -R aimless:aimless /data
 
 exec su-exec aimless:aimless /usr/bin/supervisord -n -c /etc/supervisord.conf
