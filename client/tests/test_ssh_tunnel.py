@@ -64,6 +64,35 @@ def test_ssh_incomplete_config_not_enabled(ssh_prefs_env):
     assert gtkui.sock_path() == str(home / "api.sock")
 
 
+def test_ssh_prefs_roundtrip_persists(ssh_prefs_env):
+    """The dialog's save flow: prefs['ssh'] written via save_prefs must survive
+    a reload (as on app restart) — masking aside, values must persist."""
+    home, config = ssh_prefs_env
+    prefs = gtkui.load_prefs()
+    new_ssh = {
+        "enabled": True,
+        "host": "debian@192.168.1.111",
+        "remote_socket": "/srv/aimless/state/api.sock",
+        "identity": "/home/me/.ssh/id_ed25519",
+    }
+    prefs["ssh"] = new_ssh
+    gtkui.save_prefs(prefs)
+    assert gtkui.load_prefs()["ssh"] == new_ssh
+    assert gtkui.ssh_prefs() == new_ssh
+
+
+def test_ssh_prefs_save_without_identity_drops_key(ssh_prefs_env):
+    """When the identity field is left empty, no 'identity' key is stored, and
+    the round-trip must not resurrect a stale one."""
+    home, config = ssh_prefs_env
+    prefs = gtkui.load_prefs()
+    prefs["ssh"] = {"enabled": True, "host": "me@host", "remote_socket": "/srv/api.sock"}
+    gtkui.save_prefs(prefs)
+    saved = gtkui.load_prefs()["ssh"]
+    assert "identity" not in saved
+    assert saved["enabled"] and saved["host"] == "me@host"
+
+
 def test_supervisor_remote_mode(ssh_prefs_env, monkeypatch):
     home, config = ssh_prefs_env
     write_ssh_prefs(config, {

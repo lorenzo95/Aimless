@@ -2365,12 +2365,11 @@ class AimlessWindow(Gtk.Window):
         box.set_spacing(8)
         box.set_border_width(10)
 
-        def row(label, default, is_password=False):
+        def row(label, placeholder, default):
             h = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             h.pack_start(Gtk.Label(label=label, xalign=0.0, width_chars=18), False, False, 0)
             e = Gtk.Entry()
-            if is_password:
-                e.set_visibility(False)
+            e.set_placeholder_text(placeholder)
             e.set_text(default or "")
             e.set_hexpand(True)
             h.pack_start(e, True, True, 0)
@@ -2380,10 +2379,9 @@ class AimlessWindow(Gtk.Window):
         enabled = Gtk.CheckButton(label="Use SSH tunnel to a remote daemon")
         enabled.set_active(bool(ssh.get("enabled")))
         box.add(enabled)
-        host = row("Host", ssh.get("host") or "", "user@host")
-        remote = row("Remote socket path", ssh.get("remote_socket") or "",
-                     "/abs/path/to/api.sock")
-        ident = row("Identity key (optional)", ssh.get("identity") or "", "~/.ssh/id_ed25519")
+        host = row("Host", "user@host", ssh.get("host") or "")
+        remote = row("Remote socket path", "/abs/path/to/api.sock", ssh.get("remote_socket") or "")
+        ident = row("Identity key (optional)", "~/.ssh/id_ed25519", ssh.get("identity") or "")
         hint = Gtk.Label(label=("Remote socket is the api.sock path on the SSH host.\n"
                                 "Local socket is kept at %s." %
                                 os.path.join(CONFIG_DIR, "remote-api.sock")),
