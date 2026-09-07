@@ -1050,6 +1050,49 @@ def test_gui_file_send_queues_and_renders(gtk_app, tmp_path):
     assert _pump(win, save_btn, timeout=10), "sent attachment must render with a Save button"
 
 
+def test_gui_file_send_to_room(gtk_app, tmp_path):
+    """Regression: sending an attachment into a 3+ member room used to pass the
+    raw members dict (node-hex -> info) into send_file_room, whose per-member
+    loop does m["node"] — iterating a dict yields string keys, so it raised
+    TypeError: string indices must be integers inside the async worker. The
+    call site must convert to member-info dicts first (mirroring text-send),
+    and every non-self member must actually receive the chunks."""
+    app = gtk_app
+    win = app["win"]
+    bob = app["bob"]
+    a_node = app["a_node"]
+    b_node = app["b_node"]
+
+    carol_identity = crypto.new_identity()
+    chosen = [{"node": b_node, "pubkey": bob.pubkey_hex, "screen": "Bob"},
+              {"node": "cd" * 32, "pubkey": bytes(carol_identity.verify_key).hex(),
+               "screen": "Carol"}]
+    win.messages.create_room(chosen)
+    conv = next(k for k, t in win.messages.threads.items() if t.get("is_room"))
+    thread = win.messages.threads[conv]
+    win.messages.thread_list.select_row(thread["row"])
+
+    f = tmp_path / "room.bin"
+    f.write_bytes(b"room attachment " * 4000)
+    win.messages._send_file(thread, str(f), "room.bin", os.path.getsize(str(f)))
+
+    def cached_sent():
+        return [m for m in win.session.cache.msgs(conv)
+                if m.get("attachment") and m["dir"] == "out"]
+    assert _pump(win, cached_sent, timeout=15), "room attachment never cached"
+
+    def bob_got_chunks():
+        try:
+            return bool(bob.daemon.request("pendingattachments", **{"from": a_node}, timeout=5))
+        except Exception:
+            return False
+    assert _pump(win, bob_got_chunks, timeout=20), "chunks never reached bob's daemon"
+
+    def rendered():
+        return any(_walk_buttons(w, "Save") for w in win.messages.conversation.get_children())
+    assert _pump(win, rendered, timeout=15), "room attachment must render with a Save button"
+
+
 def test_gui_request_persists_until_answered(gtk_app):
     app = gtk_app
     win = app["win"]

@@ -1559,7 +1559,7 @@ class MessagesView(Gtk.Box):
                 chunk = protocol.make_chunk(tid, i, total, filename, mime_hint, sha, size, piece,
                                             conv=conv if is_room else None)
                 if is_room:
-                    seqs.update(client.send_file_room(thread["members"], conv, chunk))
+                    seqs.update(client.send_file_room(list(thread["members"].values()), conv, chunk))
                 else:
                     payload = protocol.build_file_payload(
                         session.identity, thread["contact"]["pubkey"], chunk)
