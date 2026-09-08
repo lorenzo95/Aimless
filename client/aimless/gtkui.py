@@ -2549,50 +2549,78 @@ class AimlessWindow(Gtk.Window):
 
     def _migrate_restart_prompt(self, host, identity, datadir, path, expected):
         """Ask the user to restart the remote daemon (auto docker restart if
-        possible, else show the command), then verify the node key took."""
+        possible, else show the command), then verify the node key took. One
+        dialog for the whole flow; Cancel always stays usable."""
         container = detect_remote_container(host, identity, datadir)
         dlg = Gtk.Dialog(title="Restart the server's daemon", transient_for=self, modal=True)
         box = dlg.get_content_area()
         box.set_spacing(8)
         box.set_border_width(10)
-        text = ("Your identity is copied to the server's daemon. Restart it so "
-                "it comes back as your node.")
-        if container:
-            text += "\n\nI will try to restart it for you."
-        box.add(Gtk.Label(label=text, xalign=0.0, wrap=True))
+        msg = Gtk.Label(label="", xalign=0.0, wrap=True)
+        box.add(msg)
         status = Gtk.Label(label="", xalign=0.0, wrap=True)
         box.add(status)
+
+        buttons = []
+
+        def set_message(text):
+            msg.set_text(text)
+
+        if container:
+            btn_restart = Gtk.Button(label="Restart the daemon now")
+            buttons.append(btn_restart)
+            box.add(btn_restart)
+        btn_manual = Gtk.Button(label="I've restarted it")
+        buttons.append(btn_manual)
+        box.add(btn_manual)
+        btn_cancel = Gtk.Button(label="Cancel")
+        buttons.append(btn_cancel)
+        box.add(btn_cancel)
+        dlg.show_all()
+        set_message("Your identity is copied to the server's daemon. Restart it "
+                    "so it comes back as your node."
+                    + ("\n\nI will try to restart it for you." if container else ""))
+
+        def start_verify(transition_msg):
+            # reuse the same dialog for the verify step; only Cancel stays
+            set_message(transition_msg)
+            for w in buttons:
+                w.hide()
+            btn_cancel.show()
+            btn_cancel.set_label("Cancel verification")
+            btn_cancel.set_sensitive(True)
+            self._migrate_verify(host, identity, path, expected, dlg, status,
+                                 cancel_handler=btn_cancel)
 
         def restart_now(*_):
             if not container:
                 status.set_text(
-                    f"Could not find the container. Run on the server yourself:\n"
-                    f"  sudo docker restart <container>\n"
-                    f"then click 'I've restarted it'.")
+                    "Could not find the container. Run on the server yourself:\n"
+                    "  sudo docker restart <container>\n"
+                    "then click 'I've restarted it'.")
                 return
+            btn_restart.set_sensitive(False)  # only this button - Cancel stays live
             status.set_text(f"restarting {container} ...")
-            dlg.set_sensitive(False)
+
             def worker():
-                rc, out, err = ssh_run(host, identity, f"docker restart {container}", timeout=60)
-                return rc, out, err
+                return ssh_run(host, identity, f"docker restart {container}", timeout=60)
+
             def done(res):
                 rc, out, err = res
                 if rc != 0:
+                    btn_restart.set_sensitive(True)
                     status.set_text(
                         f"Automatic restart failed (sudo needed?). Run this on the "
                         f"server yourself:\n  sudo docker restart {container}\n"
                         f"then click 'I've restarted it'.\n\n{err.strip()}")
-                    dlg.set_sensitive(True)
                     return
-                status.set_text(f"{container} restarted. Verifying the node key ...")
-                dlg.set_sensitive(True)
-                self._migrate_verify(host, identity, path, expected)
+                status.set_text(f"{container} restarted.")
+                start_verify("Restarted. Waiting for the server to come back as your node ...")
+
             run_async(worker, on_done=done)
 
         def restarted(*_):
-            status.set_text("Verifying the node key ...")
-            dlg.set_sensitive(False)
-            self._migrate_verify(host, identity, path, expected)
+            start_verify("Waiting for the server to come back as your node ...")
 
         def cancelled(*_):
             dlg.destroy()
@@ -2601,29 +2629,15 @@ class AimlessWindow(Gtk.Window):
                               "to finish).")
 
         if container:
-            btn_restart = Gtk.Button(label="Restart the daemon now")
             btn_restart.connect("clicked", restart_now)
-            box.add(btn_restart)
-        btn_manual = Gtk.Button(label="I've restarted it")
         btn_manual.connect("clicked", restarted)
-        box.add(btn_manual)
-        btn_cancel = Gtk.Button(label="Cancel")
         btn_cancel.connect("clicked", cancelled)
-        box.add(btn_cancel)
-        dlg.show_all()
 
-    def _migrate_verify(self, host, identity, path, expected):
-        """Poll the remote daemon until whoami reports the migrated node key;
-        then record the pair + relocation and clear the mismatch banner."""
-        dlg = Gtk.Dialog(title="Verifying your node", transient_for=self, modal=True)
-        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        box = dlg.get_content_area()
-        box.set_spacing(8)
-        box.set_border_width(10)
-        label = Gtk.Label(label="Waiting for the server to come back as your node ...",
-                          xalign=0.0, wrap=True)
-        box.add(label)
-        dlg.show_all()
+    def _migrate_verify(self, host, identity, path, expected, dlg, status,
+                        cancel_handler=None):
+        """Poll the remote daemon until whoami reports the migrated node key,
+        reusing the open dialog (Cancel stays live). Then record the pair +
+        relocation and clear the mismatch banner."""
         cancelled = {"v": False}
 
         def on_cancel(*_):
@@ -2632,20 +2646,19 @@ class AimlessWindow(Gtk.Window):
             self.activity.log("migrate node key: verification cancelled - files "
                               "are staged; restart the daemon later to finish.")
 
-        for child in dlg.get_action_area().get_children():
-            if isinstance(child, Gtk.Button):
-                child.connect("clicked", on_cancel)
+        if cancel_handler is not None:
+            cancel_handler.connect("clicked", on_cancel)
+
+        status.set_text("Checking ...")
 
         def worker():
-            ok = verify_remote_node_key(host, identity, path, expected,
-                                        timeout=180)
-            return ok
+            return verify_remote_node_key(host, identity, path, expected, timeout=180)
 
         def done(ok):
             if cancelled["v"]:
                 return
-            dlg.destroy()
             if ok:
+                dlg.destroy()
                 prefs = load_prefs()
                 prefs["last_node_key"] = expected
                 prefs["node_relocated"] = {
@@ -2658,14 +2671,18 @@ class AimlessWindow(Gtk.Window):
                 self.activity.log("node key migrated - remote daemon now answers "
                                   "with the expected identity")
             else:
-                self.activity.log("migrate node key: the remote daemon did not come "
-                                  "up with the new key - check it restarted")
+                status.set_text("The server did not come back with your node. "
+                                "It may not have restarted - check it, then click "
+                                "'I've restarted it' to retry, or Cancel.")
+                if cancel_handler is not None:
+                    cancel_handler.set_sensitive(True)
 
         def fail(exc):
             if cancelled["v"]:
                 return
-            dlg.destroy()
-            self.activity.log(f"migrate node key verification failed: {exc}")
+            status.set_text(f"Verification failed: {exc}")
+            if cancel_handler is not None:
+                cancel_handler.set_sensitive(True)
 
         run_async(worker, on_done=done, on_error=fail)
 

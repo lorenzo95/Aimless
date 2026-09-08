@@ -1809,3 +1809,76 @@ def test_do_migrate_node_requires_local_key(ssh_prefs_env, monkeypatch):
     win.do_migrate_node()
     assert shown, "a clear 'no local node.key' message must be shown"
     win.destroy()
+
+
+def test_migrate_restart_prompt_cancel_stays_live(ssh_prefs_env, monkeypatch):
+    """Regression: the restart-prompt used to grey out the WHOLE dialog
+    (dlg.set_sensitive(False)) so Cancel was dead while the async docker
+    restart ran - a stuck grey window. Only the restart button must disable;
+    Cancel stays usable, and the same dialog is reused for verify."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+
+    home, config = ssh_prefs_env
+    win = Gtk.Window()
+    win.show_all()
+    win.activity = type("A", (), {"log": lambda self, *a, **k: None})()
+    win._migrate_restart_prompt = gtkui.AimlessWindow._migrate_restart_prompt.__get__(win)
+    win._migrate_verify = lambda *a, **k: None
+
+    monkeypatch.setattr(gtkui, "detect_remote_container", lambda *a, **k: "aimless-webtop")
+    monkeypatch.setattr(gtkui, "ssh_run", lambda *a, **k: (0, "", ""))
+
+    result = {}
+    deadline = time.time() + 8
+    step = {"v": 0}
+
+    def pump():
+        while Gtk.events_pending():
+            Gtk.main_iteration_do(False)
+
+    def drive():
+        if time.time() > deadline:
+            return False
+        candidates = [w for w in Gtk.Window.list_toplevels()
+                      if isinstance(w, Gtk.Dialog)
+                      and w.get_title() == "Restart the server's daemon"]
+        if not candidates:
+            return True
+        dlg = candidates[0]
+        btns = [b for b in _walk(dlg) if isinstance(b, Gtk.Button)]
+        labels = {b.get_label() for b in btns}
+        if step["v"] == 0:
+            assert "Cancel" in labels
+            restart = next(b for b in btns if b.get_label() == "Restart the daemon now")
+            restart.emit("clicked")
+            step["v"] = 1
+            pump()
+            return True
+        if step["v"] == 1:
+            pump()
+            for b in btns:
+                if b.get_label() == "Restart the daemon now":
+                    assert not b.get_sensitive(), "restart button disabled during restart"
+                if b.get_label() == "Cancel":
+                    assert b.get_sensitive(), "Cancel must stay enabled while restart runs"
+            step["v"] = 2
+            return True
+        if step["v"] == 2:
+            pump()
+            result["transitioned"] = True
+            return False
+        return True
+
+    win._migrate_restart_prompt("me@host", None, "/srv/state",
+                                "/srv/state/api.sock", "aabb")
+    while True:
+        pump()
+        if result.get("transitioned"):
+            break
+        if not drive():
+            break
+        time.sleep(0.02)
+    win.destroy()
+    assert result.get("transitioned"), "restart prompt never reached the verify transition"
