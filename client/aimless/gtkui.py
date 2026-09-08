@@ -389,19 +389,24 @@ class DaemonSupervisor:
         return daemon_binary()
 
     def is_running(self):
-        if self.remote:
-            if not self.tunnel.is_ready():
-                return False
-            try:
-                DaemonClient(self.sock).close()
-                return True
-            except Exception:
-                return False
+        # Cheap pre-check for remote mode: if the tunnel itself isn't even up,
+        # don't pay for a round trip. But a bare connect through a live tunnel
+        # proves nothing about the daemon behind it — SSH creates the local
+        # forward listener as soon as it authenticates, even if the remote
+        # socket path is wrong or nothing answers there. So "is it working"
+        # always requires a genuine whoami reply, local and remote alike.
+        if self.remote and not self.tunnel.is_ready():
+            return False
+        d = None
         try:
-            DaemonClient(self.sock).close()
+            d = DaemonClient(self.sock)
+            d.request("whoami", timeout=5)
             return True
         except Exception:
             return False
+        finally:
+            if d is not None:
+                d.close()
 
     def status(self):
         d = None
@@ -2953,7 +2958,7 @@ class AimlessApp:
                     passphrase = new_pw
                     session = Session(passphrase)
                     break
-                except OSError as e:
+                except (OSError, DaemonError) as e:
                     err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE,
                                             text=f"could not create identity: {e}")
                     err.run()
@@ -2967,7 +2972,7 @@ class AimlessApp:
                     session = Session(passphrase)
                 except ValueError:
                     passphrase = None
-                except OSError as e:
+                except (OSError, DaemonError) as e:
                     session = None
                     self.log(f"daemon unreachable during unlock ({e}) — retrying")
             if not passphrase:
@@ -2984,7 +2989,7 @@ class AimlessApp:
                                                 text="wrong passphrase or corrupted identity — try again")
                         err.run()
                         err.destroy()
-                    except OSError as e:
+                    except (OSError, DaemonError) as e:
                         err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE,
                                                 text=f"daemon not reachable: {e}\nretry after starting aimless")
                         err.run()

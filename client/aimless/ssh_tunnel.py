@@ -28,6 +28,7 @@ class SSHTunnel:
 
     def command(self):
         cmd = ["ssh", "-N",
+               "-o", "BatchMode=yes",
                "-o", "ExitOnForwardFailure=yes",
                "-o", "ServerAliveInterval=60",
                "-o", "ServerAliveCountMax=3",

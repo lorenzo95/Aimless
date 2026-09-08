@@ -550,6 +550,100 @@ def test_ssh_startup_lockout_escape_hatch(ssh_prefs_env, monkeypatch):
     assert saved["enabled"] is False, "SSH should be disabled by the escape hatch"
 
 
+def test_startup_escape_hatch_with_real_whoami_supervisor(ssh_prefs_env, monkeypatch):
+    """End-to-end wiring of the two 0.7.11 pieces: a REAL DaemonSupervisor whose
+    tunnel comes up but whose whoami times out must drive _setup's while-loop
+    into the escape hatch (is_running()==False -> ensure() raises), and the
+    APPLY click must disable SSH and fall through to local startup."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+    import socket as _socket
+    import threading as _threading
+
+    home, config = ssh_prefs_env
+    write_ssh_prefs(config, {
+        "enabled": True,
+        "host": "user@host",
+        "remote_socket": "/srv/aimless/api.sock",
+    })
+
+    # real unix listener that accepts and holds connections open without
+    # replying — a live tunnel to a dead daemon. (accept-and-close would make
+    # the client reconnect-loop and reset the whoami deadline forever.)
+    local = str(config / "remote-api.sock")
+    server = _socket.socket(_socket.AF_UNIX)
+    server.bind(local)
+    server.listen(8)
+    held = []
+
+    def accept_loop():
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            held.append(conn)  # keep open, never answer
+
+    _threading.Thread(target=accept_loop, daemon=True).start()
+
+    class ReadyTunnel:
+        local_socket = local
+        host = "user@host"
+
+        def is_ready(self):
+            return True
+
+        def start(self, log=None):
+            return True
+
+        def stop(self):
+            pass
+
+    class LocalSupervisor:
+        remote = False
+
+        def ensure(self, log=None):
+            pass
+
+    # first _setup() call: the real supervisor opens a tunnel to the dead
+    # listener, is_running() does whoami -> False, ensure() raises.
+    # FakeMD returns APPLY -> ssh disabled, supervisor replaced, loop retries
+    # with LocalSupervisor, which succeeds.
+    app = gtkui.AimlessApp()
+    app.supervisor = gtkui.DaemonSupervisor()
+    app.supervisor.tunnel = ReadyTunnel()
+    monkeypatch.setattr(gtkui, "acquire_app_lock", lambda: (type("FH", (), {"close": lambda s: None})(), None))
+    monkeypatch.setattr(gtkui, "TrayIcon",
+                        lambda app: type("T", (), {"have_tray": True,
+                                                   "is_embedded": lambda self: True})())
+    monkeypatch.setattr(app, "open_window", lambda: None)
+    monkeypatch.setattr(gtkui, "DaemonSupervisor", lambda: LocalSupervisor())
+
+    real_md = gtkui.Gtk.MessageDialog
+    responses = iter([Gtk.ResponseType.APPLY])
+
+    class FakeMD(real_md):
+        def run(self, *a):
+            return next(responses)
+
+    monkeypatch.setattr(gtkui.Gtk, "MessageDialog", FakeMD)
+
+    rc = app._setup(open_window=True)
+    assert rc is None
+    assert gtkui.load_prefs()["ssh"]["enabled"] is False
+    server.close()
+    for c in held:
+        try:
+            c.close()
+        except OSError:
+            pass
+    try:
+        os.unlink(local)
+    except OSError:
+        pass
+
+
 def _walk(w):
     Gtk = gtkui.Gtk
     out = [w]
@@ -648,12 +742,87 @@ def test_supervisor_remote_mode(ssh_prefs_env, monkeypatch):
     assert not spawned
 
 
+def test_supervisor_is_running_requires_whoami(ssh_prefs_env, monkeypatch):
+    """The exact production failure: an SSH tunnel whose local listener accepts
+    connections but nothing answers a whoami behind it (wrong remote path, IP
+    changed, daemon down). is_running() must return False — a bare socket
+    connect through a live tunnel says nothing about the daemon — and ensure()
+    must raise, not silently report ready."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+
+    import socket as _socket
+    import threading as _threading
+
+    home, config = ssh_prefs_env
+    write_ssh_prefs(config, {
+        "enabled": True,
+        "host": "user@host",
+        "remote_socket": "/srv/aimless/api.sock",
+    })
+    sup = gtkui.DaemonSupervisor()
+    assert sup.remote is True
+
+    # A real unix socket that accepts connections and HOLDS them open without
+    # ever replying — exactly what a live-but-broken tunnel forward does: the
+    # local connect succeeds, but the whoami gets no reply and times out. (An
+    # accept-and-close listener would make the client reconnect-loop instead,
+    # which resets the request deadline and hangs forever.)
+    local = str(config / "remote-api.sock")
+    server = _socket.socket(_socket.AF_UNIX)
+    server.bind(local)
+    server.listen(8)
+    held = []
+
+    def accept_loop():
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            held.append(conn)  # keep open, never answer
+
+    t = _threading.Thread(target=accept_loop, daemon=True)
+    t.start()
+    try:
+        class ReadyTunnel:
+            local_socket = local
+            host = "user@host"
+
+            def is_ready(self):
+                return True
+
+            def start(self, log=None):
+                return True
+
+            def stop(self):
+                pass
+
+        sup.tunnel = ReadyTunnel()
+        assert not sup.is_running(), \
+            "is_running() must not be True when whoami gets no reply"
+        with pytest.raises(RuntimeError):
+            sup.ensure()
+    finally:
+        server.close()
+        for c in held:
+            try:
+                c.close()
+            except OSError:
+                pass
+        try:
+            os.unlink(local)
+        except OSError:
+            pass
+
+
 def test_tunnel_command_builds(ssh_prefs_env):
     t = SSHTunnel("user@host", "/srv/aimless/api.sock", "/tmp/remote-api.sock",
                   identity="~/.ssh/id_ed25519")
     cmd = t.command()
     assert cmd[0] == "ssh"
     assert "-N" in cmd
+    assert "BatchMode=yes" in cmd
     assert "-i" in cmd
     assert os.path.expanduser("~/.ssh/id_ed25519") in cmd
     assert "/tmp/remote-api.sock:/srv/aimless/api.sock" in cmd
