@@ -513,22 +513,37 @@ class DaemonSupervisor:
             except OSError:
                 pass
             return
-        pid = daemon_pid_from_socket()
-        if pid is None:
-            pid = read_pid(AIMLESSD_PID_FILE)
-        if pid is None and self.child:
+        # Prefer the process we spawned (instant, no network round trip).
+        # daemon_pid_from_socket() does a whoami — never use that as the
+        # liveness check after SIGTERM, because a dying daemon can't answer and
+        # the request stalls up to timeout+grace (the 10s hang on quit).
+        if self.child is not None:
             pid = self.child.pid
-        if pid is None:
-            pid = daemon_pid_from_procs()
+        else:
+            pid = daemon_pid_from_socket()
+            if pid is None:
+                pid = read_pid(AIMLESSD_PID_FILE)
+            if pid is None:
+                pid = daemon_pid_from_procs()
         if pid:
             try:
                 os.kill(pid, signal.SIGTERM)
             except OSError:
                 pass
+
+        def alive():
+            if self.child is not None:
+                return self.child.poll() is None
+            try:
+                os.kill(pid, 0)  # signal 0 = existence probe, instant
+                return True
+            except OSError:
+                return False
+
         deadline = time.time() + 5
         stopped = False
         while time.time() < deadline:
-            if not self.is_running():
+            if not alive():
                 stopped = True
                 break
             time.sleep(0.2)
@@ -538,6 +553,11 @@ class DaemonSupervisor:
             except OSError:
                 pass
             time.sleep(0.5)
+        if self.child is not None:
+            try:
+                self.child.wait(timeout=2)
+            except Exception:
+                pass
         try:
             os.remove(AIMLESSD_PID_FILE)
         except OSError:

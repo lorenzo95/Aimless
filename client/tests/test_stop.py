@@ -1,3 +1,4 @@
+import os
 import time
 
 import pytest
@@ -75,6 +76,45 @@ def test_stop_without_pidfile_stops_daemon_via_socket(tmp_path, monkeypatch):
         time.sleep(0.2)
     assert proc.poll() is not None, "daemon survived stop without a pidfile"
     assert not supervisor.is_running()
+
+
+def test_stop_waits_on_process_not_whoami(tmp_path, monkeypatch):
+    """Regression: stop() used to poll is_running(), a whoami round-trip, in the
+    SIGTERM wait loop — a dying daemon can't answer, so quit() stalled ~10s
+    (whoami timeout + reconnect grace). stop() must wait on process liveness
+    (child.poll / os.kill(pid,0)), never the API socket."""
+    import subprocess
+    home = _iso(tmp_path, monkeypatch)
+
+    # A daemon we spawned: stop() must prefer self.child and poll() it.
+    binary = gtkui.daemon_binary()
+    assert binary, "aimlessd binary must be built for this test"
+    proc = subprocess.Popen(
+        [binary, "-datadir", str(home), "-api", str(home / "api.sock"), "-peers", "none"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.time() + 15
+        while time.time() < deadline and proc.poll() is None:
+            if os.path.exists(str(home / "api.sock")):
+                break
+            time.sleep(0.1)
+
+        supervisor = gtkui.DaemonSupervisor()
+        supervisor.child = proc  # pretend we spawned it
+
+        # If stop() consults is_running() (the bug), this raises.
+        monkeypatch.setattr(gtkui.DaemonSupervisor, "is_running",
+                            lambda self: (_ for _ in ()).throw(AssertionError("stop() must not whoami")))
+
+        t0 = time.time()
+        supervisor.stop()
+        elapsed = time.time() - t0
+        assert elapsed < 6, f"stop() took {elapsed:.1f}s — waited on whoami, not the process"
+        assert proc.poll() is not None, "daemon not stopped"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
 
 
 def test_client_close_releases_fds_and_threads(tmp_path, monkeypatch):
