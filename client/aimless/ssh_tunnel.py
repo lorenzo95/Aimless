@@ -1,4 +1,4 @@
-"""ssh_tunnel.py — reach a remote aimlessd daemon through an SSH tunnel.
+"""ssh_tunnel.py - reach a remote aimlessd daemon through an SSH tunnel.
 
 The daemon listens on a local unix socket (api.sock). To talk to an always-on
 remote daemon (a VPS or the daemon_only container), the client opens an SSH
@@ -6,7 +6,7 @@ tunnel that creates a *local* unix socket whose traffic is forwarded, encrypted,
 to the remote socket. Everything else in the client keeps using plain AF_UNIX
 against that local path, so only this module knows a tunnel exists.
 
-`local_socket` defaults to <CONFIG_DIR>/remote-api.sock — deliberately a
+`local_socket` defaults to <CONFIG_DIR>/remote-api.sock - deliberately a
 different path from the local daemon's api.sock, so SSH mode never collides
 with a locally running daemon.
 """
@@ -68,7 +68,7 @@ class SSHTunnel:
             if self.child.poll() is not None:
                 self.child = None
                 raise RuntimeError(
-                    "ssh exited immediately — check the host/identity and that the "
+                    "ssh exited immediately - check the host/identity and that the "
                     "remote socket path is right (ssh -L exits on forward failure)")
             if self._local_ready():
                 return True

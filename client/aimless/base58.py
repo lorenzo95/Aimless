@@ -1,4 +1,4 @@
-"""Minimal base58 (no checksum) — vendored to avoid a new dependency.
+"""Minimal base58 (no checksum) - vendored to avoid a new dependency.
 
 Pure alphabet transform over the standard Bitcoin alphabet. Preserves leading
 zero bytes so 32-byte keys round-trip exactly. Decoding raises ValueError on

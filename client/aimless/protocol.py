@@ -100,7 +100,7 @@ def reassemble_file(chunks: dict, total: int) -> bytes:
 
 def validate_send_size(size: int) -> None:
     if size > MAX_SEND_BYTES:
-        raise ValueError(f"file is {size:,} bytes — aimless caps attachments at {MAX_SEND_BYTES:,} bytes")
+        raise ValueError(f"file is {size:,} bytes - aimless caps attachments at {MAX_SEND_BYTES:,} bytes")
 
 
 def save_contacts(path: str, contacts: dict) -> None:

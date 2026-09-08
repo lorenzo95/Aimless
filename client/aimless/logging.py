@@ -16,7 +16,7 @@ def log_fn(path, max_bytes=MAX_LOG_BYTES):
     """Return a log(line) function appending timestamped lines to path.
 
     Rotates the file to <path>.1 once it exceeds max_bytes.
-    Never raises — logging must not take the app down.
+    Never raises - logging must not take the app down.
     """
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

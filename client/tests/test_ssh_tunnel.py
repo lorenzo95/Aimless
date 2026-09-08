@@ -893,6 +893,75 @@ def test_quit_closes_daemon_before_stopping_supervisor(ssh_prefs_env, monkeypatc
         f"daemon must be closed before supervisor stops, got: {order!r}"
 
 
+def test_client_set_detached_sends_op(ssh_prefs_env, monkeypatch):
+    """Client.set_detached seals the offline text and sends the setdetached op,
+    so the daemon can relay it while no GUI is attached."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+
+    home, config = ssh_prefs_env
+    import tempfile
+    monkeypatch.setattr(gtkui, "CONFIG_DIR", str(config))
+
+    from aimless.daemon import Client
+
+    sent = {}
+    class FakeDaemon:
+        def request(self, op, **kw):
+            sent["op"] = op
+            sent["to"] = kw.get("to")
+            sent["payload"] = kw.get("payload")
+            return {}
+    import aimless.crypto as _crypto
+    ident = _crypto.new_identity()
+    buddy_hex = bytes(ident.verify_key).hex()
+    client = Client(FakeDaemon(), ident, "me")
+    client.set_detached(buddy_hex, "n" * 64, "away - client offline")
+    assert sent["op"] == "setdetached"
+    assert sent["to"] == "n" * 64
+    assert sent["payload"]
+    # the payload must be a real sealed status blob that opens to our text
+    from aimless import protocol
+    st = protocol.open_status(ident, sent["payload"])
+    assert st.get("away") == "away - client offline"
+
+
+def test_push_detached_sends_for_every_contact(ssh_prefs_env, monkeypatch):
+    """The window pushes a pre-sealed offline blob for every contact at startup
+    (and after adding a buddy), so the daemon has the detached status."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    home, config = ssh_prefs_env
+    sent = []
+
+    class FakeClient:
+        def set_detached(self, pubkey, node, text):
+            sent.append((node, text))
+
+    class FakeSession:
+        contacts = lambda self: {"bob": {"pubkey": "p", "node": "n1"},
+                                 "carol": {"pubkey": "p2", "node": "n2"}}
+        client = FakeClient()
+
+    win = Gtk.Window()
+    win.show_all()
+    win.session = FakeSession()
+    win.prefs = {}
+    win._push_detached = gtkui.AimlessWindow._push_detached.__get__(win)
+    win._push_detached()
+    assert sorted(n for n, _ in sent) == ["n1", "n2"]
+    assert all(t == "away - client offline" for _, t in sent)
+
+    # custom text from prefs is used
+    win.prefs = {"offline_status": "custom offline"}
+    sent.clear()
+    win._push_detached()
+    assert all(t == "custom offline" for _, t in sent)
+    win.destroy()
+
+
 def test_pair_tracking_mismatch(ssh_prefs_env, monkeypatch):
     """After connecting on one node, switching to another (with contacts) is a
     mismatch; no contacts or same node is not."""

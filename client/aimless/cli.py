@@ -55,7 +55,7 @@ def get_passphrase(confirm: bool = False) -> str:
 def load_or_exit():
     path = identity_path()
     if not os.path.exists(path):
-        print("no identity found — run: aimless init", file=sys.stderr)
+        print("no identity found - run: aimless init", file=sys.stderr)
         sys.exit(1)
     return crypto.load_identity(path, get_passphrase())
 
@@ -93,7 +93,7 @@ def cmd_init(args):
 def cmd_invite(args):
     path = identity_path()
     if not os.path.exists(path):
-        print("no identity found — run: aimless init", file=sys.stderr)
+        print("no identity found - run: aimless init", file=sys.stderr)
         sys.exit(1)
     pw = get_passphrase()
     identity = crypto.load_identity(path, pw)
@@ -103,7 +103,7 @@ def cmd_invite(args):
         daemon = connect_daemon()
         node_hex = daemon.request("whoami")["key"]
     except (DaemonError, KeyError, IndexError):
-        print("warning: daemon unreachable — invite will lack routing key", file=sys.stderr)
+        print("warning: daemon unreachable - invite will lack routing key", file=sys.stderr)
         print("hint: start aimlessd, then re-run aimless invite", file=sys.stderr)
         sys.exit(1)
     print(protocol.make_invite(identity, node_hex, screen))
@@ -122,7 +122,7 @@ def cmd_add(args):
         contacts.setdefault("_self", {})["pubkey"] = self_pk
         protocol.save_contacts(contacts_path(), contacts)
     if self_pk and client_hex == self_pk:
-        print("that's your own invite — send it to a friend, not to yourself", file=sys.stderr)
+        print("that's your own invite - send it to a friend, not to yourself", file=sys.stderr)
         sys.exit(1)
     petname = args.petname or screen
     for k, c in contacts.items():
@@ -152,7 +152,7 @@ def cmd_remove(args):
 def resolve_buddy(name: str) -> dict:
     contacts = protocol.load_contacts(contacts_path())
     if name not in contacts:
-        print(f"unknown contact: {name} — add them first", file=sys.stderr)
+        print(f"unknown contact: {name} - add them first", file=sys.stderr)
         sys.exit(1)
     return contacts[name]
 
@@ -203,7 +203,7 @@ def cmd_send(args):
 
 def _passphrase_for_cache() -> str:
     if not os.path.exists(identity_path()):
-        print("no identity found — run: aimless init", file=sys.stderr)
+        print("no identity found - run: aimless init", file=sys.stderr)
         sys.exit(1)
     return get_passphrase()
 
@@ -234,14 +234,14 @@ def cmd_unblock(args):
     try:
         daemon = DaemonClient(socket_path())
     except (OSError, FileNotFoundError) as e:
-        print(f"daemon not reachable ({e}) — the client mute is cleared; start the app to fully apply",
+        print(f"daemon not reachable ({e}) - the client mute is cleared; start the app to fully apply",
               file=sys.stderr)
         return
     try:
         get_client(daemon).unblock(node)
         print("daemon block removed")
     except DaemonError as e:
-        print(f"daemon unblock failed: {e} — client mute cleared", file=sys.stderr)
+        print(f"daemon unblock failed: {e} - client mute cleared", file=sys.stderr)
     finally:
         daemon.close()
 
@@ -345,7 +345,7 @@ def cmd_gui(args):
         if "Namespace" in str(e):
             hint = "the Gtk introspection data is missing: sudo apt install gir1.2-gtk-3.0"
         msg = (f"GUI unavailable: {e}\n{hint}\n"
-               f"(also needs a display — check `echo $DISPLAY`; over ssh use ssh -X)")
+               f"(also needs a display - check `echo $DISPLAY`; over ssh use ssh -X)")
         print(msg, file=sys.stderr)
         config_dir = os.environ.get("AIMLESS_CONFIG") or os.path.expanduser("~/.config/aimless")
         try:
@@ -361,7 +361,7 @@ def cmd_tray(args):
     try:
         from . import gtkui
     except ImportError as e:
-        print(f"GUI unavailable ({e}) — install the GTK stack: sudo apt install python3-gi", file=sys.stderr)
+        print(f"GUI unavailable ({e}) - install the GTK stack: sudo apt install python3-gi", file=sys.stderr)
         sys.exit(1)
     sys.exit(gtkui.run_app(open_window=False))
 
@@ -370,7 +370,7 @@ def cmd_autostart(args):
     try:
         from . import gtkui
     except ImportError as e:
-        print(f"GUI unavailable ({e}) — install the GTK stack: sudo apt install python3-gi", file=sys.stderr)
+        print(f"GUI unavailable ({e}) - install the GTK stack: sudo apt install python3-gi", file=sys.stderr)
         sys.exit(1)
     print(gtkui.install_autostart())
 
@@ -379,7 +379,7 @@ def cmd_stop(args):
     try:
         from . import gtkui
     except ImportError as e:
-        print(f"GUI unavailable ({e}) — install the GTK stack: sudo apt install python3-gi", file=sys.stderr)
+        print(f"GUI unavailable ({e}) - install the GTK stack: sudo apt install python3-gi", file=sys.stderr)
         sys.exit(1)
     stopped = gtkui.stop_all()
     print("stopped: " + (", ".join(stopped) if stopped else "nothing was running"))
@@ -391,7 +391,7 @@ def main():
 
     parser = argparse.ArgumentParser(
         prog="aimless",
-        description="aimless — serverless chat with an AIM heart\n\n"
+        description="aimless - serverless chat with an AIM heart\n\n"
                     "run `aimless` with no arguments to start everything: tray + daemon + messages window",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--version", action="version", version=f"aimless {__version__}")
@@ -426,7 +426,7 @@ def main():
     p_away.add_argument("message", nargs="*")
 
     sub.add_parser("gui", help="open the messages window (same as running aimless with no arguments)")
-    sub.add_parser("tray", help="start hidden in the notification area — window opens on first tray click (autostart)")
+    sub.add_parser("tray", help="start hidden in the notification area - window opens on first tray click (autostart)")
     sub.add_parser("autostart", help="install login autostart for the full `aimless` stack")
     sub.add_parser("stop", help="shut down the app, tray icon and daemon")
 

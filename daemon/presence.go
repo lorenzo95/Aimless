@@ -24,6 +24,10 @@ type peerPresence struct {
 	lastSeen time.Time
 	in       *statusIn
 	out      *statusOut
+	// detached is a client-supplied, pre-sealed status blob shown to the peer
+	// while NO API client is attached (the always-on-daemon / GUI-off case).
+	// Opaque like `out` — the daemon only relays it, never reads it.
+	detached *statusOut
 }
 
 type Presence struct {
@@ -32,6 +36,7 @@ type Presence struct {
 	probeInterval time.Duration
 	onlineWindow  time.Duration
 	peers         map[string]*peerPresence
+	attached      bool
 }
 
 func NewPresence(mail *Mail, probeInterval time.Duration) *Presence {
@@ -106,6 +111,60 @@ func (p *Presence) SetStatus(pub ed25519.PublicKey, payload []byte) (uint64, err
 	return seq, err
 }
 
+// SetDetached stores the client's pre-sealed 'away - client offline' blob for
+// one peer. It is relayed instead of the live status while no API client is
+// attached, so buddies see the offline message on the always-on daemon.
+func (p *Presence) SetDetached(pub ed25519.PublicKey, payload []byte) {
+	p.mu.Lock()
+	pp := p.keyFor(pub)
+	if pp.detached == nil {
+		pp.detached = &statusOut{}
+	}
+	pp.detached.seq++
+	pp.detached.payload = payload
+	p.mu.Unlock()
+}
+
+// SetAttached flips the client-attached state (called by the API server when
+// the first client connects / the last one disconnects) and immediately pushes
+// the appropriate blob so peers see the change without waiting for a probe tick.
+func (p *Presence) SetAttached(attached bool) {
+	p.mu.Lock()
+	p.attached = attached
+	targets := make([]ed25519.PublicKey, 0, len(p.peers))
+	for peerHex := range p.peers {
+		if keyBytes, err := hex.DecodeString(peerHex); err == nil && len(keyBytes) == ed25519.PublicKeySize {
+			targets = append(targets, ed25519.PublicKey(keyBytes))
+		}
+	}
+	p.mu.Unlock()
+	for _, pub := range targets {
+		if p.mail.IsBlocked(pub) {
+			continue
+		}
+		p.mu.Lock()
+		pp := p.peers[hex.EncodeToString(pub)]
+		st := p.blobFor(pp)
+		p.mu.Unlock()
+		if st != nil {
+			_ = p.mail.SendStatus(pub, st.seq, st.payload)
+		}
+	}
+}
+
+// blobFor returns the status blob to relay for a peer: the detached offline
+// blob while unattached (falling back to the live one if none was supplied),
+// otherwise the live status.
+func (p *Presence) blobFor(pp *peerPresence) *statusOut {
+	if pp == nil {
+		return nil
+	}
+	if !p.attached && pp.detached != nil {
+		return pp.detached
+	}
+	return pp.out
+}
+
 func (p *Presence) PathUp(pub ed25519.PublicKey) {
 	p.probeOne(pub)
 }
@@ -140,10 +199,7 @@ func (p *Presence) probeOne(pub ed25519.PublicKey) {
 	_ = p.mail.SendProbe(pub)
 	p.mu.Lock()
 	pp := p.peers[hex.EncodeToString(pub)]
-	var st *statusOut
-	if pp != nil {
-		st = pp.out
-	}
+	st := p.blobFor(pp)
 	p.mu.Unlock()
 	if st != nil {
 		_ = p.mail.SendStatus(pub, st.seq, st.payload)

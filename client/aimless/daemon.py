@@ -16,6 +16,7 @@ RESPONSE_MAP = {
     "sendfile": "queued",
     "watch": "watching",
     "setstatus": "statusset",
+    "setdetached": "detachedset",
     "pendingattachments": "pendingattachments",
     "fetchattachment": "fetchattachment",
     "ackfile": "ackfile",
@@ -335,6 +336,14 @@ class Client:
         payload = protocol.seal_status(
             self.identity, buddy_client_hex, self.screen_name, away, ts=int(time.time() * 1000))
         return self.daemon.request("setstatus", to=buddy_node_hex, payload=payload)
+
+    def set_detached(self, buddy_client_hex: str, buddy_node_hex: str, text: str) -> dict:
+        """Pre-seal the status shown to this buddy while no GUI client is attached
+        (the always-on-daemon / offline case). The daemon relays it verbatim."""
+        from . import protocol
+        payload = protocol.seal_status(
+            self.identity, buddy_client_hex, self.screen_name, text, ts=int(time.time() * 1000))
+        return self.daemon.request("setdetached", to=buddy_node_hex, payload=payload)
 
     def history(self, buddy_node_hex: str, after_seq: int) -> list:
         return self.daemon.request("history", **{"from": buddy_node_hex, "seq": after_seq})

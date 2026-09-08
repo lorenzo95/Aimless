@@ -245,13 +245,14 @@ def test_gui_old_daemon_warns(gtk_app):
     app = gtk_app
     win = app["win"]
 
+    min_build = ".".join(map(str, gtkui.MIN_DAEMON_BUILD))
     win.activity.refresh_info({"build": "aimlessd/0.4.1", "peers_up": 1, "peers_total": 2,
                                "address": "x", "mtu": 65535})
     label = win.activity.info_label.get_text()
     assert "too old" in label, "an old daemon build must warn in the status line"
-    assert "0.5.2" in label, "warning must name the minimum build"
+    assert min_build in label, "warning must name the minimum build"
 
-    win.activity.refresh_info({"build": "aimlessd/0.5.2", "peers_up": 1, "peers_total": 2,
+    win.activity.refresh_info({"build": f"aimlessd/{min_build}", "peers_up": 1, "peers_total": 2,
                                "address": "x", "mtu": 65535})
     label = win.activity.info_label.get_text()
     assert "too old" not in label, "a current daemon must not warn"
@@ -461,7 +462,7 @@ def test_cancel_without_tray_logs_exit_and_no_window_exit_signal(gtk_app):
 
     app.tray = _Embedded()
     g.AimlessApp._cancel_or_quit(app)
-    assert app.logged[-1].startswith("cancel — keeping app in the system tray")
+    assert app.logged[-1].startswith("cancel - keeping app in the system tray")
 
     class _EmbeddedNoWindow(_Embedded):
         pass

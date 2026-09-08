@@ -13,7 +13,7 @@ import (
 	"sync"
 )
 
-const buildVersion = "aimlessd/0.5.6"
+const buildVersion = "aimlessd/0.5.7"
 
 type peerStatus struct {
 	URI     string `json:"uri"`
@@ -97,7 +97,11 @@ func (s *APIServer) acceptLoop() {
 			return
 		}
 		s.conns[conn] = struct{}{}
+		first := len(s.conns) == 1
 		s.mu.Unlock()
+		if first {
+			s.presence.SetAttached(true)
+		}
 		go s.handleConn(conn)
 	}
 }
@@ -109,7 +113,11 @@ func (s *APIServer) handleConn(conn net.Conn) {
 		}
 		s.mu.Lock()
 		delete(s.conns, conn)
+		last := len(s.conns) == 0
 		s.mu.Unlock()
+		if last {
+			s.presence.SetAttached(false)
+		}
 		conn.Close()
 	}()
 	scanner := bufio.NewScanner(conn)
@@ -171,6 +179,8 @@ func (s *APIServer) dispatch(conn net.Conn, req apiMessage) {
 		s.handleWatch(conn, req)
 	case "setstatus":
 		s.handleSetStatus(conn, req)
+	case "setdetached":
+		s.handleSetDetached(conn, req)
 	case "block":
 		s.handleBlock(conn, req, true)
 	case "unblock":
@@ -325,6 +335,29 @@ func (s *APIServer) handleSetStatus(conn net.Conn, req apiMessage) {
 		return
 	}
 	s.replyReq(conn, req, apiMessage{Op: "statusset", To: req.To, Seq: seq})
+}
+
+func (s *APIServer) handleSetDetached(conn net.Conn, req apiMessage) {
+	keyBytes, err := hex.DecodeString(req.To)
+	if err != nil {
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "bad key hex: " + err.Error()})
+		return
+	}
+	if len(keyBytes) != ed25519.PublicKeySize {
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: fmt.Sprintf("key must be %d hex chars", 2*ed25519.PublicKeySize)})
+		return
+	}
+	if s.mail.IsBlocked(ed25519.PublicKey(keyBytes)) {
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "peer is blocked"})
+		return
+	}
+	payload, err := base64.StdEncoding.DecodeString(req.Payload)
+	if err != nil {
+		s.replyReq(conn, req, apiMessage{Op: "error", Error: "bad payload base64: " + err.Error()})
+		return
+	}
+	s.presence.SetDetached(ed25519.PublicKey(keyBytes), payload)
+	s.replyReq(conn, req, apiMessage{Op: "detachedset", To: req.To})
 }
 
 func (s *APIServer) handleBlock(conn net.Conn, req apiMessage, block bool) {

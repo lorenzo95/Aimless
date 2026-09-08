@@ -143,3 +143,44 @@ func TestUnknownBuddyNotOnline(t *testing.T) {
 		t.Fatal("stranger should not be online")
 	}
 }
+
+func TestDetachedBlobSwap(t *testing.T) {
+	nodeA, mailA, presenceA, nodeB, _, presenceB := presenceFixture(t)
+
+	_ = mailA
+	// a client is attached (the APIServer sets this on first connect)
+	presenceA.SetAttached(true)
+	// live status while attached
+	if _, err := presenceA.SetStatus(nodeB.Pub, []byte("live")); err != nil {
+		t.Fatal(err)
+	}
+	// pre-sealed offline blob
+	presenceA.SetDetached(nodeB.Pub, []byte("away - client offline"))
+
+	// attached by default -> peers see the live blob
+	waitStatus := func(want string) {
+		t.Helper()
+		wantB64 := base64.StdEncoding.EncodeToString([]byte(want))
+		deadline := time.After(15 * time.Second)
+		for {
+			e := findEntry(t, presenceB.Snapshot(), hexString(nodeA.Pub))
+			if e != nil && e.StatusPayload == wantB64 {
+				return
+			}
+			select {
+			case <-deadline:
+				t.Fatalf("status never arrived at B, want %q: %+v", want, presenceB.Snapshot())
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+	}
+	waitStatus("live")
+
+	// detach -> peers immediately get the offline blob
+	presenceA.SetAttached(false)
+	waitStatus("away - client offline")
+
+	// reattach -> live blob comes back
+	presenceA.SetAttached(true)
+	waitStatus("live")
+}

@@ -429,3 +429,41 @@ func TestAPIBlocklistOp(t *testing.T) {
 		t.Fatalf("blocked after unblock = %v, want [%s]", resp.Blocked, hex2)
 	}
 }
+
+func TestAPISetDetachedAndAttachFlip(t *testing.T) {
+	_, _, presence, sock := startAPIFixture(t)
+	pub := randomPub(t)
+	pubHex := hex.EncodeToString(pub)
+	payload := base64.StdEncoding.EncodeToString([]byte("away - client offline"))
+
+	client := dialAPI(t, sock)
+	client.send(t, apiMessage{Op: "setdetached", To: pubHex, Payload: payload})
+	if resp := client.read(t, 5*time.Second); resp.Op != "detachedset" {
+		t.Fatalf("setdetached op = %s, want detachedset", resp.Op)
+	}
+
+	// the first connection means a client is attached
+	presence.mu.Lock()
+	attached := presence.attached
+	presence.mu.Unlock()
+	if !attached {
+		t.Fatal("first api connection should mark the client attached")
+	}
+
+	// closing the last connection marks it detached
+	client.conn.Close()
+	deadline := time.After(5 * time.Second)
+	for {
+		presence.mu.Lock()
+		a := presence.attached
+		presence.mu.Unlock()
+		if !a {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("last api connection close did not mark the client detached")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
