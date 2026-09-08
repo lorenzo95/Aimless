@@ -2396,21 +2396,71 @@ class AimlessWindow(Gtk.Window):
         result_label.set_line_wrap(True)
         box.add(result_label)
 
+        # Hard gate: Save stays disabled until either the remote daemon is being
+        # disabled (unchecking enable needs no test) or a successful connection
+        # test. A wrong host/socket means the app silently can't reach its
+        # mailbox after a restart, which is a worse failure than a test first.
+        test_ok = {"value": False}
+        save_btn = dlg.get_widget_for_response(Gtk.ResponseType.OK)
+        test_btn.set_sensitive(True)
+
+        def update_gate():
+            if save_btn is None:
+                return
+            # disabling SSH needs no successful test; enabling does
+            save_btn.set_sensitive((not enabled.get_active()) or bool(test_ok["value"]))
+            test_btn.set_label("Test connection")
+
+        def on_field_changed(*_):
+            test_ok["value"] = False
+            update_gate()
+
+        enabled.connect("toggled", on_field_changed)
+        host.connect("changed", on_field_changed)
+        remote.connect("changed", on_field_changed)
+        ident.connect("changed", on_field_changed)
+        update_gate()
+
         def do_test(*_):
-            h, r, i = host.get_text().strip(), remote.get_text().strip(), ident.get_text().strip()
+            h = host.get_text().strip()
+            r = remote.get_text().strip()
+            i = ident.get_text().strip()
             if not enabled.get_active() or not h or not r:
                 result_label.set_text("enable + fill host and remote socket path first")
                 return
-            t = SSHTunnel(h, r, os.path.join(CONFIG_DIR, "remote-api.sock.tmp"),
-                          identity=i or None)
+            test_btn.set_sensitive(False)
             result_label.set_text(f"connecting to {h} …")
-            try:
-                t.start()
-                result_label.set_text("connected OK")
-            except RuntimeError as e:
-                result_label.set_text(str(e))
-            finally:
-                t.stop()
+
+            def worker():
+                t = SSHTunnel(h, r, os.path.join(CONFIG_DIR, "remote-api.sock.tmp"),
+                              identity=i or None)
+                try:
+                    t.start()
+                    # a bare forward listener means nothing about the daemon
+                    # behind it — require a real whoami round trip through the
+                    # tunnel before calling the test a success.
+                    client = DaemonClient(t.local_socket)
+                    try:
+                        info = client.request("whoami", timeout=5)
+                    finally:
+                        client.close()
+                    return f"connected — daemon {info.get('build', '?')}"
+                finally:
+                    t.stop()
+
+            def done(msg):
+                test_btn.set_sensitive(True)
+                result_label.set_text(msg)
+                test_ok["value"] = True
+                update_gate()
+
+            def fail(exc):
+                test_btn.set_sensitive(True)
+                result_label.set_text(str(exc))
+                test_ok["value"] = False
+                update_gate()
+
+            run_async(worker, on_done=done, on_error=fail)
 
         test_btn.connect("clicked", do_test)
         dlg.show_all()
@@ -2444,7 +2494,9 @@ class AimlessWindow(Gtk.Window):
             dlg2 = Gtk.MessageDialog(transient_for=self, modal=True,
                                      message_type=Gtk.MessageType.INFO,
                                      buttons=Gtk.ButtonsType.OK,
-                                     text="Restart the app to apply the new SSH settings.")
+                                     text="Saved. The running app is still using the "
+                                          "previous daemon connection — restart to "
+                                          "switch to the remote daemon.")
             dlg2.run()
             dlg2.destroy()
 
@@ -2821,13 +2873,33 @@ class AimlessApp:
                     pass
             return 0
 
-        try:
-            self.supervisor.ensure(log=self.log)
-        except RuntimeError as e:
-            err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE, text=str(e))
-            err.run()
-            err.destroy()
-            return 1
+        while True:
+            try:
+                self.supervisor.ensure(log=self.log)
+                break
+            except RuntimeError as e:
+                err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR,
+                                        buttons=Gtk.ButtonsType.NONE, text=str(e))
+                if self.supervisor.remote:
+                    err.add_button("Disable remote daemon and retry", Gtk.ResponseType.APPLY)
+                err.add_button("Quit", Gtk.ResponseType.CLOSE)
+                resp = err.run()
+                err.destroy()
+                if resp == Gtk.ResponseType.APPLY:
+                    # Recovery from a bad SSH config: the window/menu don't exist
+                    # yet (that's why we're here), so the only way back to the
+                    # settings dialog is to drop the remote daemon and start
+                    # normally. Loop, not recursion — the app lock is already
+                    # held, so re-entering _setup would re-take it and fail.
+                    ssh = ssh_prefs()
+                    ssh["enabled"] = False
+                    prefs = load_prefs()
+                    prefs["ssh"] = ssh
+                    save_prefs(prefs)
+                    self.log("ssh disabled by startup recovery — retrying with the local daemon")
+                    self.supervisor = DaemonSupervisor()  # re-read prefs; local spawn
+                    continue
+                return 1
 
         self.tray = TrayIcon(self)
         if open_window or not self.tray.have_tray:

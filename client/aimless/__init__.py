@@ -1,6 +1,6 @@
 """aimless — serverless chat with an AIM heart."""
 
-__version__ = "0.7.9"
+__version__ = "0.7.10"
 
 # Oldest daemon build this client fully supports. dist/ ships both together;
 # an older daemon lacks the fixes this client depends on (attachment
