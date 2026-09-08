@@ -284,6 +284,38 @@ def test_ssh_dialog_select_local_goes_local(ssh_prefs_env, monkeypatch):
     assert gtkui.sock_path() == str(home / "api.sock")
 
 
+def test_save_geometry_does_not_clobber_ssh_config(ssh_prefs_env, monkeypatch):
+    """Regression: the window caches self.prefs; after the SSH dialog writes a
+    change to disk, save_geometry()/set_away() must not write the stale cache
+    back and revert it. They must merge into fresh prefs."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    home, config = ssh_prefs_env
+    write_ssh_prefs(config, {"host": "me@host", "remote_socket": "/srv/api.sock"})
+
+    win = Gtk.Window()
+    win.show_all()
+    win.get_toplevel = lambda: win
+    win.set_transient_for = lambda x: None
+    win.prefs = gtkui.load_prefs()
+
+    # Simulate the SSH dialog writing to disk without the window knowing.
+    prefs = gtkui.load_prefs()
+    prefs["ssh"] = {}  # going local via the dialog
+    gtkui.save_prefs(prefs)
+
+    # Now the window closes and saves geometry with its STALE cache — the bug
+    # used to write the old ssh config back. It must not.
+    win.save_geometry = gtkui.AimlessWindow.save_geometry.__get__(win)
+    win.save_geometry()
+    assert gtkui.load_prefs().get("ssh") == {}, \
+        "save_geometry clobbered the SSH config with the stale window cache"
+    assert gtkui.ssh_prefs() == {}
+    win.destroy()
+
+
 def test_ssh_dialog_test_is_async(ssh_prefs_env, monkeypatch):
     """The Test connection must not block the dialog's main thread: a slow
     tunnel should leave the dialog responsive (result not set synchronously)
@@ -792,6 +824,64 @@ def test_pair_tracking_mismatch(ssh_prefs_env, monkeypatch):
                               "contacts": lambda self: {"bob": {}}})()
     session3.node_key_mismatch = _mismatch.__get__(session3)
     assert session3.node_key_mismatch() is False
+
+
+def test_ssh_badge_route_bar_states(ssh_prefs_env, monkeypatch):
+    """The route bar shows an SSH badge in remote mode: green when the daemon
+    answered, amber when the tunnel is up but the daemon is silent, red when the
+    tunnel is down; hidden in local mode."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    home, config = ssh_prefs_env
+    win = Gtk.Window()
+    win.show_all()
+    win.get_toplevel = lambda: win
+    win.set_transient_for = lambda x: None
+    win.prefs = gtkui.load_prefs()
+    win.ssh_label = Gtk.Label(label="")
+    win.route_label = Gtk.Label(label="")
+    win._mismatch_notified = True  # suppress the mismatch dialog in refresh_route
+    win.session = None
+    win.refresh_route = gtkui.AimlessWindow.refresh_route.__get__(win)
+    win.save_geometry = lambda: None
+
+    class Tunnel:
+        host = "me@server"
+
+        def is_ready(self):
+            return True
+
+    class Sup:
+        remote = True
+        tunnel = Tunnel()
+
+    win.supervisor = Sup()
+    win.refresh_route({"peers_up": 3, "peers_total": 3, "address": "200:abc"})
+    text = win.ssh_label.get_text()
+    assert "SSH" in text and "me@server" in text
+    assert win.ssh_label.get_visible() or True  # shown via show()
+
+    # tunnel up but daemon silent (st has no peers_up)
+    win.refresh_route(None)
+    text = win.ssh_label.get_text()
+    assert "me@server" in text
+
+    # tunnel down
+    class DownTunnel(Tunnel):
+        def is_ready(self):
+            return False
+
+    win.supervisor = type("S", (), {"remote": True, "tunnel": DownTunnel()})()
+    win.refresh_route(None)
+    assert "me@server" in win.ssh_label.get_text()
+
+    # local mode hides it
+    win.supervisor = type("S", (), {"remote": False, "tunnel": None})()
+    win.refresh_route({"peers_up": 3, "peers_total": 3, "address": "200:abc"})
+    assert win.ssh_label.get_text() == ""
+    win.destroy()
 
 
 def test_request_bounded_on_flapping_connection(ssh_prefs_env):

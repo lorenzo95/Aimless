@@ -2252,6 +2252,10 @@ class AimlessWindow(Gtk.Window):
         route_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
         route_bar.set_border_width(6)
         route_bar.get_style_context().add_class("aimless-route-bar")
+        self.ssh_label = Gtk.Label(label="", xalign=0.0)
+        self.ssh_label.set_no_show_all(True)
+        self.ssh_label.hide()
+        route_bar.pack_start(self.ssh_label, False, False, 0)
         self.route_label = Gtk.Label(label="daemon: starting …")
         route_bar.pack_start(Gtk.Image.new_from_icon_name(
             first_icon("network-wireless-signal-excellent-symbolic", "applications-internet"), Gtk.IconSize.MENU),
@@ -2405,14 +2409,19 @@ class AimlessWindow(Gtk.Window):
         self.set_away(away.strip() if away and away.strip() else None)
 
     def on_ssh_settings(self, *_):
-        run_ssh_settings_dialog(self, prompt_restart=True)
+        if run_ssh_settings_dialog(self, prompt_restart=True):
+            # the dialog writes prefs to disk directly; resync the window's
+            # cached copy so later save_geometry()/set_away() can't clobber it.
+            self.prefs = load_prefs()
 
 
 
     def set_away(self, away):
         self._apply_away_banner(away)
-        self.prefs["away"] = away or ""
-        save_prefs(self.prefs)
+        prefs = load_prefs()  # merge into fresh prefs — never clobber other writers
+        prefs["away"] = away or ""
+        save_prefs(prefs)
+        self.prefs = prefs
         self._push_status(away, log_status=True)
 
     def _push_status(self, away, log_status=False):
@@ -2526,6 +2535,26 @@ class AimlessWindow(Gtk.Window):
         return True
 
     def refresh_route(self, st):
+        # SSH status badge: only meaningful in remote mode.
+        try:
+            tunnel = getattr(self.supervisor, "tunnel", None)
+            if tunnel is not None and getattr(self.supervisor, "remote", False):
+                host = getattr(tunnel, "host", "?")
+                if st and st.get("peers_up") is not None:
+                    color, dot = "#a6e3a1", "●"   # tunnel up, daemon answered
+                elif tunnel.is_ready():
+                    color, dot = "#fab387", "●"   # tunnel up, daemon silent
+                else:
+                    color, dot = "#f38ba8", "○"   # tunnel down
+                self.ssh_label.set_markup(
+                    f"<span foreground='{color}'>SSH {dot} {GLib.markup_escape_text(host)}</span>")
+                self.ssh_label.show()
+            else:
+                self.ssh_label.set_markup("")
+                self.ssh_label.hide()
+        except Exception:
+            self.ssh_label.set_markup("")
+            self.ssh_label.hide()
         if not st:
             self.route_label.set_markup("<span foreground='#f38ba8'>●  offline — daemon not reachable</span>")
         elif st["peers_up"] == 0:
@@ -2566,9 +2595,11 @@ class AimlessWindow(Gtk.Window):
 
     def save_geometry(self):
         w, h = self.get_size()
-        self.prefs["window_width"] = w
-        self.prefs["window_height"] = h
-        save_prefs(self.prefs)
+        prefs = load_prefs()  # merge into fresh prefs — never clobber other writers
+        prefs["window_width"] = w
+        prefs["window_height"] = h
+        save_prefs(prefs)
+        self.prefs = prefs
 
 
 def ask_passphrase(parent):
@@ -3303,10 +3334,9 @@ def run_ssh_settings_dialog(parent, prompt_restart=True):
     result_label.set_line_wrap(True)
     box.add(result_label)
 
-    advanced = Gtk.Expander(label="Advanced")
+    # Socket path is a plain field (filled automatically by discovery; the
+    # 'advanced override' lives in the field itself, no empty expander).
     remote = row("Socket path", "/abs/path/to/api.sock", ssh.get("remote_socket") or "")
-    advanced.add(remote)
-    box.add(advanced)
 
     test_btn = Gtk.Button(label="Test connection")
     box.add(test_btn)
@@ -3324,7 +3354,7 @@ def run_ssh_settings_dialog(parent, prompt_restart=True):
         return mode_remote.get_active()
 
     def set_remote_fields_sensitive(sensitive):
-        for w in (host, ident, find_btn, result_label, advanced, test_btn, test_label, hint):
+        for w in (host, ident, remote, find_btn, result_label, test_btn, test_label, hint):
             try:
                 w.set_sensitive(sensitive)
             except Exception:
