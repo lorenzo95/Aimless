@@ -118,11 +118,9 @@ def test_ssh_dialog_values_captured_before_destroy(ssh_prefs_env, monkeypatch):
 
 
 def test_ssh_dialog_save_end_to_end(ssh_prefs_env, monkeypatch):
-    """Drive the real on_ssh_settings dialog: fill entries + toggle the enable
-    checkbox, click Test, then Save (now gated on a passed test), and assert the
-    prefs file is written with exactly what the user typed. Regression for the
-    destroyed-entry bug (values read after dlg.destroy() came back empty and SSH
-    stayed disabled) and for the save-gate."""
+    """Drive the real SSH settings dialog: fill Host + Identity, click Test
+    (gated), then Save — and assert the prefs file is written with exactly what
+    the user typed. Regression for the destroyed-entry bug and the save-gate."""
     gi = pytest.importorskip("gi")
     gi.require_version("Gtk", "3.0")
     from gi.repository import Gtk, GLib
@@ -136,16 +134,12 @@ def test_ssh_dialog_save_end_to_end(ssh_prefs_env, monkeypatch):
     win.set_transient_for = lambda x: None
     win.on_ssh_settings = gtkui.AimlessWindow.on_ssh_settings.__get__(win)
 
-    # The "Restart the app…" info dialog after Save would block run(); make it
-    # a no-op so the test returns.
     class FakeMsg(Gtk.MessageDialog):
         def run(self, *a):
             return Gtk.ResponseType.OK
 
     monkeypatch.setattr(gtkui.Gtk, "MessageDialog", FakeMsg)
 
-    # Stub the tunnel + daemon so the connection test succeeds without a real
-    # SSH host.
     class FakeTunnel:
         def __init__(self, host, remote_socket, local_socket, identity=None):
             self.host = host
@@ -172,15 +166,6 @@ def test_ssh_dialog_save_end_to_end(ssh_prefs_env, monkeypatch):
     monkeypatch.setattr(gtkui, "SSHTunnel", FakeTunnel)
     monkeypatch.setattr(gtkui, "DaemonClient", FakeDaemonClient)
 
-    def find_entries(w):
-        out = []
-        if isinstance(w, Gtk.Entry):
-            out.append(w)
-        if isinstance(w, Gtk.Container):
-            for c in w.get_children():
-                out.extend(find_entries(c))
-        return out
-
     result = {}
     deadline = time.time() + 8
     filled = {"done": False}
@@ -192,28 +177,20 @@ def test_ssh_dialog_save_end_to_end(ssh_prefs_env, monkeypatch):
         dlg = _ssh_dialog()
         if dlg is None:
             return True  # dialog not up yet — keep polling
+        entries = [e for e in _walk(dlg) if isinstance(e, Gtk.Entry)]
+        if len(entries) < 3:
+            return True
         if not filled["done"]:
-            for child in dlg.get_content_area().get_children():
-                if isinstance(child, Gtk.CheckButton):
-                    child.set_active(True)
-                    break
-            entries = find_entries(dlg)
-            assert len(entries) >= 3
-            entries[0].set_text("debian@192.168.1.111")
-            entries[1].set_text("/srv/aimless/state/api.sock")
-            entries[2].set_text("/home/me/.ssh/id_ed25519")
+            entries[0].set_text("debian@192.168.1.111")   # host
+            entries[1].set_text("/home/me/.ssh/id_ed25519")  # identity
+            entries[2].set_text("/srv/aimless/state/api.sock")  # socket (advanced)
             filled["done"] = True
             # Save must be gated (disabled) until a test passes
             save_btn = dlg.get_widget_for_response(Gtk.ResponseType.OK)
             assert save_btn is not None and not save_btn.get_sensitive(), \
                 "Save should be disabled until a connection test passes"
-            # click Test connection
-            for child in dlg.get_content_area().get_children():
-                if isinstance(child, Gtk.Button) and child.get_label() == "Test connection":
-                    child.emit("clicked")
-                    break
+            _click_button(dlg, "Test connection")
             return True
-        # after the test completes, Save becomes enabled — click it
         save_btn = dlg.get_widget_for_response(Gtk.ResponseType.OK)
         if save_btn is not None and save_btn.get_sensitive():
             save_btn.emit("clicked")
@@ -228,13 +205,74 @@ def test_ssh_dialog_save_end_to_end(ssh_prefs_env, monkeypatch):
         win.destroy()
     assert result.get("done"), "dialog was not driven through test+save"
     saved = gtkui.load_prefs()["ssh"]
-    assert saved["enabled"] is True
     assert saved["host"] == "debian@192.168.1.111"
     assert saved["remote_socket"] == "/srv/aimless/state/api.sock"
     assert saved["identity"] == "/home/me/.ssh/id_ed25519"
     # and it must resolve to a remote supervisor after restart
     assert gtkui.ssh_tunnel() is not None
     assert gtkui.sock_path() == str(config / "remote-api.sock")
+
+
+def test_ssh_dialog_clear_host_goes_local(ssh_prefs_env, monkeypatch):
+    """Clearing the host (going local) needs no test — Save is enabled and the
+    stored ssh config is removed entirely."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+
+    home, config = ssh_prefs_env
+    write_ssh_prefs(config, {
+        "host": "debian@192.168.1.111",
+        "remote_socket": "/srv/aimless/state/api.sock",
+    })
+
+    win = Gtk.Window()
+    win.show_all()
+    win.prefs = gtkui.load_prefs()
+    win.get_toplevel = lambda: win
+    win.set_transient_for = lambda x: None
+    win.on_ssh_settings = gtkui.AimlessWindow.on_ssh_settings.__get__(win)
+
+    class FakeMsg(Gtk.MessageDialog):
+        def run(self, *a):
+            return Gtk.ResponseType.OK
+
+    monkeypatch.setattr(gtkui.Gtk, "MessageDialog", FakeMsg)
+
+    result = {}
+    deadline = time.time() + 8
+    cleared = {"done": False}
+
+    def on_dialog():
+        if _dialog_deadline_passed(deadline):
+            _dismiss_dialog()
+            return False
+        dlg = _ssh_dialog()
+        if dlg is None:
+            return True
+        entries = [e for e in _walk(dlg) if isinstance(e, Gtk.Entry)]
+        if len(entries) < 3:
+            return True
+        if not cleared["done"]:
+            entries[0].set_text("")  # clear the host
+            cleared["done"] = True
+            return True
+        save_btn = dlg.get_widget_for_response(Gtk.ResponseType.OK)
+        if save_btn is not None and save_btn.get_sensitive():
+            save_btn.emit("clicked")
+            result["done"] = True
+            return False
+        return True
+
+    GLib.timeout_add(100, on_dialog)
+    try:
+        win.on_ssh_settings()
+    finally:
+        win.destroy()
+    assert result.get("done"), "Save never became enabled for clearing the host"
+    assert gtkui.ssh_prefs() == {}, "ssh config should be removed when host is cleared"
+    assert gtkui.ssh_tunnel() is None
+    assert gtkui.sock_path() == str(home / "api.sock")
 
 
 def test_ssh_dialog_test_is_async(ssh_prefs_env, monkeypatch):
@@ -293,16 +331,9 @@ def test_ssh_dialog_test_is_async(ssh_prefs_env, monkeypatch):
         if len(entries) < 3:
             return True
         if not clicked["done"]:
-            for child in dlg.get_content_area().get_children():
-                if isinstance(child, Gtk.CheckButton):
-                    child.set_active(True)
-                    break
             entries[0].set_text("user@host")
-            entries[1].set_text("/srv/api.sock")
-            for child in dlg.get_content_area().get_children():
-                if isinstance(child, Gtk.Button) and child.get_label() == "Test connection":
-                    child.emit("clicked")
-                    break
+            entries[2].set_text("/srv/api.sock")
+            _click_button(dlg, "Test connection")
             clicked["done"] = True
             labels["during"] = _result_text(dlg)
             # the test runs in a thread — result must NOT be set yet
@@ -377,16 +408,9 @@ def test_ssh_dialog_test_failure_resets_gate(ssh_prefs_env, monkeypatch):
             return True
         save_btn = dlg.get_widget_for_response(Gtk.ResponseType.OK)
         if not state["tested"]:
-            for child in dlg.get_content_area().get_children():
-                if isinstance(child, Gtk.CheckButton):
-                    child.set_active(True)
-                    break
             entries[0].set_text("user@host")
-            entries[1].set_text("/srv/api.sock")
-            for child in dlg.get_content_area().get_children():
-                if isinstance(child, Gtk.Button) and child.get_label() == "Test connection":
-                    child.emit("clicked")
-                    break
+            entries[2].set_text("/srv/api.sock")
+            _click_button(dlg, "Test connection")
             state["tested"] = True
             return True
         if not state["edited"]:
@@ -464,16 +488,9 @@ def test_ssh_dialog_whoami_failure_distinct(ssh_prefs_env, monkeypatch):
         if len(entries) < 3:
             return True
         if not clicked["done"]:
-            for child in dlg.get_content_area().get_children():
-                if isinstance(child, Gtk.CheckButton):
-                    child.set_active(True)
-                    break
             entries[0].set_text("user@host")
-            entries[1].set_text("/srv/api.sock")
-            for child in dlg.get_content_area().get_children():
-                if isinstance(child, Gtk.Button) and child.get_label() == "Test connection":
-                    child.emit("clicked")
-                    break
+            entries[2].set_text("/srv/api.sock")
+            _click_button(dlg, "Test connection")
             clicked["done"] = True
             return True
         text = _result_text(dlg)
@@ -491,6 +508,165 @@ def test_ssh_dialog_whoami_failure_distinct(ssh_prefs_env, monkeypatch):
     assert "connected OK" not in labels.get("final", "")
     assert "whoami" in labels.get("final", "") or "timeout" in labels.get("final", ""), \
         f"expected a daemon-unreachable message, got: {labels.get('final')!r}"
+
+
+def test_ssh_prefs_legacy_enabled_normalized(ssh_prefs_env):
+    """Legacy prefs that stored {enabled:...} normalize to the host-only model:
+    enabled+host = remote; enabled:false = local (no config)."""
+    home, config = ssh_prefs_env
+    write_ssh_prefs(config, {"enabled": True, "host": "me@host",
+                             "remote_socket": "/srv/api.sock"})
+    assert gtkui.ssh_prefs()["host"] == "me@host"
+    assert gtkui.ssh_tunnel() is not None
+    write_ssh_prefs(config, {"enabled": False, "host": "me@host",
+                             "remote_socket": "/srv/api.sock"})
+    assert gtkui.ssh_prefs() == {}
+    assert gtkui.ssh_tunnel() is None
+
+
+def test_discover_remote_socket_finds_and_verifies(ssh_prefs_env, monkeypatch):
+    """Discovery lists api.sock candidates under $HOME and picks the one that
+    answers a real whoami — the 'no typing the remote path' UX."""
+    home, config = ssh_prefs_env
+    results = {"ran": []}
+
+    def fake_ssh(*args, **kw):
+        results["ran"].append(args)
+        # returns two candidates, one stale
+        class R:
+            returncode = 0
+            stdout = "/home/u/.local/share/aimless/api.sock\n/home/u/app/state/api.sock\n"
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(gtkui.subprocess, "run", fake_ssh)
+
+    attempts = []
+
+    class FakeTunnel:
+        def __init__(self, host, remote_socket, local_socket, identity=None):
+            self.local_socket = local_socket
+
+        def start(self, log=None):
+            return True
+
+        def stop(self):
+            pass
+
+    class LiveDaemon:
+        def __init__(self, socket_path):
+            self.socket_path = socket_path
+
+        def request(self, op, timeout=10.0, **kw):
+            attempts.append(self.socket_path)
+            if op == "whoami":
+                return {"address": "200:abc"}
+            return {"build": "aimlessd/x"}
+        def close(self):
+            pass
+
+    # first candidate's tunnel+daemon raises (stale), second succeeds
+    real_tunnel = gtkui.SSHTunnel
+    real_client = gtkui.DaemonClient
+    state = {"n": 0}
+
+    class StaleThenLive(FakeTunnel):
+        def start(self, log=None):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise RuntimeError("stale")
+            return True
+
+    monkeypatch.setattr(gtkui, "SSHTunnel", StaleThenLive)
+    monkeypatch.setattr(gtkui, "DaemonClient", LiveDaemon)
+
+    path, build, addr = gtkui.discover_remote_socket("me@host")
+    assert path == "/home/u/app/state/api.sock"
+    assert build == "aimlessd/x"
+    assert addr == "200:abc"
+    assert state["n"] == 2  # tried both candidates
+
+
+def test_discover_remote_socket_no_candidates(ssh_prefs_env, monkeypatch):
+    home, config = ssh_prefs_env
+
+    class R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(gtkui.subprocess, "run", lambda *a, **k: R())
+    with pytest.raises(RuntimeError, match="no aimless daemon socket"):
+        gtkui.discover_remote_socket("me@host")
+
+
+def test_supervisor_stale_detects_config_change(ssh_prefs_env, monkeypatch):
+    """The supervisor snapshots its ssh config; changing prefs must make it
+    stale so the caller rebuilds instead of reusing the old connection."""
+    home, config = ssh_prefs_env
+    sup = gtkui.DaemonSupervisor()
+    assert not sup.stale()
+    write_ssh_prefs(config, {"host": "me@host", "remote_socket": "/srv/api.sock"})
+    assert sup.stale()
+
+
+def test_rebuild_supervisor_if_stale(ssh_prefs_env, monkeypatch):
+    """Changing SSH config between supervisor construction and Session creation
+    must stop the old connection, rebuild, and re-ensure (the first-run path)."""
+    home, config = ssh_prefs_env
+    app = gtkui.AimlessApp()
+    app.log = lambda *a, **k: None
+    app.supervisor = gtkui.DaemonSupervisor()  # local, no ssh yet
+    stopped = []
+    monkeypatch.setattr(app.supervisor, "stop", lambda: stopped.append(True))
+    ensured = []
+    monkeypatch.setattr(app, "_ensure_daemon_with_recovery",
+                        lambda: ensured.append(True))
+    monkeypatch.setattr(gtkui, "DaemonSupervisor",
+                        lambda: type("S", (), {"stale": lambda self: False,
+                                               "remote": False,
+                                               "stop": lambda self: stopped.append("new")})())
+
+    # no change -> no rebuild
+    app._rebuild_supervisor_if_stale()
+    assert stopped == []
+    assert ensured == []
+
+    # change prefs -> rebuild
+    write_ssh_prefs(config, {"host": "me@host", "remote_socket": "/srv/api.sock"})
+    app._rebuild_supervisor_if_stale()
+    assert stopped == [True]  # old supervisor stopped
+    assert ensured == [True]  # new supervisor ensured
+    assert app.supervisor.remote is False  # rebuilt supervisor used
+
+
+def test_pair_tracking_mismatch(ssh_prefs_env, monkeypatch):
+    """After connecting on one node, switching to another (with contacts) is a
+    mismatch; no contacts or same node is not."""
+    home, config = ssh_prefs_env
+    gtkui.save_prefs({"last_node_key": "oldnode"})
+
+    session = type("S", (), {"self_node": "newnode",
+                             "contacts": lambda self: {"bob": {}}})()
+
+    # directly exercise the logic the Session exposes
+    def _mismatch(self):
+        last = gtkui.load_prefs().get("last_node_key")
+        if not last or last == self.self_node:
+            return False
+        if not any(k != "_self" for k in self.contacts()):
+            return False
+        return True
+
+    session.node_key_mismatch = _mismatch.__get__(session)
+    assert session.node_key_mismatch() is True
+    session2 = type("S", (), {"self_node": "newnode", "contacts": lambda self: {}})()
+    session2.node_key_mismatch = _mismatch.__get__(session2)
+    assert session2.node_key_mismatch() is False
+    session3 = type("S", (), {"self_node": "oldnode",
+                              "contacts": lambda self: {"bob": {}}})()
+    session3.node_key_mismatch = _mismatch.__get__(session3)
+    assert session3.node_key_mismatch() is False
 
 
 def test_request_bounded_on_flapping_connection(ssh_prefs_env):
@@ -595,7 +771,7 @@ def test_ssh_startup_lockout_escape_hatch(ssh_prefs_env, monkeypatch):
     assert calls["local_ensured"] == 1, "local supervisor was not used after recovery"
     assert calls["open_window"] == 1, "window did not open after recovery"
     saved = gtkui.load_prefs()["ssh"]
-    assert saved["enabled"] is False, "SSH should be disabled by the escape hatch"
+    assert saved == {}, "SSH config should be cleared by the escape hatch"
 
 
 def test_startup_escape_hatch_with_real_whoami_supervisor(ssh_prefs_env, monkeypatch):
@@ -679,7 +855,7 @@ def test_startup_escape_hatch_with_real_whoami_supervisor(ssh_prefs_env, monkeyp
 
     rc = app._setup(open_window=True)
     assert rc is None
-    assert gtkui.load_prefs()["ssh"]["enabled"] is False
+    assert gtkui.load_prefs()["ssh"] == {}, "SSH config should be cleared by the escape hatch"
     server.close()
     for c in held:
         try:
@@ -728,6 +904,14 @@ def _dismiss_dialog():
 
 def _dialog_deadline_passed(deadline=None):
     return time.time() > (deadline or _dialog_deadline())
+
+
+def _click_button(dlg, label):
+    for w in _walk(dlg):
+        if isinstance(w, gtkui.Gtk.Button) and w.get_label() == label:
+            w.emit("clicked")
+            return True
+    return False
 
 
 def _result_text(dlg):

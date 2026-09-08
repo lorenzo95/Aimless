@@ -99,15 +99,25 @@ def linkify(text: str) -> str:
 
 
 def ssh_prefs():
+    """Normalized SSH config from prefs. A configured host IS remote mode: the
+    legacy 'enabled' flag is gone — old prefs that disabled SSH ({enabled:false})
+    normalize to no config (local), and enabled+host just means host."""
     prefs = load_prefs()
     ssh = prefs.get("ssh") if isinstance(prefs.get("ssh"), dict) else {}
+    ssh = dict(ssh)
+    if ssh.get("enabled") is False:
+        return {}
+    if not ssh.get("host"):
+        return {}
+    if not ssh.get("remote_socket"):
+        return {}
     return ssh
 
 
 def ssh_tunnel():
     """SSHTunnel for the configured remote daemon, or None when SSH mode is off."""
     ssh = ssh_prefs()
-    if not (ssh.get("enabled") and ssh.get("host") and ssh.get("remote_socket")):
+    if not ssh:
         return None
     local = ssh.get("local_socket") or os.path.join(CONFIG_DIR, "remote-api.sock")
     return SSHTunnel(ssh["host"], ssh["remote_socket"], local,
@@ -380,6 +390,14 @@ class DaemonSupervisor:
         self.sock = sock_path()
         self.child = None
         self.tunnel = ssh_tunnel()
+        # Snapshot of the ssh config this supervisor was built from, so callers
+        # can detect a later change and rebuild instead of reusing a stale
+        # connection (e.g. SSH configured from the first-run/unlock dialogs).
+        self.ssh_cfg = ssh_prefs()
+
+    def stale(self):
+        """True when the current prefs no longer match this supervisor."""
+        return ssh_prefs() != self.ssh_cfg
 
     @property
     def remote(self):
@@ -549,6 +567,7 @@ class Session:
         self.self_screen = contacts.get("_self", {}).get("screen", "anonymous")
         self.client = Client(self.daemon, self.identity, self.self_screen)
         self.pubkey_hex = self.client.pubkey_hex
+        self._record_pair()
 
     def contacts(self):
         allc = protocol.load_contacts(contacts_path())
@@ -561,6 +580,30 @@ class Session:
     def my_invite(self):
         who = self.client.whoami()
         return protocol.make_invite(self.identity, who["key"], self.self_screen)
+
+    def _record_pair(self):
+        """Remember the (client identity, daemon node key) pair just used, so a
+        later connect can detect an address change that would strand contacts."""
+        try:
+            prefs = load_prefs()
+            prefs["last_node_key"] = self.self_node
+            save_prefs(prefs)
+        except Exception:
+            pass
+
+    def node_key_mismatch(self):
+        """True when this identity was last seen on a different daemon node AND
+        the user has contacts — i.e. their buddies' invites point at the old
+        address, so messages won't reach them here."""
+        try:
+            last = load_prefs().get("last_node_key")
+        except Exception:
+            last = None
+        if not last or last == self.self_node:
+            return False
+        if not any(k != "_self" for k in self.contacts()):
+            return False
+        return True
 
 
 def _room_dots_markup(members, presence_by_node, exclude):
@@ -2362,148 +2405,9 @@ class AimlessWindow(Gtk.Window):
         self.set_away(away.strip() if away and away.strip() else None)
 
     def on_ssh_settings(self, *_):
-        ssh = ssh_prefs()
-        dlg = Gtk.Dialog(title="Remote daemon (SSH)", transient_for=self, modal=True)
-        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
-        dlg.set_default_response(Gtk.ResponseType.OK)
-        box = dlg.get_content_area()
-        box.set_spacing(8)
-        box.set_border_width(10)
+        run_ssh_settings_dialog(self, prompt_restart=True)
 
-        def row(label, placeholder, default):
-            h = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            h.pack_start(Gtk.Label(label=label, xalign=0.0, width_chars=18), False, False, 0)
-            e = Gtk.Entry()
-            e.set_placeholder_text(placeholder)
-            e.set_text(default or "")
-            e.set_hexpand(True)
-            h.pack_start(e, True, True, 0)
-            box.add(h)
-            return e
 
-        enabled = Gtk.CheckButton(label="Use SSH tunnel to a remote daemon")
-        enabled.set_active(bool(ssh.get("enabled")))
-        box.add(enabled)
-        host = row("Host", "user@host", ssh.get("host") or "")
-        remote = row("Remote socket path", "/abs/path/to/api.sock", ssh.get("remote_socket") or "")
-        ident = row("Identity key (optional)", "~/.ssh/id_ed25519", ssh.get("identity") or "")
-        hint = Gtk.Label(label=("Remote socket is the api.sock path on the SSH host.\n"
-                                "Local socket is kept at %s." %
-                                os.path.join(CONFIG_DIR, "remote-api.sock")),
-                         xalign=0.0)
-        hint.set_line_wrap(True)
-        box.add(hint)
-
-        test_btn = Gtk.Button(label="Test connection")
-        box.add(test_btn)
-
-        result_label = Gtk.Label(label="", xalign=0.0)
-        result_label.set_line_wrap(True)
-        box.add(result_label)
-
-        # Hard gate: Save stays disabled until either the remote daemon is being
-        # disabled (unchecking enable needs no test) or a successful connection
-        # test. A wrong host/socket means the app silently can't reach its
-        # mailbox after a restart, which is a worse failure than a test first.
-        test_ok = {"value": False}
-        save_btn = dlg.get_widget_for_response(Gtk.ResponseType.OK)
-        test_btn.set_sensitive(True)
-
-        def update_gate():
-            if save_btn is None:
-                return
-            # disabling SSH needs no successful test; enabling does
-            save_btn.set_sensitive((not enabled.get_active()) or bool(test_ok["value"]))
-            test_btn.set_label("Test connection")
-
-        def on_field_changed(*_):
-            test_ok["value"] = False
-            update_gate()
-
-        enabled.connect("toggled", on_field_changed)
-        host.connect("changed", on_field_changed)
-        remote.connect("changed", on_field_changed)
-        ident.connect("changed", on_field_changed)
-        update_gate()
-
-        def do_test(*_):
-            h = host.get_text().strip()
-            r = remote.get_text().strip()
-            i = ident.get_text().strip()
-            if not enabled.get_active() or not h or not r:
-                result_label.set_text("enable + fill host and remote socket path first")
-                return
-            test_btn.set_sensitive(False)
-            result_label.set_text(f"connecting to {h} …")
-
-            def worker():
-                t = SSHTunnel(h, r, os.path.join(CONFIG_DIR, "remote-api.sock.tmp"),
-                              identity=i or None)
-                try:
-                    t.start()
-                    # a bare forward listener means nothing about the daemon
-                    # behind it — require a real whoami round trip through the
-                    # tunnel before calling the test a success.
-                    client = DaemonClient(t.local_socket)
-                    try:
-                        info = client.request("whoami", timeout=5)
-                    finally:
-                        client.close()
-                    return f"connected — daemon {info.get('build', '?')}"
-                finally:
-                    t.stop()
-
-            def done(msg):
-                test_btn.set_sensitive(True)
-                result_label.set_text(msg)
-                test_ok["value"] = True
-                update_gate()
-
-            def fail(exc):
-                test_btn.set_sensitive(True)
-                result_label.set_text(str(exc))
-                test_ok["value"] = False
-                update_gate()
-
-            run_async(worker, on_done=done, on_error=fail)
-
-        test_btn.connect("clicked", do_test)
-        dlg.show_all()
-        resp = dlg.run()
-        # capture entry values BEFORE destroying the dialog — get_text() on a
-        # destroyed Gtk.Entry returns "".
-        enabled_val = bool(enabled.get_active())
-        host_val = host.get_text().strip()
-        remote_val = remote.get_text().strip()
-        ident_val = ident.get_text().strip()
-        dlg.destroy()
-        if resp != Gtk.ResponseType.OK:
-            return
-        new_ssh = {
-            "enabled": enabled_val,
-            "host": host_val,
-            "remote_socket": remote_val,
-        }
-        if ident_val:
-            new_ssh["identity"] = ident_val
-        if not new_ssh["host"] or not new_ssh["remote_socket"]:
-            new_ssh["enabled"] = False
-        old = ssh_prefs()
-        self.prefs["ssh"] = new_ssh
-        save_prefs(self.prefs)
-        changed = (old.get("enabled") != new_ssh["enabled"]
-                   or old.get("host") != new_ssh["host"]
-                   or old.get("remote_socket") != new_ssh["remote_socket"]
-                   or old.get("identity") != new_ssh.get("identity"))
-        if changed:
-            dlg2 = Gtk.MessageDialog(transient_for=self, modal=True,
-                                     message_type=Gtk.MessageType.INFO,
-                                     buttons=Gtk.ButtonsType.OK,
-                                     text="Saved. The running app is still using the "
-                                          "previous daemon connection — restart to "
-                                          "switch to the remote daemon.")
-            dlg2.run()
-            dlg2.destroy()
 
     def set_away(self, away):
         self._apply_away_banner(away)
@@ -2631,6 +2535,20 @@ class AimlessWindow(Gtk.Window):
             self.route_label.set_markup(
                 f"<span foreground='#a6e3a1'>●  online</span>  —  {st['address']}  ·  "
                 f"peers {st['peers_up']}/{st['peers_total']}")
+        try:
+            if (self.session is not None and self.session.node_key_mismatch()
+                    and not getattr(self, "_mismatch_notified", False)):
+                self._mismatch_notified = True
+                dlg = Gtk.MessageDialog(
+                    transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
+                    buttons=Gtk.ButtonsType.OK,
+                    text="Your contacts know you at a different daemon address.",
+                    secondary_text="Messages won't reach you here. Re-share your invite, "
+                                   "or migrate your node key to this daemon.")
+                dlg.run()
+                dlg.destroy()
+        except Exception:
+            pass
 
     def on_delete(self, *_):
         self.save_geometry()
@@ -2664,6 +2582,9 @@ def ask_passphrase(parent):
     box.add(Gtk.Label(label="Enter your passphrase to unlock your identity"))
     entry = Gtk.Entry(visibility=False, activates_default=True)
     box.add(entry)
+    ssh_btn = Gtk.Button(label="Remote daemon (SSH) …")
+    ssh_btn.connect("clicked", lambda *_: run_ssh_settings_dialog(dlg, prompt_restart=False))
+    box.add(ssh_btn)
     dlg.show_all()
     resp = dlg.run()
     text = entry.get_text()
@@ -2671,6 +2592,37 @@ def ask_passphrase(parent):
     if resp == Gtk.ResponseType.OK and text:
         return text
     return None
+
+
+def ask_where_live(parent):
+    """First-run question: where does the user's aimless live? Returns 'local',
+    'remote', or None (cancelled)."""
+    dlg = Gtk.Dialog(title=f"{APP_NAME} — set up", transient_for=parent, modal=True)
+    dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL)
+    dlg.set_default_size(420, 140)
+    box = dlg.get_content_area()
+    box.set_spacing(8)
+    box.set_border_width(10)
+    box.add(Gtk.Label(label="Where does your aimless live?"))
+    box.add(Gtk.Label(label=("Your daemon holds your address and stores messages while you're "
+                             "away. It can run on this machine, or on a server you reach over "
+                             "SSH so it stays online even when your computer is off."), xalign=0.0, wrap=True))
+    local_btn = Gtk.Button(label="On this machine")
+    remote_btn = Gtk.Button(label="On a server I SSH into")
+    result = {"value": None}
+
+    def pick(val):
+        result["value"] = val
+        dlg.response(Gtk.ResponseType.OK)
+
+    local_btn.connect("clicked", lambda *_: pick("local"))
+    remote_btn.connect("clicked", lambda *_: pick("remote"))
+    box.add(local_btn)
+    box.add(remote_btn)
+    dlg.show_all()
+    resp = dlg.run()
+    dlg.destroy()
+    return result["value"] if resp == Gtk.ResponseType.OK else None
 
 
 def ask_create_identity(parent):
@@ -2693,6 +2645,9 @@ def ask_create_identity(parent):
     box.add(Gtk.Label(label="Screen name"))
     screen = Gtk.Entry(activates_default=True)
     box.add(screen)
+    ssh_btn = Gtk.Button(label="Remote daemon (SSH) …")
+    ssh_btn.connect("clicked", lambda *_: run_ssh_settings_dialog(dlg, prompt_restart=False))
+    box.add(ssh_btn)
     dlg.show_all()
     resp = dlg.run()
     p1, p2, sn = pw.get_text(), pw2.get_text(), screen.get_text()
@@ -2859,6 +2814,54 @@ class AimlessApp:
         Gtk.main()
         return 0
 
+    def _ensure_daemon_with_recovery(self):
+        """Bring up the daemon (local spawn or remote SSH tunnel), retrying
+        after the 'Disable remote daemon and retry' escape hatch clears a bad
+        SSH config. Raises SystemExit if the user chose Quit."""
+        while True:
+            try:
+                self.supervisor.ensure(log=self.log)
+                return
+            except RuntimeError as e:
+                err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR,
+                                        buttons=Gtk.ButtonsType.NONE, text=str(e))
+                if self.supervisor.remote:
+                    err.add_button("Disable remote daemon and retry", Gtk.ResponseType.APPLY)
+                err.add_button("Quit", Gtk.ResponseType.CLOSE)
+                resp = err.run()
+                err.destroy()
+                if resp == Gtk.ResponseType.APPLY:
+                    # Recovery from a bad SSH config: the window/menu don't exist
+                    # yet (that's why we're here), so the only way back to the
+                    # settings dialog is to drop the remote daemon and start
+                    # normally. Loop, not recursion — the app lock is already
+                    # held, so re-entering _setup would re-take it and fail.
+                    prefs = load_prefs()
+                    prefs["ssh"] = {}  # clear the bad SSH config entirely
+                    save_prefs(prefs)
+                    self.log("ssh config cleared by startup recovery — retrying with the local daemon")
+                    try:
+                        self.supervisor.stop()  # tear down the failed remote tunnel before discarding it
+                    except Exception:
+                        pass
+                    self.supervisor = DaemonSupervisor()  # re-read prefs; local spawn
+                    continue
+                raise SystemExit(1)
+
+    def _rebuild_supervisor_if_stale(self):
+        """If the ssh config changed since this supervisor was built (e.g. the
+        user configured SSH from the first-run/unlock dialogs), stop the old
+        connection and reconnect with the new one before a Session is created."""
+        if not self.supervisor.stale():
+            return
+        self.log("ssh config changed — reconnecting to the daemon")
+        try:
+            self.supervisor.stop()
+        except Exception:
+            pass
+        self.supervisor = DaemonSupervisor()
+        self._ensure_daemon_with_recovery()
+
     def _setup(self, open_window):
         sys.excepthook = _make_excepthook(self.log)
         threading.excepthook = _make_thread_hook(self.log)
@@ -2878,37 +2881,10 @@ class AimlessApp:
                     pass
             return 0
 
-        while True:
-            try:
-                self.supervisor.ensure(log=self.log)
-                break
-            except RuntimeError as e:
-                err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR,
-                                        buttons=Gtk.ButtonsType.NONE, text=str(e))
-                if self.supervisor.remote:
-                    err.add_button("Disable remote daemon and retry", Gtk.ResponseType.APPLY)
-                err.add_button("Quit", Gtk.ResponseType.CLOSE)
-                resp = err.run()
-                err.destroy()
-                if resp == Gtk.ResponseType.APPLY:
-                    # Recovery from a bad SSH config: the window/menu don't exist
-                    # yet (that's why we're here), so the only way back to the
-                    # settings dialog is to drop the remote daemon and start
-                    # normally. Loop, not recursion — the app lock is already
-                    # held, so re-entering _setup would re-take it and fail.
-                    ssh = ssh_prefs()
-                    ssh["enabled"] = False
-                    prefs = load_prefs()
-                    prefs["ssh"] = ssh
-                    save_prefs(prefs)
-                    self.log("ssh disabled by startup recovery — retrying with the local daemon")
-                    try:
-                        self.supervisor.stop()  # tear down the failed remote tunnel before discarding it
-                    except Exception:
-                        pass
-                    self.supervisor = DaemonSupervisor()  # re-read prefs; local spawn
-                    continue
-                return 1
+        try:
+            self._ensure_daemon_with_recovery()
+        except SystemExit:
+            return 1
 
         self.tray = TrayIcon(self)
         if open_window or not self.tray.have_tray:
@@ -2945,6 +2921,19 @@ class AimlessApp:
         session = None
         passphrase = self.passphrase
         if not os.path.exists(identity_path()):
+            # First run on this machine: ask the one question that matters
+            # before identity creation, so a remote daemon is configured BEFORE
+            # the identity exists — otherwise the invite would embed the wrong
+            # (local) node address.
+            if not ssh_prefs():
+                where = ask_where_live(None)
+                if where is None:
+                    self._cancel_or_quit()
+                    return
+                if where == "remote":
+                    run_ssh_settings_dialog(None, prompt_restart=False)
+                    # after SSH setup the supervisor may need rebuilding; the
+                    # stale-check right before Session() handles it.
             for _create in range(3):
                 created = ask_create_identity(None)
                 if created is None:
@@ -2960,6 +2949,7 @@ class AimlessApp:
                 try:
                     create_identity(new_pw, screen)
                     passphrase = new_pw
+                    self._rebuild_supervisor_if_stale()
                     session = Session(passphrase)
                     break
                 except (OSError, DaemonError) as e:
@@ -2973,6 +2963,7 @@ class AimlessApp:
         else:
             if passphrase:
                 try:
+                    self._rebuild_supervisor_if_stale()
                     session = Session(passphrase)
                 except ValueError:
                     passphrase = None
@@ -2986,6 +2977,7 @@ class AimlessApp:
                         self._cancel_or_quit()
                         return
                     try:
+                        self._rebuild_supervisor_if_stale()
                         session = Session(passphrase)
                         break
                     except ValueError:
@@ -3208,3 +3200,221 @@ def main():
 
 if __name__ == "__main__":
     main()
+def discover_remote_socket(host, identity=None):
+    """Find a live aimlessd api.sock on the ssh host. A configured host IS remote
+    mode, so the socket path should never have to be typed by hand: list api.sock
+    candidates under $HOME, then verify each through a real tunnel+whoami. Returns
+    (path, build, address) or raises RuntimeError with an actionable message."""
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+           "-o", "StrictHostKeyChecking=accept-new"]
+    if identity:
+        cmd += ["-i", os.path.expanduser(identity)]
+    cmd += [host, "find $HOME -maxdepth 6 -name api.sock -type s 2>/dev/null"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"no answer from {host} (ssh timed out)")
+    if r.returncode != 0:
+        raise RuntimeError(f"could not reach {host}: {r.stderr.strip() or f'exit {r.returncode}'}")
+    candidates = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+    if not candidates:
+        raise RuntimeError(f"no aimless daemon socket found on {host} — is the daemon running there?")
+    for path in candidates:
+        t = SSHTunnel(host, path, os.path.join(CONFIG_DIR, "discover-api.sock.tmp"),
+                      identity=identity or None)
+        try:
+            t.start()
+            c = DaemonClient(t.local_socket)
+            try:
+                info = c.request("whoami", timeout=5)
+                st = c.request("status", timeout=5)
+            finally:
+                c.close()
+            return path, st.get("build", "?"), info.get("address", "?")
+        except Exception:
+            continue
+        finally:
+            t.stop()
+    raise RuntimeError(f"found socket(s) on {host} but none answered whoami — check the daemon is up")
+
+
+def run_ssh_settings_dialog(parent, prompt_restart=True):
+    """Standalone 'Remote daemon (SSH)' settings dialog. A configured host IS
+    remote mode; the daemon socket is discovered automatically (advanced
+    override available). Clearing the host returns to a local daemon. Returns
+    True if the config changed, False if cancelled/unchanged. When
+    prompt_restart, shows a restart note on change (mid-session); the
+    first-run/unlock callers pass False and reconnect live instead."""
+    ssh = ssh_prefs()
+    dlg = Gtk.Dialog(title="Remote daemon (SSH)", transient_for=parent, modal=True)
+    dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
+    dlg.set_default_response(Gtk.ResponseType.OK)
+    box = dlg.get_content_area()
+    box.set_spacing(8)
+    box.set_border_width(10)
+
+    def row(label, placeholder, default):
+        h = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        h.pack_start(Gtk.Label(label=label, xalign=0.0, width_chars=18), False, False, 0)
+        e = Gtk.Entry()
+        e.set_placeholder_text(placeholder)
+        e.set_text(default or "")
+        e.set_hexpand(True)
+        h.pack_start(e, True, True, 0)
+        box.add(h)
+        return e
+
+    host = row("Host", "user@server", ssh.get("host") or "")
+    ident = row("Identity key (optional)", "~/.ssh/id_ed25519", ssh.get("identity") or "")
+    hint = Gtk.Label(label=("A configured host means the remote daemon. The socket path is "
+                            "found automatically; clear the host to use a local daemon."),
+                     xalign=0.0, wrap=True)
+    box.add(hint)
+
+    find_btn = Gtk.Button(label="Find daemon on host")
+    box.add(find_btn)
+
+    result_label = Gtk.Label(label="", xalign=0.0)
+    result_label.set_line_wrap(True)
+    box.add(result_label)
+
+    advanced = Gtk.Expander(label="Advanced")
+    remote = row("Socket path", "/abs/path/to/api.sock", ssh.get("remote_socket") or "")
+    advanced.add(remote)
+    box.add(advanced)
+
+    test_btn = Gtk.Button(label="Test connection")
+    box.add(test_btn)
+    test_label = Gtk.Label(label="", xalign=0.0)
+    test_label.set_line_wrap(True)
+    box.add(test_label)
+
+    # Hard gate: saving a configured host requires a successful live test (a
+    # wrong host means the app silently can't reach its mailbox after a restart).
+    # Clearing the host (going local) needs no test.
+    test_ok = {"value": False}
+    save_btn = dlg.get_widget_for_response(Gtk.ResponseType.OK)
+    find_btn.set_sensitive(True)
+
+    def update_gate():
+        if save_btn is None:
+            return
+        save_btn.set_sensitive((not host.get_text().strip()) or bool(test_ok["value"]))
+
+    def on_field_changed(*_):
+        test_ok["value"] = False
+        update_gate()
+
+    host.connect("changed", on_field_changed)
+    ident.connect("changed", on_field_changed)
+    remote.connect("changed", on_field_changed)
+    update_gate()
+
+    def do_find(*_):
+        h = host.get_text().strip()
+        i = ident.get_text().strip()
+        if not h:
+            result_label.set_text("enter a host first")
+            return
+        find_btn.set_sensitive(False)
+        result_label.set_text(f"searching {h} …")
+
+        def worker():
+            return discover_remote_socket(h, i or None)
+
+        def done(res):
+            find_btn.set_sensitive(True)
+            path, build, addr = res
+            remote.set_text(path)
+            test_label.set_text(f"found daemon at {path} — {build}, {addr}")
+            test_ok["value"] = True  # discovery verified with a real round trip
+            update_gate()
+
+        def fail(exc):
+            find_btn.set_sensitive(True)
+            result_label.set_text(str(exc))
+            test_ok["value"] = False
+            update_gate()
+
+        run_async(worker, on_done=done, on_error=fail)
+
+    find_btn.connect("clicked", do_find)
+
+    def do_test(*_):
+        h = host.get_text().strip()
+        i = ident.get_text().strip()
+        r = remote.get_text().strip()
+        if not h:
+            test_label.set_text("enter a host first")
+            return
+        if not r:
+            test_label.set_text("no socket path — click 'Find daemon on host' first")
+            return
+        test_btn.set_sensitive(False)
+        test_label.set_text(f"connecting to {h} …")
+
+        def worker():
+            t = SSHTunnel(h, r, os.path.join(CONFIG_DIR, "remote-api.sock.tmp"),
+                          identity=i or None)
+            try:
+                t.start()
+                c = DaemonClient(t.local_socket)
+                try:
+                    info = c.request("whoami", timeout=5)
+                finally:
+                    c.close()
+                return f"connected — daemon {info.get('build', '?')}"
+            finally:
+                t.stop()
+
+        def done(msg):
+            test_btn.set_sensitive(True)
+            test_label.set_text(msg)
+            test_ok["value"] = True
+            update_gate()
+
+        def fail(exc):
+            test_btn.set_sensitive(True)
+            test_label.set_text(str(exc))
+            test_ok["value"] = False
+            update_gate()
+
+        run_async(worker, on_done=done, on_error=fail)
+
+    test_btn.connect("clicked", do_test)
+    dlg.show_all()
+    resp = dlg.run()
+    # capture entry values BEFORE destroying the dialog — get_text() on a
+    # destroyed Gtk.Entry returns "".
+    host_val = host.get_text().strip()
+    ident_val = ident.get_text().strip()
+    remote_val = remote.get_text().strip()
+    dlg.destroy()
+    if resp != Gtk.ResponseType.OK:
+        return False
+    old = ssh_prefs()
+    if not host_val:
+        new_ssh = {}  # going local
+    else:
+        if not remote_val:
+            return False  # host set but no socket — nothing valid to save
+        new_ssh = {"host": host_val, "remote_socket": remote_val}
+        if ident_val:
+            new_ssh["identity"] = ident_val
+    changed = (old.get("host") != new_ssh.get("host")
+               or old.get("remote_socket") != new_ssh.get("remote_socket")
+               or old.get("identity") != new_ssh.get("identity"))
+    if changed:
+        prefs = load_prefs()
+        prefs["ssh"] = new_ssh
+        save_prefs(prefs)
+        if prompt_restart:
+            dlg2 = Gtk.MessageDialog(transient_for=parent, modal=True,
+                                     message_type=Gtk.MessageType.INFO,
+                                     buttons=Gtk.ButtonsType.OK,
+                                     text="Saved. The running app is still using the "
+                                          "previous daemon connection — restart to "
+                                          "switch.")
+            dlg2.run()
+            dlg2.destroy()
+    return changed

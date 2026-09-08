@@ -69,19 +69,47 @@ it store-and-forward while you're away — run a daemon somewhere always-on (a
 VPS, or the webtop container in `AIMLESS_MODE=daemon_only`, see the docker
 README) and point the desktop GUI at it over an **SSH tunnel**.
 
-The daemon's API is a Unix socket (`api.sock`). The GUI's **Remote daemon
-(SSH)** settings (hamburger menu) opens a tunnel that creates a local
-`remote-api.sock` whose traffic is forwarded, encrypted, to the remote socket —
-so no API port is ever exposed, and auth is your normal SSH key/agent.
+### The model — two halves, one pair
 
-- In the settings dialog, fill in the SSH **host** (`user@host`), the **remote
-  socket path** (the `api.sock` path on the SSH host, e.g. `…/aimless-data/
-  state/api.sock` for the container's bind mount), optionally an identity key,
-  and hit **Test connection**.
-- On save, restart the app to apply. The local daemon stays dormant; the GUI
-  talks to the remote one.
-- Everything that needs the daemon (history, attachments, presence) works over
-  the tunnel exactly as if it were local.
+Your account is a pair of keys glued together by your invite
+(`aimless1:<client-pk>:<node-pk>:<screen>`):
+
+| Half | File | What it is | Lives with |
+|---|---|---|---|
+| Who you are | `identity.json` | client keypair, what buddies encrypt to | the GUI |
+| Where you live | `node.key` | daemon keypair — your Yggdrasil address is *derived* from it, where buddies route to | the daemon |
+
+Buddies only reach you at the exact **(identity, node)** pair in your invite.
+Moving the daemon to a new machine without moving `node.key` gives you a new
+address your contacts don't know — so first-run always configures the daemon
+**before** the identity is created, and the invite embeds the right node key
+from day one.
+
+### First run
+
+A fresh machine asks **"Where does your aimless live?"**:
+- **On this machine** → the daemon runs locally (the default).
+- **On a server I SSH into** → enter just the SSH **host** (`user@server`, and
+  an optional identity key). The socket path is **found automatically** — no
+  typing paths on the remote box. Then create your identity; your invite
+  advertises the server's node key, so it works immediately.
+
+The **Remote daemon (SSH) …** dialog (hamburger menu, or a button inside the
+first-run/unlock dialogs) is the same everywhere. A configured host *is* remote
+mode; clearing the host goes back to a local daemon. The daemon's API is a Unix
+socket (`api.sock`); the tunnel forwards a local `remote-api.sock` to it, so no
+API port is ever exposed and auth is your normal SSH key/agent. Everything that
+needs the daemon (history, attachments, presence) works over the tunnel exactly
+as if it were local.
+
+### Moving your existing account to a server
+
+If you already have contacts, keep them intact by moving the **node key** (your
+address) to the server's daemon — the client offers this as a one-click
+**"move my node key"** action when it detects you're on a different address.
+(For now, manually: back up the server's `node.key`, copy your `node.key` into
+its daemon datadir, restart the daemon.) The daemon's watch list (`contacts.json`)
+follows the same way; it self-heals on the next GUI launch.
 
 > **One GUI per daemon socket.** Don't run two GUIs against the same daemon
 > socket at the same time — e.g. the webtop GUI *and* your laptop GUI
