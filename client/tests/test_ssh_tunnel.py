@@ -1770,5 +1770,42 @@ def test_do_migrate_node_requires_ssh(ssh_prefs_env, monkeypatch):
     win.activity = type("A", (), {"log": lambda self, *a, **k: None})()
     win.do_migrate_node = gtkui.AimlessWindow.do_migrate_node.__get__(win)
     win._migrate_restart_prompt = lambda *a, **k: None
-    win.do_migrate_node()  # no ssh prefs -> logs, returns, no crash
+
+    shown = []
+
+    class FakeMsg(Gtk.MessageDialog):
+        def run(self, *a):
+            shown.append(1)
+            return Gtk.ResponseType.OK
+
+    monkeypatch.setattr(gtkui.Gtk, "MessageDialog", FakeMsg)
+    win.do_migrate_node()  # no ssh prefs -> clear message, no crash
+    assert shown, "a clear 'no remote daemon configured' message must be shown"
+    win.destroy()
+
+
+def test_do_migrate_node_requires_local_key(ssh_prefs_env, monkeypatch):
+    """With ssh configured but no local node.key, show a clear message."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    home, config = ssh_prefs_env
+    write_ssh_prefs(config, {"host": "me@host", "remote_socket": "/srv/state/api.sock"})
+    win = Gtk.Window()
+    win.show_all()
+    win.activity = type("A", (), {"log": lambda self, *a, **k: None})()
+    win.do_migrate_node = gtkui.AimlessWindow.do_migrate_node.__get__(win)
+    win._migrate_restart_prompt = lambda *a, **k: None
+
+    shown = []
+
+    class FakeMsg(Gtk.MessageDialog):
+        def run(self, *a):
+            shown.append(1)
+            return Gtk.ResponseType.OK
+
+    monkeypatch.setattr(gtkui.Gtk, "MessageDialog", FakeMsg)
+    win.do_migrate_node()
+    assert shown, "a clear 'no local node.key' message must be shown"
     win.destroy()

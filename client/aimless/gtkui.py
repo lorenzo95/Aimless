@@ -2492,7 +2492,16 @@ class AimlessWindow(Gtk.Window):
         verifies the remote answers with the migrated node key."""
         ssh = ssh_prefs()
         if not ssh:
+            # No remote daemon configured - the user needs to set it up first.
             self.activity.log("migrate node key: no remote daemon configured")
+            dlg = Gtk.MessageDialog(
+                transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
+                buttons=Gtk.ButtonsType.OK,
+                text="No remote daemon is configured.",
+                secondary_text="Set up the remote daemon (SSH) first, then move your "
+                               "local identity to it.")
+            dlg.run()
+            dlg.destroy()
             return
         host = ssh["host"]
         identity = ssh.get("identity") or None
@@ -2501,6 +2510,14 @@ class AimlessWindow(Gtk.Window):
         expected = node_key_public_hex()
         if expected is None:
             self.activity.log("migrate node key: no local node.key to migrate")
+            dlg = Gtk.MessageDialog(
+                transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
+                buttons=Gtk.ButtonsType.OK,
+                text="No local daemon state found on this machine.",
+                secondary_text="There is no local node.key to move. This action moves "
+                               "an existing local identity to the remote daemon.")
+            dlg.run()
+            dlg.destroy()
             return
 
         # --- stage the files (async) ---
