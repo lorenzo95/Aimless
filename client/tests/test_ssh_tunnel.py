@@ -1705,7 +1705,7 @@ def test_guard_no_relocation_skips(ssh_prefs_env, monkeypatch):
 
 
 def test_ssh_dialog_shows_migrate_button(ssh_prefs_env, monkeypatch):
-    """The SSH settings dialog shows 'Move node key to this daemon' when a local
+    """The SSH settings dialog shows 'Move local identity to remote' when a local
     node.key exists and remote mode is selected."""
     gi = pytest.importorskip("gi")
     gi.require_version("Gtk", "3.0")
@@ -1734,7 +1734,7 @@ def test_ssh_dialog_shows_migrate_button(ssh_prefs_env, monkeypatch):
         if dlg is None:
             return True
         for w in _walk(dlg):
-            if isinstance(w, gtkui.Gtk.Button) and "Move node key" in w.get_label():
+            if isinstance(w, gtkui.Gtk.Button) and "Move local identity to remote" in w.get_label():
                 found["migrate"] = True
                 break
         if not state["seen"]:
@@ -1755,7 +1755,7 @@ def test_ssh_dialog_shows_migrate_button(ssh_prefs_env, monkeypatch):
         win.on_ssh_settings()
     finally:
         win.destroy()
-    assert found.get("migrate"), "Move node key button not shown when a local key exists"
+    assert found.get("migrate"), "Move local identity to remote button not shown when a local key exists"
 
 
 def test_do_migrate_node_requires_ssh(ssh_prefs_env, monkeypatch):

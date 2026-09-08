@@ -2487,9 +2487,9 @@ class AimlessWindow(Gtk.Window):
             self.prefs = load_prefs()
 
     def do_migrate_node(self, *_):
-        """Move the local node key (and outbound journal) to the configured
-        remote daemon. Async; prompts for the daemon restart, then verifies the
-        remote answers with the migrated node key."""
+        """Move the local identity (node key + outbound journal) to the
+        configured remote daemon. Async; prompts for the daemon restart, then
+        verifies the remote answers with the migrated node key."""
         ssh = ssh_prefs()
         if not ssh:
             self.activity.log("migrate node key: no remote daemon configured")
@@ -2504,14 +2504,14 @@ class AimlessWindow(Gtk.Window):
             return
 
         # --- stage the files (async) ---
-        dlg = Gtk.Dialog(title="Move node key to the remote daemon",
+        dlg = Gtk.Dialog(title="Move local identity to remote",
                          transient_for=self, modal=True)
         dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
         dlg.set_default_size(460, 140)
         box = dlg.get_content_area()
         box.set_spacing(8)
         box.set_border_width(10)
-        label = Gtk.Label(label="Copying the node key and outbound journal to "
+        label = Gtk.Label(label="Copying your identity and outbound journal to "
                                 f"{host} ...", xalign=0.0, wrap=True)
         box.add(label)
         dlg.show_all()
@@ -2534,12 +2534,12 @@ class AimlessWindow(Gtk.Window):
         """Ask the user to restart the remote daemon (auto docker restart if
         possible, else show the command), then verify the node key took."""
         container = detect_remote_container(host, identity, datadir)
-        dlg = Gtk.Dialog(title="Restart the remote daemon", transient_for=self, modal=True)
+        dlg = Gtk.Dialog(title="Restart the server's daemon", transient_for=self, modal=True)
         box = dlg.get_content_area()
         box.set_spacing(8)
         box.set_border_width(10)
-        text = ("The node key and outbound journal are copied. Restart the "
-                "remote daemon so it picks up the new identity.")
+        text = ("Your identity is copied to the server's daemon. Restart it so "
+                "it comes back as your node.")
         if container:
             text += "\n\nI will try to restart it for you."
         box.add(Gtk.Label(label=text, xalign=0.0, wrap=True))
@@ -2598,13 +2598,13 @@ class AimlessWindow(Gtk.Window):
     def _migrate_verify(self, host, identity, path, expected):
         """Poll the remote daemon until whoami reports the migrated node key;
         then record the pair + relocation and clear the mismatch banner."""
-        dlg = Gtk.Dialog(title="Verifying the node key", transient_for=self, modal=True)
+        dlg = Gtk.Dialog(title="Verifying your node", transient_for=self, modal=True)
         dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
         box = dlg.get_content_area()
         box.set_spacing(8)
         box.set_border_width(10)
-        label = Gtk.Label(label="Waiting for the remote daemon to answer with "
-                                "the migrated node key ...", xalign=0.0, wrap=True)
+        label = Gtk.Label(label="Waiting for the server to come back as your node ...",
+                          xalign=0.0, wrap=True)
         box.add(label)
         dlg.show_all()
         cancelled = {"v": False}
@@ -2830,7 +2830,7 @@ class AimlessWindow(Gtk.Window):
                     secondary_text="Messages won't reach you here. Move your node key "
                                    "to this daemon, or re-share your invite.")
                 dlg.add_button("Dismiss", Gtk.ResponseType.CLOSE)
-                dlg.add_button("Move my node key", Gtk.ResponseType.APPLY)
+                dlg.add_button("Move local identity to remote", Gtk.ResponseType.APPLY)
                 resp = dlg.run()
                 dlg.destroy()
                 if resp == Gtk.ResponseType.APPLY:
@@ -3122,11 +3122,9 @@ class AimlessApp:
         dlg = Gtk.MessageDialog(
             transient_for=None, modal=True, message_type=Gtk.MessageType.WARNING,
             buttons=Gtk.ButtonsType.NONE,
-            text=f"This node currently lives on {host} (SSH).",
-            secondary_text="Starting a local daemon with the same key will conflict "
-                           "on the network and your outgoing messages won't be "
-                           "delivered (the outbound sequence here is behind what "
-                           "your buddies have seen).")
+            text=f"This node currently lives on {host}.",
+            secondary_text="Running it locally as well would conflict on the network "
+                           "and your outgoing messages wouldn't be delivered.")
         dlg.add_button("Start local anyway", Gtk.ResponseType.ACCEPT)
         dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
         dlg.add_button("Use SSH mode", Gtk.ResponseType.APPLY)
@@ -3768,7 +3766,8 @@ def run_ssh_settings_dialog(parent, prompt_restart=True, on_migrate=None):
     Remote mode selector. Returns True if the config changed, False if
     cancelled/unchanged. When prompt_restart, shows a restart note on change
     (mid-session); the first-run/unlock callers pass False and reconnect live
-    instead. on_migrate, if given, is called when 'Move node key' is clicked."""
+    instead. on_migrate, if given, is called when 'Move local identity to remote'
+    is clicked."""
     ssh = ssh_prefs()
     dlg = Gtk.Dialog(title="Remote daemon (SSH)", transient_for=parent, modal=True)
     dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
@@ -3824,11 +3823,11 @@ def run_ssh_settings_dialog(parent, prompt_restart=True, on_migrate=None):
     test_label.set_line_wrap(True)
     box.add(test_label)
 
-    # "Move node key" is available whenever a local daemon state exists and
-    # remote mode is selected (the anytime 'move to a VPS' operation).
+    # "Move local identity to remote" is available whenever a local daemon state
+    # exists and remote mode is selected (the anytime 'move to a VPS' operation).
     migrate_btn = None
     if node_key_public_hex() is not None:
-        migrate_btn = Gtk.Button(label="Move node key to this daemon ...")
+        migrate_btn = Gtk.Button(label="Move local identity to remote ...")
         migrate_btn.connect("clicked", lambda *_: on_migrate() if on_migrate else None)
         migrate_btn.set_no_show_all(True)
         migrate_btn.hide()

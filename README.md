@@ -105,8 +105,8 @@ as if it were local.
 ### Moving your existing account to a server
 
 If you already have contacts, keep them intact by moving the **node key** (your
-address) to the server's daemon. The client's **"Move my node key to this
-daemon"** action (SSH settings dialog, or the mismatch banner when the daemon
+address) to the server's daemon. The client's **"Move local identity to
+remote"** action (SSH settings dialog, or the mismatch banner when the daemon
 address changes) does it in one flow: it backs up the server's `node.key`,
 copies your `node.key` **plus the outbound `journal/` and `inbox/`** and
 `contacts.json` onto the server's daemon datadir, asks you to restart the
