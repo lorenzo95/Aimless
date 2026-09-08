@@ -3081,6 +3081,15 @@ class AimlessApp:
                 self.window.save_geometry()
             except Exception:
                 pass
+        # Drop the daemon connection BEFORE stopping the supervisor: in remote
+        # mode the session's DaemonClient holds the tunnel socket open, which
+        # keeps ssh from exiting promptly and makes quit() stall on
+        # child.wait(). Closing it first lets the tunnel tear down instantly.
+        if self.session is not None:
+            try:
+                self.session.daemon.close()
+            except Exception:
+                pass
         try:
             self.supervisor.stop()
         except Exception:
@@ -3401,6 +3410,7 @@ def run_ssh_settings_dialog(parent, prompt_restart=True):
             find_btn.set_sensitive(True)
             path, build, addr = res
             remote.set_text(path)
+            result_label.set_text("")  # stop showing "searching …" once found
             test_label.set_text(f"found daemon at {path} — {build}, {addr}")
             test_ok["value"] = True  # discovery verified with a real round trip
             update_gate()

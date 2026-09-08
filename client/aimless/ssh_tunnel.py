@@ -95,7 +95,7 @@ class SSHTunnel:
                 except Exception:
                     pass
             try:
-                child.wait(timeout=5)
+                child.wait(timeout=2)
             except Exception:
                 try:
                     os.killpg(os.getpgid(child.pid), signal.SIGKILL)

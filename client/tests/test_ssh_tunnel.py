@@ -757,6 +757,71 @@ def test_ssh_dialog_test_shows_daemon_info(ssh_prefs_env, monkeypatch):
     assert "?" not in final, f"placeholder '?' leaked into result: {final!r}"
 
 
+def test_ssh_dialog_find_replaces_searching_label(ssh_prefs_env, monkeypatch):
+    """After a successful find, the 'searching <host> …' label must be cleared —
+    it used to stay up while the found details appeared below."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+
+    home, config = ssh_prefs_env
+    win = Gtk.Window()
+    win.show_all()
+    win.prefs = gtkui.load_prefs()
+    win.get_toplevel = lambda: win
+    win.set_transient_for = lambda x: None
+    win.on_ssh_settings = gtkui.AimlessWindow.on_ssh_settings.__get__(win)
+
+    monkeypatch.setattr(gtkui, "discover_remote_socket",
+                        lambda h, i=None: ("/srv/state/api.sock", "aimlessd/0.5.6", "200:abc"))
+
+    # find the result_label (shows "searching …") and the test_label (shows the
+    # found details) by driving the dialog: select Remote, click Find, then
+    # assert the searching text is gone and the found text is present.
+    result = {}
+    deadline = time.time() + 8
+    state = {"searched": False, "done": False}
+
+    def on_dialog():
+        if _dialog_deadline_passed(deadline):
+            _dismiss_dialog()
+            return False
+        dlg = _ssh_dialog()
+        if dlg is None:
+            return True
+        entries = [e for e in _walk(dlg) if isinstance(e, Gtk.Entry)]
+        if len(entries) < 3:
+            return True
+        if not state["searched"]:
+            for w in _walk(dlg):
+                if isinstance(w, Gtk.RadioButton) and w.get_label() == "Remote daemon (SSH)":
+                    w.set_active(True)
+                    break
+            entries[0].set_text("user@host")
+            _click_button(dlg, "Find daemon on host")
+            state["searched"] = True
+            return True
+        # once find completes, check the labels
+        texts = [lbl.get_text() for lbl in _walk(dlg)
+                 if isinstance(lbl, gtkui.Gtk.Label)]
+        if any("found daemon" in t for t in texts):
+            result["texts"] = texts
+            _dismiss_dialog()
+            return False
+        return True
+
+    GLib.timeout_add(50, on_dialog)
+    try:
+        win.on_ssh_settings()
+    finally:
+        win.destroy()
+    texts = result.get("texts", [])
+    assert any("found daemon at /srv/state/api.sock" in t for t in texts), \
+        f"found details missing: {texts!r}"
+    assert not any("searching" in t for t in texts), \
+        f"'searching …' was never cleared: {texts!r}"
+
+
 def test_supervisor_stale_detects_config_change(ssh_prefs_env, monkeypatch):
     """The supervisor snapshots its ssh config; changing prefs must make it
     stale so the caller rebuilds instead of reusing the old connection."""
@@ -795,6 +860,37 @@ def test_rebuild_supervisor_if_stale(ssh_prefs_env, monkeypatch):
     assert stopped == [True]  # old supervisor stopped
     assert ensured == [True]  # new supervisor ensured
     assert app.supervisor.remote is False  # rebuilt supervisor used
+
+
+def test_quit_closes_daemon_before_stopping_supervisor(ssh_prefs_env, monkeypatch):
+    """Quit must close the session's DaemonClient before stopping the
+    supervisor, so a remote tunnel can tear down instantly instead of stalling
+    on child.wait() — the slow-quit regression."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    home, config = ssh_prefs_env
+    app = gtkui.AimlessApp()
+    app.log = lambda *a, **k: None
+    order = []
+
+    class FakeDaemon:
+        def close(self):
+            order.append("daemon.close")
+
+    class FakeSession:
+        daemon = FakeDaemon()
+
+    app.session = FakeSession()
+    app.window = None
+    app.lock_fh = None
+    monkeypatch.setattr(app, "supervisor",
+                        type("S", (), {"stop": lambda self: order.append("supervisor.stop")})())
+
+    app.quit()
+    assert order == ["daemon.close", "supervisor.stop"], \
+        f"daemon must be closed before supervisor stops, got: {order!r}"
 
 
 def test_pair_tracking_mismatch(ssh_prefs_env, monkeypatch):
