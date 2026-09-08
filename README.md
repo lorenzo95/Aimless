@@ -105,21 +105,27 @@ as if it were local.
 ### Moving your existing account to a server
 
 If you already have contacts, keep them intact by moving the **node key** (your
-address) to the server's daemon — the client offers this as a one-click
-**"move my node key"** action when it detects you're on a different address.
-(For now, manually: back up the server's `node.key`, copy your `node.key` into
-its daemon datadir, restart the daemon.) The daemon's watch list (`contacts.json`)
-follows the same way; it self-heals on the next GUI launch.
+address) to the server's daemon. The client's **"Move my node key to this
+daemon"** action (SSH settings dialog, or the mismatch banner when the daemon
+address changes) does it in one flow: it backs up the server's `node.key`,
+copies your `node.key` **plus the outbound `journal/` and `inbox/`** and
+`contacts.json` onto the server's daemon datadir, asks you to restart the
+daemon (auto `docker restart` when it can, or shows the exact command), then
+verifies the daemon comes back with your node key. The daemon's watch list
+(`contacts.json`) is copied so presence resumes instantly.
 
-**Must also move the outbound journal.** The daemon's per-buddy outbound
-sequence counter lives in `journal/<buddy-node>.seq` (and `journal/`). If you
-move `node.key` but start the new daemon's journal at seq 1, every text message
-you send gets deduplicated by the recipients as already-seen (their inboxes
-already hold seqs 1..N from your node) and never appears — while **files still
-work**, because attachments dedupe by transfer id, not seq. Copy `journal/`
-(and `inbox/`) alongside `node.key` so the outbound counter continues; verify
-with a test text message after the move. The one-click migration will do this
-automatically.
+**The outbound journal matters.** The daemon's per-buddy outbound sequence
+counter lives in `journal/<buddy-node>.seq` (and `journal/`). If you move
+`node.key` without it, the new daemon starts at seq 1 and every text message
+you send gets deduplicated by recipients as already-seen (their inboxes already
+hold seqs 1..N from your node) and never appears — while **files still work**,
+because attachments dedupe by transfer id, not seq. The one-click migration
+carries the journal for exactly this reason.
+
+If you later switch this machine back to a **local** daemon, the app warns you
+first: running the same node key locally while it lives on the server would
+collide on the mesh and silently lose text (the local outbound seq is behind
+what buddies have seen). You can restore SSH mode from that prompt.
 
 > **One GUI per daemon socket.** Don't run two GUIs against the same daemon
 > socket at the same time — e.g. the webtop GUI *and* your laptop GUI

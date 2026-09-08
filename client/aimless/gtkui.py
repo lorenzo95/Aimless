@@ -2480,10 +2480,177 @@ class AimlessWindow(Gtk.Window):
         self._push_detached(self.prefs.get("offline_status") or DEFAULT_OFFLINE_STATUS)
 
     def on_ssh_settings(self, *_):
-        if run_ssh_settings_dialog(self, prompt_restart=True):
+        if run_ssh_settings_dialog(self, prompt_restart=True,
+                                   on_migrate=getattr(self, "do_migrate_node", None)):
             # the dialog writes prefs to disk directly; resync the window's
             # cached copy so later save_geometry()/set_away() can't clobber it.
             self.prefs = load_prefs()
+
+    def do_migrate_node(self, *_):
+        """Move the local node key (and outbound journal) to the configured
+        remote daemon. Async; prompts for the daemon restart, then verifies the
+        remote answers with the migrated node key."""
+        ssh = ssh_prefs()
+        if not ssh:
+            self.activity.log("migrate node key: no remote daemon configured")
+            return
+        host = ssh["host"]
+        identity = ssh.get("identity") or None
+        datadir = remote_datadir()
+        path = ssh["remote_socket"]
+        expected = node_key_public_hex()
+        if expected is None:
+            self.activity.log("migrate node key: no local node.key to migrate")
+            return
+
+        # --- stage the files (async) ---
+        dlg = Gtk.Dialog(title="Move node key to the remote daemon",
+                         transient_for=self, modal=True)
+        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dlg.set_default_size(460, 140)
+        box = dlg.get_content_area()
+        box.set_spacing(8)
+        box.set_border_width(10)
+        label = Gtk.Label(label="Copying the node key and outbound journal to "
+                                f"{host} ...", xalign=0.0, wrap=True)
+        box.add(label)
+        dlg.show_all()
+
+        def stage_done(result):
+            dlg.destroy()
+            self._migrate_restart_prompt(host, identity, datadir, path, expected)
+
+        def stage_fail(exc):
+            dlg.destroy()
+            self.activity.log(f"migrate node key failed: {exc}")
+
+        def worker():
+            backup = migrate_node_stage(host, identity, datadir)
+            return backup
+
+        run_async(worker, on_done=stage_done, on_error=stage_fail)
+
+    def _migrate_restart_prompt(self, host, identity, datadir, path, expected):
+        """Ask the user to restart the remote daemon (auto docker restart if
+        possible, else show the command), then verify the node key took."""
+        container = detect_remote_container(host, identity, datadir)
+        dlg = Gtk.Dialog(title="Restart the remote daemon", transient_for=self, modal=True)
+        box = dlg.get_content_area()
+        box.set_spacing(8)
+        box.set_border_width(10)
+        text = ("The node key and outbound journal are copied. Restart the "
+                "remote daemon so it picks up the new identity.")
+        if container:
+            text += "\n\nI will try to restart it for you."
+        box.add(Gtk.Label(label=text, xalign=0.0, wrap=True))
+        status = Gtk.Label(label="", xalign=0.0, wrap=True)
+        box.add(status)
+
+        def restart_now(*_):
+            if not container:
+                status.set_text(
+                    f"Could not find the container. Run on the server yourself:\n"
+                    f"  sudo docker restart <container>\n"
+                    f"then click 'I've restarted it'.")
+                return
+            status.set_text(f"restarting {container} ...")
+            dlg.set_sensitive(False)
+            def worker():
+                rc, out, err = ssh_run(host, identity, f"docker restart {container}", timeout=60)
+                return rc, out, err
+            def done(res):
+                rc, out, err = res
+                if rc != 0:
+                    status.set_text(
+                        f"Automatic restart failed (sudo needed?). Run this on the "
+                        f"server yourself:\n  sudo docker restart {container}\n"
+                        f"then click 'I've restarted it'.\n\n{err.strip()}")
+                    dlg.set_sensitive(True)
+                    return
+                status.set_text(f"{container} restarted. Verifying the node key ...")
+                dlg.set_sensitive(True)
+                self._migrate_verify(host, identity, path, expected)
+            run_async(worker, on_done=done)
+
+        def restarted(*_):
+            status.set_text("Verifying the node key ...")
+            dlg.set_sensitive(False)
+            self._migrate_verify(host, identity, path, expected)
+
+        def cancelled(*_):
+            dlg.destroy()
+            self.activity.log("migrate node key: cancelled - the remote daemon still "
+                              "has its old key; new files are staged (restart it later "
+                              "to finish).")
+
+        if container:
+            btn_restart = Gtk.Button(label="Restart the daemon now")
+            btn_restart.connect("clicked", restart_now)
+            box.add(btn_restart)
+        btn_manual = Gtk.Button(label="I've restarted it")
+        btn_manual.connect("clicked", restarted)
+        box.add(btn_manual)
+        btn_cancel = Gtk.Button(label="Cancel")
+        btn_cancel.connect("clicked", cancelled)
+        box.add(btn_cancel)
+        dlg.show_all()
+
+    def _migrate_verify(self, host, identity, path, expected):
+        """Poll the remote daemon until whoami reports the migrated node key;
+        then record the pair + relocation and clear the mismatch banner."""
+        dlg = Gtk.Dialog(title="Verifying the node key", transient_for=self, modal=True)
+        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        box = dlg.get_content_area()
+        box.set_spacing(8)
+        box.set_border_width(10)
+        label = Gtk.Label(label="Waiting for the remote daemon to answer with "
+                                "the migrated node key ...", xalign=0.0, wrap=True)
+        box.add(label)
+        dlg.show_all()
+        cancelled = {"v": False}
+
+        def on_cancel(*_):
+            cancelled["v"] = True
+            dlg.destroy()
+            self.activity.log("migrate node key: verification cancelled - files "
+                              "are staged; restart the daemon later to finish.")
+
+        for child in dlg.get_action_area().get_children():
+            if isinstance(child, Gtk.Button):
+                child.connect("clicked", on_cancel)
+
+        def worker():
+            ok = verify_remote_node_key(host, identity, path, expected,
+                                        timeout=180)
+            return ok
+
+        def done(ok):
+            if cancelled["v"]:
+                return
+            dlg.destroy()
+            if ok:
+                prefs = load_prefs()
+                prefs["last_node_key"] = expected
+                prefs["node_relocated"] = {
+                    "key": expected, "host": host,
+                    "remote_socket": path, "ts": int(time.time()),
+                }
+                save_prefs(prefs)
+                self.prefs = prefs
+                self._mismatch_notified = True  # suppress the banner
+                self.activity.log("node key migrated - remote daemon now answers "
+                                  "with the expected identity")
+            else:
+                self.activity.log("migrate node key: the remote daemon did not come "
+                                  "up with the new key - check it restarted")
+
+        def fail(exc):
+            if cancelled["v"]:
+                return
+            dlg.destroy()
+            self.activity.log(f"migrate node key verification failed: {exc}")
+
+        run_async(worker, on_done=done, on_error=fail)
 
 
 
@@ -2658,12 +2825,16 @@ class AimlessWindow(Gtk.Window):
                 self._mismatch_notified = True
                 dlg = Gtk.MessageDialog(
                     transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
-                    buttons=Gtk.ButtonsType.OK,
+                    buttons=Gtk.ButtonsType.NONE,
                     text="Your contacts know you at a different daemon address.",
-                    secondary_text="Messages won't reach you here. Re-share your invite, "
-                                   "or migrate your node key to this daemon.")
-                dlg.run()
+                    secondary_text="Messages won't reach you here. Move your node key "
+                                   "to this daemon, or re-share your invite.")
+                dlg.add_button("Dismiss", Gtk.ResponseType.CLOSE)
+                dlg.add_button("Move my node key", Gtk.ResponseType.APPLY)
+                resp = dlg.run()
                 dlg.destroy()
+                if resp == Gtk.ResponseType.APPLY:
+                    self.do_migrate_node()
         except Exception:
             pass
 
@@ -2933,6 +3104,47 @@ class AimlessApp:
         Gtk.main()
         return 0
 
+    def _guard_local_startup_after_migration(self):
+        """If this node.key was moved to a remote daemon, starting a LOCAL daemon
+        with it would collide on the mesh and silently lose text (stale outbound
+        seq vs what buddies have seen). Warn before starting local; offer to
+        restore the SSH mode."""
+        if self.supervisor.remote:
+            return
+        prefs = load_prefs()
+        rel = prefs.get("node_relocated") if isinstance(prefs.get("node_relocated"), dict) else None
+        if not rel:
+            return
+        local_pub = node_key_public_hex()
+        if local_pub is None or local_pub != rel.get("key"):
+            return  # different identity locally - no conflict
+        host = rel.get("host") or "?"
+        dlg = Gtk.MessageDialog(
+            transient_for=None, modal=True, message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f"This node currently lives on {host} (SSH).",
+            secondary_text="Starting a local daemon with the same key will conflict "
+                           "on the network and your outgoing messages won't be "
+                           "delivered (the outbound sequence here is behind what "
+                           "your buddies have seen).")
+        dlg.add_button("Start local anyway", Gtk.ResponseType.ACCEPT)
+        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dlg.add_button("Use SSH mode", Gtk.ResponseType.APPLY)
+        resp = dlg.run()
+        dlg.destroy()
+        if resp == Gtk.ResponseType.APPLY:
+            # restore the stored SSH config and reconnect to the remote daemon;
+            # _setup continues to _ensure_daemon_with_recovery() with the new
+            # remote supervisor.
+            prefs["ssh"] = {"host": rel["host"],
+                            "remote_socket": rel.get("remote_socket") or ""}
+            save_prefs(prefs)
+            self.prefs = prefs
+            self.supervisor = DaemonSupervisor()
+            return
+        if resp == Gtk.ResponseType.CANCEL:
+            raise SystemExit(1)
+
     def _ensure_daemon_with_recovery(self):
         """Bring up the daemon (local spawn or remote SSH tunnel), retrying
         after the 'Disable remote daemon and retry' escape hatch clears a bad
@@ -2999,6 +3211,11 @@ class AimlessApp:
                 except OSError:
                     pass
             return 0
+
+        try:
+            self._guard_local_startup_after_migration()
+        except SystemExit:
+            return 1
 
         try:
             self._ensure_daemon_with_recovery()
@@ -3350,16 +3567,182 @@ def probe_remote_daemon(host, path, identity=None):
         t.stop()
 
 
+def _ssh_common(identity=None):
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+           "-o", "StrictHostKeyChecking=accept-new"]
+    if identity:
+        cmd += ["-i", os.path.expanduser(identity)]
+    return cmd
+
+
+def _scp_common(identity=None):
+    cmd = ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+           "-o", "StrictHostKeyChecking=accept-new"]
+    if identity:
+        cmd += ["-i", os.path.expanduser(identity)]
+    return cmd
+
+
+def scp_transfer(host, identity, src, dst, put=True, timeout=60):
+    """Copy one file between local and the remote host. put=True: local src to
+    remote dst; put=False: remote src to local dst. Raises RuntimeError on
+    failure."""
+    cmd = _scp_common(identity)
+    if put:
+        cmd += [src, f"{host}:{dst}"]
+    else:
+        cmd += [f"{host}:{src}", dst]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("scp timed out")
+    if r.returncode != 0:
+        raise RuntimeError(f"scp failed: {r.stderr.strip() or f'exit {r.returncode}'}")
+
+
+def ssh_run(host, identity, remote_cmd, timeout=30):
+    """Run a command on the remote host over ssh. Returns (rc, stdout, stderr)."""
+    cmd = _ssh_common(identity) + [host, remote_cmd]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"no answer from {host} (ssh timed out)")
+    return r.returncode, r.stdout, r.stderr
+
+
+def migrate_node_stage(host, identity, datadir, log=None):
+    """Back up the remote node.key and copy the local daemon state (node.key,
+    outbound journal, inbox, contacts) onto the remote daemon's datadir. This is
+    the 'move my node key' step: the outbound journal carries the per-buddy seq
+    counters so recipients don't deduplicate text as replays. The daemon must be
+    restarted after this for the new key to take effect."""
+    local_key = os.path.join(data_dir(), "node.key")
+    if not os.path.exists(local_key):
+        raise RuntimeError("no local node.key to migrate - is a local daemon configured?")
+    # Guard: a live local daemon using this key would collide with the remote.
+    if daemon_pid_from_procs() is not None:
+        raise RuntimeError("a local daemon is running - stop it before migrating the node key")
+    if log:
+        log("backing up the remote node.key ...")
+    ts = int(time.time())
+    backup = f"{datadir}/node.key.pre-migration-{ts}"
+    rc, _, err = ssh_run(host, identity, f"test -f {datadir}/node.key && cp -p {datadir}/node.key {backup} && echo ok")
+    if rc != 0:
+        raise RuntimeError(f"could not back up the remote node.key: {err.strip() or f'exit {rc}'}")
+    if log:
+        log("copying node.key, journal, inbox and contacts to the remote daemon ...")
+    # node.key
+    scp_transfer(host, identity, local_key, f"{datadir}/node.key", put=True)
+    # journal/ (per-buddy outbox: *.jsonl + *.seq) - carries the seq counters
+    local_journal = os.path.join(data_dir(), "journal")
+    remote_journal = f"{datadir}/journal"
+    ssh_run(host, identity, f"mkdir -p {remote_journal}")
+    for name in os.listdir(local_journal):
+        scp_transfer(host, identity, os.path.join(local_journal, name),
+                     f"{remote_journal}/{name}", put=True)
+    # inbox/ (received-while-away)
+    local_inbox = os.path.join(data_dir(), "inbox")
+    if os.path.isdir(local_inbox):
+        remote_inbox = f"{datadir}/inbox"
+        ssh_run(host, identity, f"mkdir -p {remote_inbox}")
+        for name in os.listdir(local_inbox):
+            scp_transfer(host, identity, os.path.join(local_inbox, name),
+                         f"{remote_inbox}/{name}", put=True)
+    # contacts.json (watch list - presence resumes instantly)
+    local_contacts = os.path.join(data_dir(), "contacts.json")
+    if os.path.exists(local_contacts):
+        scp_transfer(host, identity, local_contacts, f"{datadir}/contacts.json", put=True)
+    # tighten perms on everything we wrote
+    ssh_run(host, identity,
+            f"chmod 600 {datadir}/node.key {remote_journal}/* {remote_inbox}/* 2>/dev/null; "
+            f"chmod 600 {datadir}/contacts.json 2>/dev/null || true")
+    return backup
+
+
+def detect_remote_container(host, identity, datadir):
+    """Best-effort name of the docker container running the remote daemon. The
+    datadir path is dirname(api.sock); the compose dir is its parent's parent
+    (e.g. .../deploy/docker/aimless-data/state -> .../deploy/docker), and the
+    compose convention names the container 'aimless-webtop'. We look for the
+    container by name, then by a bind mount containing the datadir. Returns the
+    name or None."""
+    rc, out, _ = ssh_run(host, identity, "docker ps --format '{{.Names}}'", timeout=20)
+    if rc != 0:
+        return None
+    names = [n.strip() for n in out.splitlines() if n.strip()]
+    if not names:
+        return None
+    # prefer the conventional name
+    if "aimless-webtop" in names:
+        return "aimless-webtop"
+    # else any container whose mount path is an ancestor of the datadir
+    for name in names:
+        rc2, out2, _ = ssh_run(
+            host, identity, f"docker inspect -f '{{{{range .Mounts}}}}{{{{.Source}}}} {{{{end}}}}' {name}",
+            timeout=20)
+        if rc2 == 0 and datadir.startswith(out2.strip()):
+            return name
+    return names[0] if "aimless" in " ".join(names) else None
+
+
+def verify_remote_node_key(host, identity, path, expected_hex, timeout=30, log=None):
+    """Open a tunnel to the remote daemon and poll whoami until it reports
+    `expected_hex` as its node key (the migration took effect after restart).
+    Returns True on match, False on timeout."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        t = SSHTunnel(host, path, os.path.join(CONFIG_DIR, "remote-api.sock.tmp"),
+                      identity=identity or None)
+        try:
+            t.start()
+            c = DaemonClient(t.local_socket)
+            try:
+                who = c.request("whoami", timeout=5)
+            finally:
+                c.close()
+            if who.get("key") == expected_hex:
+                return True
+        except Exception:
+            pass
+        finally:
+            t.stop()
+        if log:
+            log("waiting for the remote daemon to come up with the new node key ...")
+        time.sleep(2)
+    return False
+
+
+def remote_datadir():
+    """The daemon's datadir on the remote host, derived from the socket path we
+    already know (dirname of api.sock)."""
+    ssh = ssh_prefs()
+    return os.path.dirname(ssh["remote_socket"])
+
+
+def node_key_public_hex():
+    """The public key of the local daemon's node.key (the address buddies know),
+    derived from the 64-byte ed25519 seed stored hex-encoded. Used to verify a
+    migrated daemon answers with the right identity."""
+    path = os.path.join(data_dir(), "node.key")
+    try:
+        with open(path) as f:
+            seed = bytes.fromhex(f.read().strip())
+    except Exception:
+        return None
+    import nacl.signing
+    try:
+        return bytes(nacl.signing.SigningKey(seed).verify_key).hex()
+    except Exception:
+        return None
+
+
 def discover_remote_socket(host, identity=None):
     """Find a live aimlessd api.sock on the ssh host. A configured host IS remote
     mode, so the socket path should never have to be typed by hand: list api.sock
     candidates under $HOME, then verify each through a real tunnel+whoami. Returns
     (path, build, address) or raises RuntimeError with an actionable message."""
-    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
-           "-o", "StrictHostKeyChecking=accept-new"]
-    if identity:
-        cmd += ["-i", os.path.expanduser(identity)]
-    cmd += [host, "find $HOME -maxdepth 6 -name api.sock -type s 2>/dev/null"]
+    cmd = _ssh_common(identity) + [host,
+        "find $HOME -maxdepth 6 -name api.sock -type s 2>/dev/null"]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
@@ -3378,14 +3761,14 @@ def discover_remote_socket(host, identity=None):
     raise RuntimeError(f"found socket(s) on {host} but none answered whoami - check the daemon is up")
 
 
-def run_ssh_settings_dialog(parent, prompt_restart=True):
+def run_ssh_settings_dialog(parent, prompt_restart=True, on_migrate=None):
     """Standalone 'Remote daemon (SSH)' settings dialog. A configured host IS
     remote mode; the daemon socket is discovered automatically (advanced
     override available). The dialog makes the choice explicit with a Local /
     Remote mode selector. Returns True if the config changed, False if
     cancelled/unchanged. When prompt_restart, shows a restart note on change
     (mid-session); the first-run/unlock callers pass False and reconnect live
-    instead."""
+    instead. on_migrate, if given, is called when 'Move node key' is clicked."""
     ssh = ssh_prefs()
     dlg = Gtk.Dialog(title="Remote daemon (SSH)", transient_for=parent, modal=True)
     dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
@@ -3441,6 +3824,16 @@ def run_ssh_settings_dialog(parent, prompt_restart=True):
     test_label.set_line_wrap(True)
     box.add(test_label)
 
+    # "Move node key" is available whenever a local daemon state exists and
+    # remote mode is selected (the anytime 'move to a VPS' operation).
+    migrate_btn = None
+    if node_key_public_hex() is not None:
+        migrate_btn = Gtk.Button(label="Move node key to this daemon ...")
+        migrate_btn.connect("clicked", lambda *_: on_migrate() if on_migrate else None)
+        migrate_btn.set_no_show_all(True)
+        migrate_btn.hide()
+        box.add(migrate_btn)
+
     # Hard gate: saving a remote config requires a successful live test (a
     # wrong host means the app silently can't reach its mailbox after a restart).
     # Going local needs no test.
@@ -3456,6 +3849,11 @@ def run_ssh_settings_dialog(parent, prompt_restart=True):
                 w.set_sensitive(sensitive)
             except Exception:
                 pass
+        if migrate_btn is not None:
+            if sensitive:
+                migrate_btn.show()
+            else:
+                migrate_btn.hide()
 
     def update_gate():
         if save_btn is None:

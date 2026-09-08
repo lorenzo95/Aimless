@@ -1514,3 +1514,261 @@ def test_tunnel_local_socket_forward_to_real_daemon(ssh_prefs_env, monkeypatch):
 def shutil_which(name):
     import shutil
     return shutil.which(name)
+
+def _write_node_key(home, seed_hex=None):
+    import nacl.signing
+    seed = seed_hex or bytes(bytearray(range(32))).hex()
+    key = nacl.signing.SigningKey(bytes.fromhex(seed))
+    p = home / "node.key"
+    p.write_text(seed + "\n")
+    return bytes(key.verify_key).hex()
+
+
+def test_node_key_public_hex(ssh_prefs_env):
+    home, config = ssh_prefs_env
+    pub = _write_node_key(home)
+    assert gtkui.node_key_public_hex() == pub
+
+
+def test_node_key_public_hex_missing(ssh_prefs_env):
+    home, config = ssh_prefs_env
+    assert gtkui.node_key_public_hex() is None
+
+
+def test_migrate_node_stage_copies_state(ssh_prefs_env, monkeypatch):
+    home, config = ssh_prefs_env
+    pub = _write_node_key(home)
+    (home / "journal").mkdir()
+    (home / "journal" / "aabb.seq").write_text("2385\n")
+    (home / "journal" / "aabb.jsonl").write_text("x")
+    (home / "inbox").mkdir()
+    (home / "inbox" / "aabb.jsonl").write_text("y")
+    (home / "contacts.json").write_text('{"contacts":["aabb"]}')
+    write_ssh_prefs(config, {"host": "me@host", "remote_socket": "/srv/aimless/state/api.sock"})
+
+    ops = []
+
+    class R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_scp(host, identity, src, dst, put=True, timeout=60):
+        ops.append(("scp", (src, dst)))
+        return None
+
+    def fake_ssh_run(host, identity, cmd, timeout=30):
+        ops.append(("ssh", cmd))
+        return 0, "", ""
+
+    monkeypatch.setattr(gtkui, "scp_transfer", fake_scp)
+    monkeypatch.setattr(gtkui, "ssh_run", fake_ssh_run)
+    monkeypatch.setattr(gtkui, "daemon_pid_from_procs", lambda: None)
+
+    backup = gtkui.migrate_node_stage("me@host", None, "/srv/aimless/state")
+    # backup first, then node.key, journal files, inbox, contacts
+    cmds = [c for kind, c in ops if kind == "ssh"]
+    assert any("node.key.pre-migration" in c for c in cmds)
+    scp_dst = [d for kind, d in ops if kind == "scp"]
+    # scp_transfer(host, identity, src, dst); check the remote dst paths
+    scp_remote = [d[1] for d in scp_dst]
+    assert any(d.endswith("/state/node.key") for d in scp_remote)
+    assert any(d.endswith("/journal/aabb.seq") for d in scp_remote)
+    assert any(d.endswith("/journal/aabb.jsonl") for d in scp_remote)
+    assert any(d.endswith("/inbox/aabb.jsonl") for d in scp_remote)
+    assert any(d.endswith("/state/contacts.json") for d in scp_remote)
+    assert any("chmod 600" in c for c in cmds)
+    assert backup.startswith("/srv/aimless/state/node.key.pre-migration-")
+
+
+def test_migrate_node_stage_requires_local_key(ssh_prefs_env, monkeypatch):
+    home, config = ssh_prefs_env
+    write_ssh_prefs(config, {"host": "me@host", "remote_socket": "/srv/state/api.sock"})
+    with pytest.raises(RuntimeError, match="no local node.key"):
+        gtkui.migrate_node_stage("me@host", None, "/srv/state")
+
+
+def test_migrate_node_stage_refuses_live_local_daemon(ssh_prefs_env, monkeypatch):
+    home, config = ssh_prefs_env
+    _write_node_key(home)
+    write_ssh_prefs(config, {"host": "me@host", "remote_socket": "/srv/state/api.sock"})
+    monkeypatch.setattr(gtkui, "daemon_pid_from_procs", lambda: 12345)
+    with pytest.raises(RuntimeError, match="local daemon is running"):
+        gtkui.migrate_node_stage("me@host", None, "/srv/state")
+
+
+def test_verify_remote_node_key_matches(ssh_prefs_env, monkeypatch):
+    home, config = ssh_prefs_env
+    expected = "aabb"
+    attempts = []
+
+    def fake_probe(host, path, identity=None):
+        attempts.append(1)
+        return {"key": expected}, None
+
+    # simpler: monkeypatch verify to use a fake tunnel+daemon via module attrs
+    monkeypatch.setattr(gtkui, "SSHTunnel", lambda *a, **k: type("T", (), {
+        "local_socket": "/tmp/x",
+        "start": lambda self: None,
+        "stop": lambda self: None,
+    })())
+    real_client = gtkui.DaemonClient
+
+    class FakeDC:
+        def __init__(self, sock):
+            pass
+
+        def request(self, op, timeout=10.0, **kw):
+            attempts.append(op)
+            return {"key": "aabb"}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(gtkui, "DaemonClient", FakeDC)
+    assert gtkui.verify_remote_node_key("me@host", None, "/srv/state/api.sock", "aabb", timeout=5)
+    assert attempts
+
+
+def test_verify_remote_node_key_timeout(ssh_prefs_env, monkeypatch):
+    home, config = ssh_prefs_env
+    monkeypatch.setattr(gtkui, "SSHTunnel", lambda *a, **k: type("T", (), {
+        "local_socket": "/tmp/x",
+        "start": lambda self: None,
+        "stop": lambda self: None,
+    })())
+    monkeypatch.setattr(gtkui, "DaemonClient",
+                        lambda sock: type("D", (), {
+                            "request": lambda self, op, timeout=10.0, **kw: {"key": "other"},
+                            "close": lambda self: None,
+                        })())
+    assert not gtkui.verify_remote_node_key("me@host", None, "/srv/state/api.sock", "aabb", timeout=3)
+
+
+def test_guard_local_startup_after_migration(ssh_prefs_env, monkeypatch):
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    home, config = ssh_prefs_env
+    pub = _write_node_key(home)
+    # prefs: relocated marker + ssh config cleared (user switched to local)
+    gtkui.save_prefs({"node_relocated": {"key": pub, "host": "me@host",
+                                         "remote_socket": "/srv/state/api.sock"}})
+
+    app = gtkui.AimlessApp()
+    app.log = lambda *a, **k: None
+    app.supervisor = gtkui.DaemonSupervisor()  # local (no ssh prefs)
+
+    # "Use SSH mode" -> restores ssh prefs, rebuilds supervisor, returns
+    real_md = gtkui.Gtk.MessageDialog
+    monkeypatch.setattr(gtkui.Gtk, "MessageDialog", lambda *a, **k: type("M", (real_md,), {
+        "run": lambda self: Gtk.ResponseType.APPLY,
+    })())
+    app._guard_local_startup_after_migration()
+    assert gtkui.load_prefs()["ssh"]["host"] == "me@host"
+    assert app.supervisor.remote is True
+
+    # "Start local anyway" -> returns, no ssh restored
+    gtkui.save_prefs({"node_relocated": {"key": pub, "host": "me@host",
+                                         "remote_socket": "/srv/state/api.sock"}})
+    app2 = gtkui.AimlessApp()
+    app2.log = lambda *a, **k: None
+    app2.supervisor = gtkui.DaemonSupervisor()
+    monkeypatch.setattr(gtkui.Gtk, "MessageDialog", lambda *a, **k: type("M", (real_md,), {
+        "run": lambda self: Gtk.ResponseType.ACCEPT,
+    })())
+    app2._guard_local_startup_after_migration()
+    assert "ssh" not in gtkui.load_prefs()
+
+    # "Cancel" -> SystemExit(1)
+    gtkui.save_prefs({"node_relocated": {"key": pub, "host": "me@host",
+                                         "remote_socket": "/srv/state/api.sock"}})
+    app3 = gtkui.AimlessApp()
+    app3.log = lambda *a, **k: None
+    app3.supervisor = gtkui.DaemonSupervisor()
+    monkeypatch.setattr(gtkui.Gtk, "MessageDialog", lambda *a, **k: type("M", (real_md,), {
+        "run": lambda self: Gtk.ResponseType.CANCEL,
+    })())
+    with pytest.raises(SystemExit):
+        app3._guard_local_startup_after_migration()
+
+
+def test_guard_no_relocation_skips(ssh_prefs_env, monkeypatch):
+    home, config = ssh_prefs_env
+    _write_node_key(home)
+    gtkui.save_prefs({})
+    app = gtkui.AimlessApp()
+    app.log = lambda *a, **k: None
+    app.supervisor = gtkui.DaemonSupervisor()
+    app._guard_local_startup_after_migration()  # no dialog -> returns silently
+
+
+def test_ssh_dialog_shows_migrate_button(ssh_prefs_env, monkeypatch):
+    """The SSH settings dialog shows 'Move node key to this daemon' when a local
+    node.key exists and remote mode is selected."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+
+    home, config = ssh_prefs_env
+    _write_node_key(home)
+
+    win = Gtk.Window()
+    win.show_all()
+    win.prefs = gtkui.load_prefs()
+    win.get_toplevel = lambda: win
+    win.set_transient_for = lambda x: None
+    win.on_ssh_settings = gtkui.AimlessWindow.on_ssh_settings.__get__(win)
+    win.do_migrate_node = lambda *_: None
+
+    found = {}
+    deadline = time.time() + 8
+    state = {"seen": False}
+
+    def on_dialog():
+        if _dialog_deadline_passed(deadline):
+            _dismiss_dialog()
+            return False
+        dlg = _ssh_dialog()
+        if dlg is None:
+            return True
+        for w in _walk(dlg):
+            if isinstance(w, gtkui.Gtk.Button) and "Move node key" in w.get_label():
+                found["migrate"] = True
+                break
+        if not state["seen"]:
+            # switch to Remote mode so the button becomes visible
+            for w in _walk(dlg):
+                if isinstance(w, Gtk.RadioButton) and w.get_label() == "Remote daemon (SSH)":
+                    w.set_active(True)
+                    break
+            state["seen"] = True
+            return True
+        if found.get("migrate") and state["seen"]:
+            _dismiss_dialog()
+            return False
+        return True
+
+    GLib.timeout_add(50, on_dialog)
+    try:
+        win.on_ssh_settings()
+    finally:
+        win.destroy()
+    assert found.get("migrate"), "Move node key button not shown when a local key exists"
+
+
+def test_do_migrate_node_requires_ssh(ssh_prefs_env, monkeypatch):
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    home, config = ssh_prefs_env
+    _write_node_key(home)
+    win = Gtk.Window()
+    win.show_all()
+    win.activity = type("A", (), {"log": lambda self, *a, **k: None})()
+    win.do_migrate_node = gtkui.AimlessWindow.do_migrate_node.__get__(win)
+    win._migrate_restart_prompt = lambda *a, **k: None
+    win.do_migrate_node()  # no ssh prefs -> logs, returns, no crash
+    win.destroy()
