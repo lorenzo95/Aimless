@@ -2902,6 +2902,10 @@ class AimlessApp:
                     prefs["ssh"] = ssh
                     save_prefs(prefs)
                     self.log("ssh disabled by startup recovery — retrying with the local daemon")
+                    try:
+                        self.supervisor.stop()  # tear down the failed remote tunnel before discarding it
+                    except Exception:
+                        pass
                     self.supervisor = DaemonSupervisor()  # re-read prefs; local spawn
                     continue
                 return 1

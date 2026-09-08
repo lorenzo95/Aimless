@@ -493,6 +493,46 @@ def test_ssh_dialog_whoami_failure_distinct(ssh_prefs_env, monkeypatch):
         f"expected a daemon-unreachable message, got: {labels.get('final')!r}"
 
 
+def test_request_bounded_on_flapping_connection(ssh_prefs_env):
+    """A connection that accepts then immediately closes (a live tunnel to a
+    dead remote — the exact broken-config case) must not let request() stall
+    forever: each reconnect used to reset the deadline, so a whoami could hang
+    ~7x its timeout. The total wait is now capped at timeout + reconnect grace."""
+    import socket as _socket
+    import threading as _threading
+    from aimless.daemon import DaemonClient, DaemonError
+
+    home, config = ssh_prefs_env
+    path = str(config / "flap.sock")
+    srv = _socket.socket(_socket.AF_UNIX)
+    srv.bind(path)
+    srv.listen(8)
+
+    def close_loop():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            conn.close()
+
+    _threading.Thread(target=close_loop, daemon=True).start()
+    c = DaemonClient(path)
+    t0 = time.time()
+    try:
+        with pytest.raises(DaemonError):
+            c.request("whoami", timeout=2)
+        elapsed = time.time() - t0
+        assert elapsed < 15, f"request took {elapsed:.1f}s for a 2s timeout — unbounded reconnect resets are back"
+    finally:
+        c.close()
+        srv.close()
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def test_ssh_startup_lockout_escape_hatch(ssh_prefs_env, monkeypatch):
     """Startup with SSH enabled but a failing tunnel must offer 'Disable remote
     daemon and retry'; clicking it disables SSH in prefs and falls through to a
@@ -508,12 +548,18 @@ def test_ssh_startup_lockout_escape_hatch(ssh_prefs_env, monkeypatch):
         "remote_socket": "/srv/aimless/api.sock",
     })
 
-    # supervisor whose ensure() fails as it would with a bad remote config
+    # supervisor whose ensure() fails as it would with a bad remote config;
+    # stop() tracks whether the recovery tears down the failed tunnel before
+    # discarding the supervisor.
     class FailingSupervisor:
         remote = True
+        stopped = 0
 
         def ensure(self, log=None):
             raise RuntimeError("ssh tunnel failed")
+
+        def stop(self):
+            FailingSupervisor.stopped += 1
 
     # after recovery, the app swaps in a local supervisor and continues
     calls = {"local_ensured": 0, "tray": 0, "open_window": 0}
@@ -544,6 +590,8 @@ def test_ssh_startup_lockout_escape_hatch(ssh_prefs_env, monkeypatch):
 
     rc = app._setup(open_window=True)
     assert rc is None  # fell through to a running app
+    assert FailingSupervisor.stopped == 1, \
+        "the failed remote supervisor must be stopped (tunnel torn down) before being discarded"
     assert calls["local_ensured"] == 1, "local supervisor was not used after recovery"
     assert calls["open_window"] == 1, "window did not open after recovery"
     saved = gtkui.load_prefs()["ssh"]

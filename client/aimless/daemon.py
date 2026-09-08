@@ -135,14 +135,21 @@ class DaemonClient:
         req["id"] = self._new_id()
         expected = RESPONSE_MAP.get(op, op)
         with self._roundtrip_lock:
-            deadline = time.monotonic() + timeout
+            started = time.monotonic()
+            deadline = started + timeout
+            # A flapping connection (tunnel up, remote dead) reconnects in a
+            # loop; each reconnect used to push the deadline out again, so a
+            # request could stall ~reconnect-interval × forever. Cap the whole
+            # request: reconnect grace is allowed, but never beyond this.
+            hard_deadline = started + timeout + 10.0
             sent_gen = self._generation
             sent = False
             while True:
                 if self._sock is None or self._want_reconnect.is_set():
-                    if not self._wait_generation_change(sent_gen, 10.0):
+                    wait = min(10.0, max(0.0, hard_deadline - time.monotonic()))
+                    if not self._wait_generation_change(sent_gen, wait):
                         raise DaemonError(f"daemon unreachable ({op})")
-                    deadline = time.monotonic() + timeout
+                    deadline = min(time.monotonic() + timeout, hard_deadline)
                     sent = False
                 if not sent:
                     try:
@@ -151,9 +158,10 @@ class DaemonClient:
                         sent_gen = self._generation
                     except (OSError, AttributeError):
                         self._want_reconnect.set()
-                        if not self._wait_generation_change(sent_gen, 10.0):
+                        wait = min(10.0, max(0.0, hard_deadline - time.monotonic()))
+                        if not self._wait_generation_change(sent_gen, wait):
                             raise DaemonError(f"daemon unreachable ({op})")
-                        deadline = time.monotonic() + timeout
+                        deadline = min(time.monotonic() + timeout, hard_deadline)
                         sent = False
                         continue
                 remaining = deadline - time.monotonic()
@@ -186,14 +194,19 @@ class DaemonClient:
         with self._pending_lock:
             self._pending[rid] = mb
         try:
-            deadline = time.monotonic() + timeout
+            started = time.monotonic()
+            deadline = started + timeout
+            # same hard cap as _request_legacy: a flapping connection must not
+            # be able to extend a request forever
+            hard_deadline = started + timeout + 10.0
             sent_gen = self._generation
             sent = False
             while True:
                 if self._sock is None or self._want_reconnect.is_set():
-                    if not self._wait_generation_change(sent_gen, 10.0):
+                    wait = min(10.0, max(0.0, hard_deadline - time.monotonic()))
+                    if not self._wait_generation_change(sent_gen, wait):
                         raise DaemonError(f"daemon unreachable ({op})")
-                    deadline = time.monotonic() + timeout
+                    deadline = min(time.monotonic() + timeout, hard_deadline)
                     sent = False
                 if not sent:
                     with self._send_lock:
@@ -205,9 +218,10 @@ class DaemonClient:
                             self._want_reconnect.set()
                             sent = False
                     if not sent:
-                        if not self._wait_generation_change(sent_gen, 10.0):
+                        wait = min(10.0, max(0.0, hard_deadline - time.monotonic()))
+                        if not self._wait_generation_change(sent_gen, wait):
                             raise DaemonError(f"daemon unreachable ({op})")
-                        deadline = time.monotonic() + timeout
+                        deadline = min(time.monotonic() + timeout, hard_deadline)
                         continue
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
