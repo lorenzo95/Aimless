@@ -111,6 +111,16 @@ address) to the server's daemon — the client offers this as a one-click
 its daemon datadir, restart the daemon.) The daemon's watch list (`contacts.json`)
 follows the same way; it self-heals on the next GUI launch.
 
+**Must also move the outbound journal.** The daemon's per-buddy outbound
+sequence counter lives in `journal/<buddy-node>.seq` (and `journal/`). If you
+move `node.key` but start the new daemon's journal at seq 1, every text message
+you send gets deduplicated by the recipients as already-seen (their inboxes
+already hold seqs 1..N from your node) and never appears — while **files still
+work**, because attachments dedupe by transfer id, not seq. Copy `journal/`
+(and `inbox/`) alongside `node.key` so the outbound counter continues; verify
+with a test text message after the move. The one-click migration will do this
+automatically.
+
 > **One GUI per daemon socket.** Don't run two GUIs against the same daemon
 > socket at the same time — e.g. the webtop GUI *and* your laptop GUI
 > simultaneously. Both receive every message and both may ACK attachments, so
