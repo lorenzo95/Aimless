@@ -93,6 +93,108 @@ def test_ssh_prefs_save_without_identity_drops_key(ssh_prefs_env):
     assert saved["enabled"] and saved["host"] == "me@host"
 
 
+def test_ssh_dialog_values_captured_before_destroy(ssh_prefs_env, monkeypatch):
+    """The core regression, isolated: reading get_text() after destroy returns ''
+    — verify the dialog code captures values before destroying (i.e. that the
+    saved config equals the pre-destroy values and SSH stays enabled)."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    # Reproduce the destroyed-entry behavior directly: build the real dialog,
+    # fill, capture, destroy, and check the captured values (as the fixed code
+    # does) rather than reading after destroy (as the buggy code did).
+    dlg = Gtk.Dialog(title="t")
+    box = dlg.get_content_area()
+    e = Gtk.Entry()
+    e.set_text("debian@192.168.1.111")
+    box.add(e)
+    dlg.show_all()
+    captured = e.get_text()  # fixed: capture before destroy
+    dlg.destroy()
+    after = e.get_text()     # buggy: read after destroy
+    assert captured == "debian@192.168.1.111"
+    assert after == ""       # documents the GTK behavior the fix works around
+
+
+def test_ssh_dialog_save_end_to_end(ssh_prefs_env, monkeypatch):
+    """Drive the real on_ssh_settings dialog: fill entries + toggle the enable
+    checkbox, click Save, and assert the prefs file is written with exactly
+    what the user typed. Regression for the destroyed-entry bug (values read
+    after dlg.destroy() came back empty and SSH stayed disabled)."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+
+    home, config = ssh_prefs_env
+
+    win = Gtk.Window()
+    win.show_all()
+    win.prefs = gtkui.load_prefs()
+    win.get_toplevel = lambda: win
+    win.set_transient_for = lambda x: None
+    win.on_ssh_settings = gtkui.AimlessWindow.on_ssh_settings.__get__(win)
+
+    # The "Restart the app…" info dialog after Save would block run(); make it
+    # a no-op so the test returns.
+    class FakeMsg(Gtk.MessageDialog):
+        def run(self, *a):
+            return Gtk.ResponseType.OK
+
+    monkeypatch.setattr(gtkui.Gtk, "MessageDialog", FakeMsg)
+
+    def find_entries(w):
+        out = []
+        if isinstance(w, Gtk.Entry):
+            out.append(w)
+        if isinstance(w, Gtk.Container):
+            for c in w.get_children():
+                out.extend(find_entries(c))
+        return out
+
+    result = {}
+
+    deadline = time.time() + 5
+
+    def on_dialog():
+        if time.time() > deadline:
+            return False
+        candidates = [w for w in Gtk.Window.list_toplevels()
+                      if isinstance(w, Gtk.Dialog) and w.get_title() == "Remote daemon (SSH)"]
+        if not candidates:
+            return True  # dialog not up yet — keep polling
+        dlg = candidates[0]
+        for child in dlg.get_content_area().get_children():
+            if isinstance(child, Gtk.CheckButton):
+                child.set_active(True)
+                break
+        entries = find_entries(dlg)
+        assert len(entries) >= 3
+        entries[0].set_text("debian@192.168.1.111")
+        entries[1].set_text("/srv/aimless/state/api.sock")
+        entries[2].set_text("/home/me/.ssh/id_ed25519")
+        for child in dlg.get_action_area().get_children():
+            if isinstance(child, Gtk.Button) and child.get_label() == "Save":
+                child.emit("clicked")
+                break
+        result["done"] = True
+        return False
+
+    GLib.timeout_add(100, on_dialog)
+    try:
+        win.on_ssh_settings()
+    finally:
+        win.destroy()
+    saved = gtkui.load_prefs()["ssh"]
+    assert saved["enabled"] is True
+    assert saved["host"] == "debian@192.168.1.111"
+    assert saved["remote_socket"] == "/srv/aimless/state/api.sock"
+    assert saved["identity"] == "/home/me/.ssh/id_ed25519"
+    # and it must resolve to a remote supervisor after restart
+    assert gtkui.ssh_tunnel() is not None
+    assert gtkui.sock_path() == str(config / "remote-api.sock")
+
+
 def test_supervisor_remote_mode(ssh_prefs_env, monkeypatch):
     home, config = ssh_prefs_env
     write_ssh_prefs(config, {

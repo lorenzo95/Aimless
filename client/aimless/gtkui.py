@@ -2415,17 +2415,22 @@ class AimlessWindow(Gtk.Window):
         test_btn.connect("clicked", do_test)
         dlg.show_all()
         resp = dlg.run()
+        # capture entry values BEFORE destroying the dialog — get_text() on a
+        # destroyed Gtk.Entry returns "".
+        enabled_val = bool(enabled.get_active())
+        host_val = host.get_text().strip()
+        remote_val = remote.get_text().strip()
+        ident_val = ident.get_text().strip()
         dlg.destroy()
         if resp != Gtk.ResponseType.OK:
             return
         new_ssh = {
-            "enabled": bool(enabled.get_active()),
-            "host": host.get_text().strip(),
-            "remote_socket": remote.get_text().strip(),
+            "enabled": enabled_val,
+            "host": host_val,
+            "remote_socket": remote_val,
         }
-        ident_text = ident.get_text().strip()
-        if ident_text:
-            new_ssh["identity"] = ident_text
+        if ident_val:
+            new_ssh["identity"] = ident_val
         if not new_ssh["host"] or not new_ssh["remote_socket"]:
             new_ssh["enabled"] = False
         old = ssh_prefs()
