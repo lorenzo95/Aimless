@@ -157,7 +157,8 @@ def test_ssh_dialog_save_end_to_end(ssh_prefs_env, monkeypatch):
             self.socket_path = socket_path
 
         def request(self, op, timeout=10.0, **kw):
-            assert op == "whoami"
+            if op == "whoami":
+                return {"address": "200:abc"}
             return {"build": "aimlessd/0.5.6-test"}
 
         def close(self):
@@ -181,6 +182,11 @@ def test_ssh_dialog_save_end_to_end(ssh_prefs_env, monkeypatch):
         if len(entries) < 3:
             return True
         if not filled["done"]:
+            # default is Local on a fresh machine — switch to Remote
+            for w in _walk(dlg):
+                if isinstance(w, Gtk.RadioButton) and w.get_label() == "Remote daemon (SSH)":
+                    w.set_active(True)
+                    break
             entries[0].set_text("debian@192.168.1.111")   # host
             entries[1].set_text("/home/me/.ssh/id_ed25519")  # identity
             entries[2].set_text("/srv/aimless/state/api.sock")  # socket (advanced)
@@ -213,9 +219,9 @@ def test_ssh_dialog_save_end_to_end(ssh_prefs_env, monkeypatch):
     assert gtkui.sock_path() == str(config / "remote-api.sock")
 
 
-def test_ssh_dialog_clear_host_goes_local(ssh_prefs_env, monkeypatch):
-    """Clearing the host (going local) needs no test — Save is enabled and the
-    stored ssh config is removed entirely."""
+def test_ssh_dialog_select_local_goes_local(ssh_prefs_env, monkeypatch):
+    """Selecting the 'Local daemon' radio (going local) needs no test — Save is
+    enabled and the stored ssh config is removed entirely."""
     gi = pytest.importorskip("gi")
     gi.require_version("Gtk", "3.0")
     from gi.repository import Gtk, GLib
@@ -254,7 +260,10 @@ def test_ssh_dialog_clear_host_goes_local(ssh_prefs_env, monkeypatch):
         if len(entries) < 3:
             return True
         if not cleared["done"]:
-            entries[0].set_text("")  # clear the host
+            for w in _walk(dlg):
+                if isinstance(w, Gtk.RadioButton) and w.get_label() == "Local daemon":
+                    w.set_active(True)
+                    break
             cleared["done"] = True
             return True
         save_btn = dlg.get_widget_for_response(Gtk.ResponseType.OK)
@@ -308,6 +317,8 @@ def test_ssh_dialog_test_is_async(ssh_prefs_env, monkeypatch):
             pass
 
         def request(self, op, timeout=10.0, **kw):
+            if op == "whoami":
+                return {"address": "200:abc"}
             return {"build": "aimlessd/x"}
 
         def close(self):
@@ -331,6 +342,10 @@ def test_ssh_dialog_test_is_async(ssh_prefs_env, monkeypatch):
         if len(entries) < 3:
             return True
         if not clicked["done"]:
+            for w in _walk(dlg):
+                if isinstance(w, Gtk.RadioButton) and w.get_label() == "Remote daemon (SSH)":
+                    w.set_active(True)
+                    break
             entries[0].set_text("user@host")
             entries[2].set_text("/srv/api.sock")
             _click_button(dlg, "Test connection")
@@ -385,6 +400,8 @@ def test_ssh_dialog_test_failure_resets_gate(ssh_prefs_env, monkeypatch):
             pass
 
         def request(self, op, timeout=10.0, **kw):
+            if op == "whoami":
+                return {"address": "200:abc"}
             return {"build": "aimlessd/x"}
 
         def close(self):
@@ -408,6 +425,10 @@ def test_ssh_dialog_test_failure_resets_gate(ssh_prefs_env, monkeypatch):
             return True
         save_btn = dlg.get_widget_for_response(Gtk.ResponseType.OK)
         if not state["tested"]:
+            for w in _walk(dlg):
+                if isinstance(w, Gtk.RadioButton) and w.get_label() == "Remote daemon (SSH)":
+                    w.set_active(True)
+                    break
             entries[0].set_text("user@host")
             entries[2].set_text("/srv/api.sock")
             _click_button(dlg, "Test connection")
@@ -488,6 +509,10 @@ def test_ssh_dialog_whoami_failure_distinct(ssh_prefs_env, monkeypatch):
         if len(entries) < 3:
             return True
         if not clicked["done"]:
+            for w in _walk(dlg):
+                if isinstance(w, Gtk.RadioButton) and w.get_label() == "Remote daemon (SSH)":
+                    w.set_active(True)
+                    break
             entries[0].set_text("user@host")
             entries[2].set_text("/srv/api.sock")
             _click_button(dlg, "Test connection")
@@ -598,6 +623,106 @@ def test_discover_remote_socket_no_candidates(ssh_prefs_env, monkeypatch):
     monkeypatch.setattr(gtkui.subprocess, "run", lambda *a, **k: R())
     with pytest.raises(RuntimeError, match="no aimless daemon socket"):
         gtkui.discover_remote_socket("me@host")
+
+
+def test_probe_remote_daemon_returns_build_and_address(ssh_prefs_env, monkeypatch):
+    """probe_remote_daemon must do a real whoami+status round trip and return
+    the daemon's build and address — the info 'Test connection' now shows
+    instead of '?'."""
+    home, config = ssh_prefs_env
+    called = []
+
+    class FakeTunnel:
+        def __init__(self, host, remote_socket, local_socket, identity=None):
+            self.local_socket = local_socket
+
+        def start(self, log=None):
+            return True
+
+        def stop(self):
+            pass
+
+    class FakeDaemonClient:
+        def __init__(self, socket_path):
+            self.socket_path = socket_path
+
+        def request(self, op, timeout=10.0, **kw):
+            called.append(op)
+            if op == "whoami":
+                return {"address": "200:abc"}
+            return {"build": "aimlessd/0.5.6"}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(gtkui, "SSHTunnel", FakeTunnel)
+    monkeypatch.setattr(gtkui, "DaemonClient", FakeDaemonClient)
+
+    build, addr = gtkui.probe_remote_daemon("me@host", "/srv/api.sock")
+    assert build == "aimlessd/0.5.6"
+    assert addr == "200:abc"
+    assert called == ["whoami", "status"]  # both halves, so no '?' in the UI
+
+
+def test_ssh_dialog_test_shows_daemon_info(ssh_prefs_env, monkeypatch):
+    """Clicking Test connection shows the real build+address from the shared
+    probe (previously always '?' because build lives in status, not whoami)."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+
+    home, config = ssh_prefs_env
+    win = Gtk.Window()
+    win.show_all()
+    win.prefs = gtkui.load_prefs()
+    win.get_toplevel = lambda: win
+    win.set_transient_for = lambda x: None
+    win.on_ssh_settings = gtkui.AimlessWindow.on_ssh_settings.__get__(win)
+
+    monkeypatch.setattr(gtkui, "probe_remote_daemon",
+                        lambda h, r, i=None: ("aimlessd/0.5.6", "200:abc"))
+
+    labels = {}
+    deadline = time.time() + 8
+    clicked = {"done": False}
+
+    def on_dialog():
+        if _dialog_deadline_passed(deadline):
+            _dismiss_dialog()
+            return False
+        dlg = _ssh_dialog()
+        if dlg is None:
+            return True
+        entries = [e for e in _walk(dlg) if isinstance(e, Gtk.Entry)]
+        if len(entries) < 3:
+            return True
+        if not clicked["done"]:
+            for w in _walk(dlg):
+                if isinstance(w, Gtk.RadioButton) and w.get_label() == "Remote daemon (SSH)":
+                    w.set_active(True)
+                    break
+            entries[0].set_text("user@host")
+            entries[2].set_text("/srv/api.sock")
+            _click_button(dlg, "Test connection")
+            clicked["done"] = True
+            return True
+        text = _result_text(dlg)
+        if text:
+            labels["final"] = text
+            _dismiss_dialog()
+            return False
+        return True
+
+    GLib.timeout_add(50, on_dialog)
+    try:
+        win.on_ssh_settings()
+    finally:
+        win.destroy()
+    final = labels.get("final", "")
+    assert "connected" in final
+    assert "aimlessd/0.5.6" in final, f"build missing: {final!r}"
+    assert "200:abc" in final, f"address missing: {final!r}"
+    assert "?" not in final, f"placeholder '?' leaked into result: {final!r}"
 
 
 def test_supervisor_stale_detects_config_change(ssh_prefs_env, monkeypatch):

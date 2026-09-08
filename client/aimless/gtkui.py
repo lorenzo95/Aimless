@@ -3200,6 +3200,28 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def probe_remote_daemon(host, path, identity=None):
+    """Open a real SSH tunnel to `path` and get daemon info through it. Returns
+    (build, address) — a genuine whoami+status round trip, so 'connected' means
+    the daemon actually answered. Raises on any failure so callers surface the
+    layer-specific message."""
+    t = SSHTunnel(host, path, os.path.join(CONFIG_DIR, "remote-api.sock.tmp"),
+                  identity=identity or None)
+    try:
+        t.start()
+        c = DaemonClient(t.local_socket)
+        try:
+            info = c.request("whoami", timeout=5)
+            st = c.request("status", timeout=5)
+        finally:
+            c.close()
+        return st.get("build", "?"), info.get("address", "?")
+    finally:
+        t.stop()
+
+
 def discover_remote_socket(host, identity=None):
     """Find a live aimlessd api.sock on the ssh host. A configured host IS remote
     mode, so the socket path should never have to be typed by hand: list api.sock
@@ -3220,31 +3242,22 @@ def discover_remote_socket(host, identity=None):
     if not candidates:
         raise RuntimeError(f"no aimless daemon socket found on {host} — is the daemon running there?")
     for path in candidates:
-        t = SSHTunnel(host, path, os.path.join(CONFIG_DIR, "discover-api.sock.tmp"),
-                      identity=identity or None)
         try:
-            t.start()
-            c = DaemonClient(t.local_socket)
-            try:
-                info = c.request("whoami", timeout=5)
-                st = c.request("status", timeout=5)
-            finally:
-                c.close()
-            return path, st.get("build", "?"), info.get("address", "?")
+            build, addr = probe_remote_daemon(host, path, identity)
+            return path, build, addr
         except Exception:
             continue
-        finally:
-            t.stop()
     raise RuntimeError(f"found socket(s) on {host} but none answered whoami — check the daemon is up")
 
 
 def run_ssh_settings_dialog(parent, prompt_restart=True):
     """Standalone 'Remote daemon (SSH)' settings dialog. A configured host IS
     remote mode; the daemon socket is discovered automatically (advanced
-    override available). Clearing the host returns to a local daemon. Returns
-    True if the config changed, False if cancelled/unchanged. When
-    prompt_restart, shows a restart note on change (mid-session); the
-    first-run/unlock callers pass False and reconnect live instead."""
+    override available). The dialog makes the choice explicit with a Local /
+    Remote mode selector. Returns True if the config changed, False if
+    cancelled/unchanged. When prompt_restart, shows a restart note on change
+    (mid-session); the first-run/unlock callers pass False and reconnect live
+    instead."""
     ssh = ssh_prefs()
     dlg = Gtk.Dialog(title="Remote daemon (SSH)", transient_for=parent, modal=True)
     dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
@@ -3252,6 +3265,18 @@ def run_ssh_settings_dialog(parent, prompt_restart=True):
     box = dlg.get_content_area()
     box.set_spacing(8)
     box.set_border_width(10)
+
+    # Mode selector: explicit Local / Remote choice instead of an implied
+    # 'clear the host'. Internal model stays host-based (local = no host).
+    mode_local = Gtk.RadioButton.new_with_label_from_widget(None, "Local daemon")
+    mode_remote = Gtk.RadioButton.new_with_label_from_widget(mode_local,
+                                                             "Remote daemon (SSH)")
+    if ssh:
+        mode_remote.set_active(True)
+    else:
+        mode_local.set_active(True)
+    box.add(mode_local)
+    box.add(mode_remote)
 
     def row(label, placeholder, default):
         h = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -3266,8 +3291,8 @@ def run_ssh_settings_dialog(parent, prompt_restart=True):
 
     host = row("Host", "user@server", ssh.get("host") or "")
     ident = row("Identity key (optional)", "~/.ssh/id_ed25519", ssh.get("identity") or "")
-    hint = Gtk.Label(label=("A configured host means the remote daemon. The socket path is "
-                            "found automatically; clear the host to use a local daemon."),
+    hint = Gtk.Label(label=("The daemon socket is found automatically on the host — "
+                            "no need to type a path."),
                      xalign=0.0, wrap=True)
     box.add(hint)
 
@@ -3289,25 +3314,45 @@ def run_ssh_settings_dialog(parent, prompt_restart=True):
     test_label.set_line_wrap(True)
     box.add(test_label)
 
-    # Hard gate: saving a configured host requires a successful live test (a
+    # Hard gate: saving a remote config requires a successful live test (a
     # wrong host means the app silently can't reach its mailbox after a restart).
-    # Clearing the host (going local) needs no test.
+    # Going local needs no test.
     test_ok = {"value": False}
     save_btn = dlg.get_widget_for_response(Gtk.ResponseType.OK)
-    find_btn.set_sensitive(True)
+
+    def remote_mode():
+        return mode_remote.get_active()
+
+    def set_remote_fields_sensitive(sensitive):
+        for w in (host, ident, find_btn, result_label, advanced, test_btn, test_label, hint):
+            try:
+                w.set_sensitive(sensitive)
+            except Exception:
+                pass
 
     def update_gate():
         if save_btn is None:
             return
-        save_btn.set_sensitive((not host.get_text().strip()) or bool(test_ok["value"]))
+        save_btn.set_sensitive((not remote_mode()) or bool(test_ok["value"]))
 
     def on_field_changed(*_):
         test_ok["value"] = False
         update_gate()
 
+    def on_mode_changed(*_):
+        if remote_mode():
+            set_remote_fields_sensitive(True)
+        else:
+            test_ok["value"] = False
+            set_remote_fields_sensitive(False)
+        update_gate()
+
     host.connect("changed", on_field_changed)
     ident.connect("changed", on_field_changed)
     remote.connect("changed", on_field_changed)
+    mode_local.connect("toggled", on_mode_changed)
+    mode_remote.connect("toggled", on_mode_changed)
+    set_remote_fields_sensitive(remote_mode())
     update_gate()
 
     def do_find(*_):
@@ -3354,18 +3399,10 @@ def run_ssh_settings_dialog(parent, prompt_restart=True):
         test_label.set_text(f"connecting to {h} …")
 
         def worker():
-            t = SSHTunnel(h, r, os.path.join(CONFIG_DIR, "remote-api.sock.tmp"),
-                          identity=i or None)
-            try:
-                t.start()
-                c = DaemonClient(t.local_socket)
-                try:
-                    info = c.request("whoami", timeout=5)
-                finally:
-                    c.close()
-                return f"connected — daemon {info.get('build', '?')}"
-            finally:
-                t.stop()
+            # same probe discovery uses — a real whoami+status round trip, so
+            # the daemon build/address show up instead of '?'
+            build, addr = probe_remote_daemon(h, r, i or None)
+            return f"connected — daemon {build} · {addr}"
 
         def done(msg):
             test_btn.set_sensitive(True)
@@ -3386,6 +3423,7 @@ def run_ssh_settings_dialog(parent, prompt_restart=True):
     resp = dlg.run()
     # capture entry values BEFORE destroying the dialog — get_text() on a
     # destroyed Gtk.Entry returns "".
+    remote_selected = mode_remote.get_active()
     host_val = host.get_text().strip()
     ident_val = ident.get_text().strip()
     remote_val = remote.get_text().strip()
@@ -3393,11 +3431,11 @@ def run_ssh_settings_dialog(parent, prompt_restart=True):
     if resp != Gtk.ResponseType.OK:
         return False
     old = ssh_prefs()
-    if not host_val:
+    if not remote_selected:
         new_ssh = {}  # going local
     else:
-        if not remote_val:
-            return False  # host set but no socket — nothing valid to save
+        if not host_val or not remote_val:
+            return False  # remote selected but nothing valid to save
         new_ssh = {"host": host_val, "remote_socket": remote_val}
         if ident_val:
             new_ssh["identity"] = ident_val
