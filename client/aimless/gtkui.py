@@ -2614,9 +2614,13 @@ class AimlessWindow(Gtk.Window):
         def start_finish(transition_msg):
             # same dialog, same flow - after the server restarts the user just
             # relaunches aimless; the verify happens on the next connect.
-            set_message(transition_msg)
+            set_message(transition_msg + "\n\nYou can close this and relaunch aimless.")
             for w in buttons:
                 w.hide()
+            btn_done = Gtk.Button(label="Done")
+            btn_done.connect("clicked", lambda *_: dlg.destroy())
+            box.add(btn_done)
+            btn_done.show()
             # record the migration so the app state and the startup guard are
             # consistent (verify happens on the next connect via whoami)
             prefs = load_prefs()
@@ -2654,7 +2658,7 @@ class AimlessWindow(Gtk.Window):
             run_async(worker, on_done=done)
 
         def restarted(*_):
-            start_finish("Waiting for the server to come back as your node ...")
+            start_finish("Your identity is on the server's daemon.")
 
         def cancelled(*_):
             dlg.destroy()
