@@ -2536,6 +2536,51 @@ class AimlessWindow(Gtk.Window):
             dlg.destroy()
             return
 
+        # A live LOCAL daemon must be stopped first: two daemons with the same
+        # node key collide on the mesh. This is part of moving - offer to stop it.
+        local_pid = daemon_pid_from_procs()
+        if local_pid is not None:
+            dlg = Gtk.MessageDialog(
+                transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+                buttons=Gtk.ButtonsType.NONE,
+                text=f"A local daemon is running (pid {local_pid}).",
+                secondary_text="It must be stopped before your identity can move to "
+                               "the remote daemon - two daemons with the same node "
+                               "key would conflict. Stop it and continue?")
+            dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+            dlg.add_button("Stop it and continue", Gtk.ResponseType.APPLY)
+            resp = dlg.run()
+            dlg.destroy()
+            if resp != Gtk.ResponseType.APPLY:
+                self.activity.log("migrate node key: cancelled - local daemon still running")
+                return
+            # Take the local daemon out of this app's supervision first: the app
+            # started in local mode and its poll() respawns the daemon every 5s,
+            # so killing it would be a losing race. The supervisor becomes the
+            # remote one (the migration destination anyway).
+            if not self.supervisor.remote:
+                self.supervisor = DaemonSupervisor()
+                self.log("local daemon handed over - supervising the remote daemon now")
+            try:
+                os.kill(local_pid, signal.SIGTERM)
+            except OSError:
+                pass
+            deadline = time.time() + 5
+            stopped = False
+            while time.time() < deadline:
+                try:
+                    os.kill(local_pid, 0)
+                except OSError:
+                    stopped = True
+                    break
+                time.sleep(0.2)
+            if not stopped:
+                try:
+                    os.kill(local_pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                time.sleep(0.5)
+
         # --- stage the files (async) ---
         dlg = Gtk.Dialog(title="Move local identity to remote",
                          transient_for=self, modal=True)
@@ -2556,6 +2601,13 @@ class AimlessWindow(Gtk.Window):
         def stage_fail(exc):
             dlg.destroy()
             self.activity.log(f"migrate node key failed: {exc}")
+            err = Gtk.MessageDialog(
+                transient_for=self, modal=True, message_type=Gtk.MessageType.ERROR,
+                buttons=Gtk.ButtonsType.OK,
+                text="Moving your identity to the remote daemon failed.",
+                secondary_text=str(exc))
+            err.run()
+            err.destroy()
 
         def worker():
             backup = migrate_node_stage(host, identity, datadir)
@@ -2684,8 +2736,9 @@ class AimlessWindow(Gtk.Window):
                 save_prefs(prefs)
                 self.prefs = prefs
                 self._mismatch_notified = True  # suppress the banner
-                self.activity.log("node key migrated - remote daemon now answers "
-                                  "with the expected identity")
+                self.activity.log("node key migrated - the remote daemon now answers "
+                                  "with your identity. Restart the app to reconnect "
+                                  "through the remote daemon.")
             else:
                 status.set_text("The server did not come back with your node. "
                                 "It may not have restarted - check it, then click "
