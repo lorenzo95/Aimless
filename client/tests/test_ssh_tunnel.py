@@ -1566,17 +1566,16 @@ def test_migrate_node_stage_copies_state(ssh_prefs_env, monkeypatch):
     monkeypatch.setattr(gtkui, "daemon_pid_from_procs", lambda: None)
 
     backup = gtkui.migrate_node_stage("me@host", None, "/srv/aimless/state")
-    # backup first, then node.key, journal files, inbox, contacts
+    # backup first, then node.key, journal entries, inbox, contacts
     cmds = [c for kind, c in ops if kind == "ssh"]
     assert any("node.key.pre-migration" in c for c in cmds)
-    scp_dst = [d for kind, d in ops if kind == "scp"]
-    # scp_transfer(host, identity, src, dst); check the remote dst paths
-    scp_remote = [d[1] for d in scp_dst]
+    scp_remote = [payload[1] for kind, payload in ops if kind == "scp"]
     assert any(d.endswith("/state/node.key") for d in scp_remote)
-    assert any(d.endswith("/journal/aabb.seq") for d in scp_remote)
     assert any(d.endswith("/journal/aabb.jsonl") for d in scp_remote)
     assert any(d.endswith("/inbox/aabb.jsonl") for d in scp_remote)
     assert any(d.endswith("/state/contacts.json") for d in scp_remote)
+    # the seq counter must be written via ssh (max of local and remote)
+    assert any("/journal/aabb.seq" in c and "printf" in c for c in cmds)
     assert any("chmod 600" in c for c in cmds)
     assert backup.startswith("/srv/aimless/state/node.key.pre-migration-")
 

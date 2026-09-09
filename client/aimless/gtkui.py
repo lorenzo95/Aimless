@@ -3656,14 +3656,51 @@ def migrate_node_stage(host, identity, datadir, log=None):
         log("copying node.key, journal, inbox and contacts to the remote daemon ...")
     # node.key
     scp_transfer(host, identity, local_key, f"{datadir}/node.key", put=True)
-    # journal/ (per-buddy outbox: *.jsonl + *.seq) - carries the seq counters
+    # journal/ (per-buddy outbox: *.jsonl + *.seq) - carries the seq counters.
+    # The .seq counters must NEVER go backwards on the remote: buddies dedup
+    # text by seq, so a counter that rolls back makes every message look like
+    # an already-seen replay. Copy entries as-is, but for .seq files take the
+    # max of local and remote.
     local_journal = os.path.join(data_dir(), "journal")
     remote_journal = f"{datadir}/journal"
     ssh_run(host, identity, f"mkdir -p {remote_journal}")
     if os.path.isdir(local_journal):
+        # snapshot the remote .seq values first
+        remote_seq = {}
+        rc, out, _ = ssh_run(host, identity, f"cat {remote_journal}/*.seq 2>/dev/null", timeout=20)
+        if rc == 0:
+            for path in out.splitlines():
+                path = path.strip()
+                if path:
+                    remote_seq[os.path.basename(path)] = path
+        # read the remote values (one ssh cat per file group is wasteful; use a
+        # single command that prints name=value pairs)
+        rc, out, _ = ssh_run(
+            host, identity,
+            f"for f in {remote_journal}/*.seq; do echo \"$(basename $f)=$(cat $f)\"; done 2>/dev/null",
+            timeout=20)
+        if rc == 0:
+            remote_seq = {}
+            for line in out.splitlines():
+                if "=" in line:
+                    name, _, val = line.partition("=")
+                    remote_seq[name.strip()] = val.strip()
         for name in os.listdir(local_journal):
-            scp_transfer(host, identity, os.path.join(local_journal, name),
-                         f"{remote_journal}/{name}", put=True)
+            local_path = os.path.join(local_journal, name)
+            remote_path = f"{remote_journal}/{name}"
+            if name.endswith(".seq"):
+                # never roll the remote counter backwards
+                try:
+                    local_val = int(open(local_path).read().strip() or "0")
+                except (OSError, ValueError):
+                    local_val = 0
+                remote_val = int(remote_seq.get(name, "0") or "0")
+                final = max(local_val, remote_val)
+                ssh_run(host, identity,
+                        f"printf '%s\\n' {final} > {remote_path} && chmod 600 {remote_path}",
+                        timeout=20)
+            else:
+                scp_transfer(host, identity, local_path, remote_path, put=True)
     # inbox/ (received-while-away)
     local_inbox = os.path.join(data_dir(), "inbox")
     if os.path.isdir(local_inbox):
