@@ -1588,15 +1588,6 @@ def test_migrate_node_stage_requires_local_key(ssh_prefs_env, monkeypatch):
         gtkui.migrate_node_stage("me@host", None, "/srv/state")
 
 
-def test_migrate_node_stage_refuses_live_local_daemon(ssh_prefs_env, monkeypatch):
-    home, config = ssh_prefs_env
-    _write_node_key(home)
-    write_ssh_prefs(config, {"host": "me@host", "remote_socket": "/srv/state/api.sock"})
-    monkeypatch.setattr(gtkui, "daemon_pid_from_procs", lambda: 12345)
-    with pytest.raises(RuntimeError, match="local daemon is running"):
-        gtkui.migrate_node_stage("me@host", None, "/srv/state")
-
-
 def test_verify_remote_node_key_matches(ssh_prefs_env, monkeypatch):
     home, config = ssh_prefs_env
     expected = "aabb"
@@ -1825,7 +1816,6 @@ def test_migrate_restart_prompt_cancel_stays_live(ssh_prefs_env, monkeypatch):
     win.show_all()
     win.activity = type("A", (), {"log": lambda self, *a, **k: None})()
     win._migrate_restart_prompt = gtkui.AimlessWindow._migrate_restart_prompt.__get__(win)
-    win._migrate_verify = lambda *a, **k: None
 
     monkeypatch.setattr(gtkui, "detect_remote_container", lambda *a, **k: "aimless-webtop")
     monkeypatch.setattr(gtkui, "ssh_run", lambda *a, **k: (0, "", ""))
@@ -1924,23 +1914,17 @@ def test_migrate_uses_live_dialog_values(ssh_prefs_env, monkeypatch):
     win.destroy()
 
 
-def test_migrate_stage_stops_local_daemon(ssh_prefs_env, monkeypatch):
-    """Regression: the respawn war. do_migrate_node killed the local daemon on
-    the main thread, but the app's poll() respawned it before staging's guard
-    ran - 'a local daemon is running' forever. migrate_node_stage now stops the
-    daemon itself (stop_pid) immediately before the guard, in the same worker."""
+def test_migrate_stage_does_not_care_about_local_daemon(ssh_prefs_env, monkeypatch):
+    """The migration stages files regardless of whether a local daemon is
+    running - quitting the app afterwards stops the local daemon anyway, so
+    there is no guard to race against."""
     home, config = ssh_prefs_env
     _write_node_key(home)
     write_ssh_prefs(config, {"host": "me@host", "remote_socket": "/srv/state/api.sock"})
 
-    # a real "local daemon": a plain sleep process standing in for aimlessd
+    # simulate a live local daemon - staging must still work
     import subprocess
     victim = subprocess.Popen(["sleep", "300"])
-
-    def fake_pid():
-        return victim.pid if victim.poll() is None else None
-
-    monkeypatch.setattr(gtkui, "daemon_pid_from_procs", fake_pid)
 
     ops = []
     class R:
@@ -1953,11 +1937,10 @@ def test_migrate_stage_stops_local_daemon(ssh_prefs_env, monkeypatch):
                         lambda host, identity, cmd, timeout=30: ops.append(cmd) or (0, "", ""))
 
     try:
-        gtkui.migrate_node_stage("me@host", None, "/srv/state", stop_pid=victim.pid)
+        gtkui.migrate_node_stage("me@host", None, "/srv/state")
     finally:
         if victim.poll() is None:
             victim.kill()
             victim.wait(timeout=5)
 
-    assert victim.poll() is not None, "local daemon was not stopped"
     assert any("journal" in str(o) for o in ops), "staging did not copy the journal"

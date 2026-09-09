@@ -2536,33 +2536,10 @@ class AimlessWindow(Gtk.Window):
             dlg.destroy()
             return
 
-        # A live LOCAL daemon must be stopped first: two daemons with the same
-        # node key collide on the mesh. This is part of moving - offer to stop it.
-        local_pid = daemon_pid_from_procs()
-        if local_pid is not None:
-            dlg = Gtk.MessageDialog(
-                transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
-                buttons=Gtk.ButtonsType.NONE,
-                text=f"A local daemon is running (pid {local_pid}).",
-                secondary_text="It must be stopped before your identity can move to "
-                               "the remote daemon - two daemons with the same node "
-                               "key would conflict. Stop it and continue?")
-            dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
-            dlg.add_button("Stop it and continue", Gtk.ResponseType.APPLY)
-            resp = dlg.run()
-            dlg.destroy()
-            if resp != Gtk.ResponseType.APPLY:
-                self.activity.log("migrate node key: cancelled - local daemon still running")
-                return
-            # Take the local daemon out of this app's supervision first: the app
-            # started in local mode and its poll() respawns the daemon every 5s,
-            # so killing it would be a losing race. The supervisor becomes the
-            # remote one (the migration destination anyway). The actual kill
-            # happens inside migrate_node_stage, right before its guard, so
-            # nothing can respawn in between.
-            if not self.supervisor.remote:
-                self.supervisor = DaemonSupervisor()
-                self.activity.log("local daemon handed over - supervising the remote daemon now")
+        # The local daemon (if any) doesn't matter for the copy - the files are staged
+        # and take effect when the server's daemon restarts. Quitting this app
+        # stops the local daemon (supervisor.stop()), so there's no collision to
+        # manage here and no race to lose.
 
         # --- stage the files (async) ---
         dlg = Gtk.Dialog(title="Move local identity to remote",
@@ -2593,8 +2570,7 @@ class AimlessWindow(Gtk.Window):
             err.destroy()
 
         def worker():
-            backup = migrate_node_stage(host, identity, datadir,
-                                        stop_pid=local_pid)
+            backup = migrate_node_stage(host, identity, datadir)
             return backup
 
         run_async(worker, on_done=stage_done, on_error=stage_fail)
@@ -2629,27 +2605,35 @@ class AimlessWindow(Gtk.Window):
         buttons.append(btn_cancel)
         box.add(btn_cancel)
         dlg.show_all()
-        set_message("Your identity is copied to the server's daemon. Restart it "
-                    "so it comes back as your node."
-                    + ("\n\nI will try to restart it for you." if container else ""))
+        set_message("Your identity is copied to the server's daemon. Now:\n"
+                    "1. Quit aimless completely (this stops the local daemon).\n"
+                    "2. Restart the server's daemon - I can try that for you.\n"
+                    "3. Relaunch aimless - it will connect to the server."
+                    + ("\n\nI can restart the server's daemon right now." if container else ""))
 
-        def start_verify(transition_msg):
-            # reuse the same dialog for the verify step; only Cancel stays
+        def start_finish(transition_msg):
+            # same dialog, same flow - after the server restarts the user just
+            # relaunches aimless; the verify happens on the next connect.
             set_message(transition_msg)
             for w in buttons:
                 w.hide()
-            btn_cancel.show()
-            btn_cancel.set_label("Cancel verification")
-            btn_cancel.set_sensitive(True)
-            self._migrate_verify(host, identity, path, expected, dlg, status,
-                                 cancel_handler=btn_cancel)
+            # record the migration so the app state and the startup guard are
+            # consistent (verify happens on the next connect via whoami)
+            prefs = load_prefs()
+            prefs["last_node_key"] = expected
+            prefs["node_relocated"] = {
+                "key": expected, "host": host,
+                "remote_socket": path, "ts": int(time.time()),
+            }
+            save_prefs(prefs)
+            self.prefs = prefs
+            self._mismatch_notified = True  # suppress the mismatch banner
 
         def restart_now(*_):
             if not container:
                 status.set_text(
                     "Could not find the container. Run on the server yourself:\n"
-                    "  sudo docker restart <container>\n"
-                    "then click 'I've restarted it'.")
+                    "  sudo docker restart <container>")
                 return
             btn_restart.set_sensitive(False)  # only this button - Cancel stays live
             status.set_text(f"restarting {container} ...")
@@ -2663,16 +2647,14 @@ class AimlessWindow(Gtk.Window):
                     btn_restart.set_sensitive(True)
                     status.set_text(
                         f"Automatic restart failed (sudo needed?). Run this on the "
-                        f"server yourself:\n  sudo docker restart {container}\n"
-                        f"then click 'I've restarted it'.\n\n{err.strip()}")
+                        f"server yourself:\n  sudo docker restart {container}\n\n{err.strip()}")
                     return
-                status.set_text(f"{container} restarted.")
-                start_verify("Restarted. Waiting for the server to come back as your node ...")
+                start_finish(f"{container} restarted.")
 
             run_async(worker, on_done=done)
 
         def restarted(*_):
-            start_verify("Waiting for the server to come back as your node ...")
+            start_finish("Waiting for the server to come back as your node ...")
 
         def cancelled(*_):
             dlg.destroy()
@@ -2684,60 +2666,6 @@ class AimlessWindow(Gtk.Window):
             btn_restart.connect("clicked", restart_now)
         btn_manual.connect("clicked", restarted)
         btn_cancel.connect("clicked", cancelled)
-
-    def _migrate_verify(self, host, identity, path, expected, dlg, status,
-                        cancel_handler=None):
-        """Poll the remote daemon until whoami reports the migrated node key,
-        reusing the open dialog (Cancel stays live). Then record the pair +
-        relocation and clear the mismatch banner."""
-        cancelled = {"v": False}
-
-        def on_cancel(*_):
-            cancelled["v"] = True
-            dlg.destroy()
-            self.activity.log("migrate node key: verification cancelled - files "
-                              "are staged; restart the daemon later to finish.")
-
-        if cancel_handler is not None:
-            cancel_handler.connect("clicked", on_cancel)
-
-        status.set_text("Checking ...")
-
-        def worker():
-            return verify_remote_node_key(host, identity, path, expected, timeout=180)
-
-        def done(ok):
-            if cancelled["v"]:
-                return
-            if ok:
-                dlg.destroy()
-                prefs = load_prefs()
-                prefs["last_node_key"] = expected
-                prefs["node_relocated"] = {
-                    "key": expected, "host": host,
-                    "remote_socket": path, "ts": int(time.time()),
-                }
-                save_prefs(prefs)
-                self.prefs = prefs
-                self._mismatch_notified = True  # suppress the banner
-                self.activity.log("node key migrated - the remote daemon now answers "
-                                  "with your identity. Restart the app to reconnect "
-                                  "through the remote daemon.")
-            else:
-                status.set_text("The server did not come back with your node. "
-                                "It may not have restarted - check it, then click "
-                                "'I've restarted it' to retry, or Cancel.")
-                if cancel_handler is not None:
-                    cancel_handler.set_sensitive(True)
-
-        def fail(exc):
-            if cancelled["v"]:
-                return
-            status.set_text(f"Verification failed: {exc}")
-            if cancel_handler is not None:
-                cancel_handler.set_sensitive(True)
-
-        run_async(worker, on_done=done, on_error=fail)
 
 
 
@@ -3695,41 +3623,16 @@ def ssh_run(host, identity, remote_cmd, timeout=30):
     return r.returncode, r.stdout, r.stderr
 
 
-def migrate_node_stage(host, identity, datadir, log=None, stop_pid=None):
+def migrate_node_stage(host, identity, datadir, log=None):
     """Back up the remote node.key and copy the local daemon state (node.key,
     outbound journal, inbox, contacts) onto the remote daemon's datadir. This is
     the 'move my node key' step: the outbound journal carries the per-buddy seq
     counters so recipients don't deduplicate text as replays. The daemon must be
-    restarted after this for the new key to take effect."""
+    restarted after this for the new key to take effect. Whether a local daemon
+    happens to be running is irrelevant - quitting the app afterwards stops it."""
     local_key = os.path.join(data_dir(), "node.key")
     if not os.path.exists(local_key):
         raise RuntimeError("no local node.key to migrate - is a local daemon configured?")
-    # Stop the local daemon here, in the worker thread, immediately before the
-    # guard: the app's poll() can respawn it on the main thread, so the kill
-    # and the guard must be as close together as possible. Loop until none is
-    # left (the supervisor swap in do_migrate_node removed the respawner, but
-    # belt and suspenders).
-    if stop_pid is not None:
-        try:
-            os.kill(stop_pid, signal.SIGTERM)
-        except OSError:
-            pass
-        deadline = time.time() + 5
-        while time.time() < deadline:
-            try:
-                os.kill(stop_pid, 0)
-            except OSError:
-                break
-            time.sleep(0.2)
-        else:
-            try:
-                os.kill(stop_pid, signal.SIGKILL)
-            except OSError:
-                pass
-            time.sleep(0.5)
-    # Guard: a live local daemon using this key would collide with the remote.
-    if daemon_pid_from_procs() is not None:
-        raise RuntimeError("a local daemon is running - stop it before migrating the node key")
     if log:
         log("backing up the remote node.key ...")
     ts = int(time.time())
