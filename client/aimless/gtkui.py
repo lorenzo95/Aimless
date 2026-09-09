@@ -2560,7 +2560,7 @@ class AimlessWindow(Gtk.Window):
             # remote one (the migration destination anyway).
             if not self.supervisor.remote:
                 self.supervisor = DaemonSupervisor()
-                self.log("local daemon handed over - supervising the remote daemon now")
+                self.activity.log("local daemon handed over - supervising the remote daemon now")
             try:
                 os.kill(local_pid, signal.SIGTERM)
             except OSError:
