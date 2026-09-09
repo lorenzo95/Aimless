@@ -2557,29 +2557,12 @@ class AimlessWindow(Gtk.Window):
             # Take the local daemon out of this app's supervision first: the app
             # started in local mode and its poll() respawns the daemon every 5s,
             # so killing it would be a losing race. The supervisor becomes the
-            # remote one (the migration destination anyway).
+            # remote one (the migration destination anyway). The actual kill
+            # happens inside migrate_node_stage, right before its guard, so
+            # nothing can respawn in between.
             if not self.supervisor.remote:
                 self.supervisor = DaemonSupervisor()
                 self.activity.log("local daemon handed over - supervising the remote daemon now")
-            try:
-                os.kill(local_pid, signal.SIGTERM)
-            except OSError:
-                pass
-            deadline = time.time() + 5
-            stopped = False
-            while time.time() < deadline:
-                try:
-                    os.kill(local_pid, 0)
-                except OSError:
-                    stopped = True
-                    break
-                time.sleep(0.2)
-            if not stopped:
-                try:
-                    os.kill(local_pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                time.sleep(0.5)
 
         # --- stage the files (async) ---
         dlg = Gtk.Dialog(title="Move local identity to remote",
@@ -2610,7 +2593,8 @@ class AimlessWindow(Gtk.Window):
             err.destroy()
 
         def worker():
-            backup = migrate_node_stage(host, identity, datadir)
+            backup = migrate_node_stage(host, identity, datadir,
+                                        stop_pid=local_pid)
             return backup
 
         run_async(worker, on_done=stage_done, on_error=stage_fail)
@@ -3711,7 +3695,7 @@ def ssh_run(host, identity, remote_cmd, timeout=30):
     return r.returncode, r.stdout, r.stderr
 
 
-def migrate_node_stage(host, identity, datadir, log=None):
+def migrate_node_stage(host, identity, datadir, log=None, stop_pid=None):
     """Back up the remote node.key and copy the local daemon state (node.key,
     outbound journal, inbox, contacts) onto the remote daemon's datadir. This is
     the 'move my node key' step: the outbound journal carries the per-buddy seq
@@ -3720,6 +3704,29 @@ def migrate_node_stage(host, identity, datadir, log=None):
     local_key = os.path.join(data_dir(), "node.key")
     if not os.path.exists(local_key):
         raise RuntimeError("no local node.key to migrate - is a local daemon configured?")
+    # Stop the local daemon here, in the worker thread, immediately before the
+    # guard: the app's poll() can respawn it on the main thread, so the kill
+    # and the guard must be as close together as possible. Loop until none is
+    # left (the supervisor swap in do_migrate_node removed the respawner, but
+    # belt and suspenders).
+    if stop_pid is not None:
+        try:
+            os.kill(stop_pid, signal.SIGTERM)
+        except OSError:
+            pass
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                os.kill(stop_pid, 0)
+            except OSError:
+                break
+            time.sleep(0.2)
+        else:
+            try:
+                os.kill(stop_pid, signal.SIGKILL)
+            except OSError:
+                pass
+            time.sleep(0.5)
     # Guard: a live local daemon using this key would collide with the remote.
     if daemon_pid_from_procs() is not None:
         raise RuntimeError("a local daemon is running - stop it before migrating the node key")
@@ -3738,9 +3745,10 @@ def migrate_node_stage(host, identity, datadir, log=None):
     local_journal = os.path.join(data_dir(), "journal")
     remote_journal = f"{datadir}/journal"
     ssh_run(host, identity, f"mkdir -p {remote_journal}")
-    for name in os.listdir(local_journal):
-        scp_transfer(host, identity, os.path.join(local_journal, name),
-                     f"{remote_journal}/{name}", put=True)
+    if os.path.isdir(local_journal):
+        for name in os.listdir(local_journal):
+            scp_transfer(host, identity, os.path.join(local_journal, name),
+                         f"{remote_journal}/{name}", put=True)
     # inbox/ (received-while-away)
     local_inbox = os.path.join(data_dir(), "inbox")
     if os.path.isdir(local_inbox):
@@ -3755,8 +3763,10 @@ def migrate_node_stage(host, identity, datadir, log=None):
         scp_transfer(host, identity, local_contacts, f"{datadir}/contacts.json", put=True)
     # tighten perms on everything we wrote
     ssh_run(host, identity,
-            f"chmod 600 {datadir}/node.key {remote_journal}/* {remote_inbox}/* 2>/dev/null; "
+            f"chmod 600 {datadir}/node.key {remote_journal}/* 2>/dev/null; "
             f"chmod 600 {datadir}/contacts.json 2>/dev/null || true")
+    if os.path.isdir(local_inbox):
+        ssh_run(host, identity, f"chmod 600 {remote_inbox}/* 2>/dev/null || true")
     return backup
 
 
