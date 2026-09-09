@@ -2545,12 +2545,15 @@ class AimlessWindow(Gtk.Window):
         dlg = Gtk.Dialog(title="Move local identity to remote",
                          transient_for=self, modal=True)
         dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        dlg.set_default_size(460, 140)
+        dlg.set_default_size(620, -1)
         box = dlg.get_content_area()
-        box.set_spacing(8)
-        box.set_border_width(10)
+        box.set_spacing(10)
+        box.set_border_width(14)
         label = Gtk.Label(label="Copying your identity and outbound journal to "
-                                f"{host} ...", xalign=0.0, wrap=True)
+                                f"{host} ...", xalign=0.0, wrap=True,
+                          max_width_chars=70)
+        label.set_margin_top(4)
+        label.set_margin_bottom(4)
         box.add(label)
         dlg.show_all()
 
@@ -2581,12 +2584,16 @@ class AimlessWindow(Gtk.Window):
         dialog for the whole flow; Cancel always stays usable."""
         container = detect_remote_container(host, identity, datadir)
         dlg = Gtk.Dialog(title="Restart the server's daemon", transient_for=self, modal=True)
+        dlg.set_default_size(620, -1)
         box = dlg.get_content_area()
-        box.set_spacing(8)
-        box.set_border_width(10)
-        msg = Gtk.Label(label="", xalign=0.0, wrap=True)
+        box.set_spacing(10)
+        box.set_border_width(14)
+        msg = Gtk.Label(label="", xalign=0.0, wrap=True, max_width_chars=70)
+        msg.set_margin_top(4)
+        msg.set_margin_bottom(4)
         box.add(msg)
-        status = Gtk.Label(label="", xalign=0.0, wrap=True)
+        status = Gtk.Label(label="", xalign=0.0, wrap=True, max_width_chars=70)
+        status.set_margin_bottom(4)
         box.add(status)
 
         buttons = []
@@ -2846,8 +2853,9 @@ class AimlessWindow(Gtk.Window):
                     transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
                     buttons=Gtk.ButtonsType.NONE,
                     text="Your contacts know you at a different daemon address.",
-                    secondary_text="Messages won't reach you here. Move your node key "
-                                   "to this daemon, or re-share your invite.")
+                    secondary_text="Messages won't reach you here. Move your local "
+                                   "identity to the remote daemon, or re-share your "
+                                   "invite.")
                 dlg.add_button("Dismiss", Gtk.ResponseType.CLOSE)
                 dlg.add_button("Move local identity to remote", Gtk.ResponseType.APPLY)
                 resp = dlg.run()
