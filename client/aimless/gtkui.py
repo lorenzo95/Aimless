@@ -2489,20 +2489,36 @@ class AimlessWindow(Gtk.Window):
     def do_migrate_node(self, *_):
         """Move the local identity (node key + outbound journal) to the
         configured remote daemon. Async; prompts for the daemon restart, then
-        verifies the remote answers with the migrated node key."""
-        ssh = ssh_prefs()
-        if not ssh:
+        verifies the remote answers with the migrated node key. host,
+        remote_socket and identity can be passed from the settings dialog (the
+        user may not have saved yet); otherwise the saved ssh config is used."""
+        if len(_) >= 3 and _[0]:
+            host, remote_socket, ident = _[0], _[1], _[2] or None
+            ssh = {"host": host, "remote_socket": remote_socket}
+            if ident:
+                ssh["identity"] = ident
+        else:
+            ssh = ssh_prefs()
+        if not ssh or not ssh.get("host") or not ssh.get("remote_socket"):
             # No remote daemon configured - the user needs to set it up first.
             self.activity.log("migrate node key: no remote daemon configured")
             dlg = Gtk.MessageDialog(
                 transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
                 buttons=Gtk.ButtonsType.OK,
                 text="No remote daemon is configured.",
-                secondary_text="Set up the remote daemon (SSH) first, then move your "
+                secondary_text="Set up the remote daemon (SSH) first - enter a host "
+                               "and click 'Find daemon on host' - then move your "
                                "local identity to it.")
             dlg.run()
             dlg.destroy()
             return
+        # Persist the config so the app is consistent with the migration target.
+        prefs = load_prefs()
+        prefs["ssh"] = {"host": ssh["host"], "remote_socket": ssh["remote_socket"]}
+        if ssh.get("identity"):
+            prefs["ssh"]["identity"] = ssh["identity"]
+        save_prefs(prefs)
+        self.prefs = prefs
         host = ssh["host"]
         identity = ssh.get("identity") or None
         datadir = remote_datadir()
@@ -3859,10 +3875,16 @@ def run_ssh_settings_dialog(parent, prompt_restart=True, on_migrate=None):
 
     # "Move local identity to remote" is available whenever a local daemon state
     # exists and remote mode is selected (the anytime 'move to a VPS' operation).
+    # Pass the live dialog values - the user may not have saved yet.
     migrate_btn = None
     if node_key_public_hex() is not None:
         migrate_btn = Gtk.Button(label="Move local identity to remote ...")
-        migrate_btn.connect("clicked", lambda *_: on_migrate() if on_migrate else None)
+        migrate_btn.connect(
+            "clicked",
+            lambda *_: (on_migrate(host.get_text().strip(),
+                                   remote.get_text().strip(),
+                                   ident.get_text().strip())
+                        if on_migrate else None))
         migrate_btn.set_no_show_all(True)
         migrate_btn.hide()
         box.add(migrate_btn)

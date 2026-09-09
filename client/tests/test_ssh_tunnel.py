@@ -1882,3 +1882,43 @@ def test_migrate_restart_prompt_cancel_stays_live(ssh_prefs_env, monkeypatch):
         time.sleep(0.02)
     win.destroy()
     assert result.get("transitioned"), "restart prompt never reached the verify transition"
+
+
+def test_migrate_uses_live_dialog_values(ssh_prefs_env, monkeypatch):
+    """The settings dialog passes its live host/socket to migrate - the user may
+    not have saved yet, so saved prefs ('ssh': {}) must not block the move."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    home, config = ssh_prefs_env
+    _write_node_key(home)
+    # prefs deliberately have empty ssh config (the reported bug)
+    gtkui.save_prefs({"ssh": {}})
+
+    win = Gtk.Window()
+    win.show_all()
+    win.activity = type("A", (), {"log": lambda self, *a, **k: None})()
+    win._migrate_restart_prompt = lambda *a, **k: None
+    win.do_migrate_node = gtkui.AimlessWindow.do_migrate_node.__get__(win)
+
+    # stub the staging so we can observe that live values were used and prefs
+    # got persisted
+    staged = {}
+
+    def fake_stage(host, identity, datadir, log=None):
+        staged["host"] = host
+        staged["datadir"] = datadir
+        return "backup"
+
+    monkeypatch.setattr(gtkui, "migrate_node_stage", fake_stage)
+    monkeypatch.setattr(gtkui, "daemon_pid_from_procs", lambda: None)
+    monkeypatch.setattr(gtkui, "verify_remote_node_key", lambda *a, **k: True)
+
+    win.do_migrate_node("me@host", "/srv/state/api.sock", None)
+    assert staged.get("host") == "me@host"
+    assert staged.get("datadir") == "/srv/state"
+    # prefs persisted so the app is consistent
+    assert gtkui.load_prefs()["ssh"]["host"] == "me@host"
+    assert gtkui.load_prefs()["ssh"]["remote_socket"] == "/srv/state/api.sock"
+    win.destroy()
