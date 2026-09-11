@@ -1,16 +1,14 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
-	"strings"
 	"sync"
 )
 
+// journalEntry is the in-memory shape shared by the outbox and inbox. Payload
+// stays base64 here because the daemon API and Mail pass it around as text;
+// SQLite stores the raw bytes.
 type journalEntry struct {
 	Seq     uint64       `json:"seq"`
 	Ts      int64        `json:"ts"`
@@ -19,83 +17,45 @@ type journalEntry struct {
 	SentAt  int64        `json:"sent_at,omitempty"` // transient pacing state, not persisted
 }
 
+// OutboxJournal is the durable per-peer send queue. A row exists until the peer
+// acknowledges its seq; delivery is at-least-once and idempotent at the peer.
 type OutboxJournal struct {
-	mu      sync.Mutex
-	path    string
-	seqPath string
-	entries []journalEntry
-	nextSeq uint64
+	db     *DB
+	peer   string
+	sentMu sync.Mutex
+	sent   map[uint64]int64 // transient "last enqueued" times, not persisted
 }
 
-func journalDir(datadir string) string {
-	return filepath.Join(datadir, "journal")
+func NewOutboxJournal(db *DB, peerHex string) (*OutboxJournal, error) {
+	return &OutboxJournal{db: db, peer: peerHex, sent: make(map[uint64]int64)}, nil
 }
 
-func inboxDir(datadir string) string {
-	return filepath.Join(datadir, "inbox")
-}
-
-func NewOutboxJournal(datadir, peerHex string) (*OutboxJournal, error) {
-	dir := journalDir(datadir)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
-	}
-	j := &OutboxJournal{
-		path:    filepath.Join(dir, peerHex+".jsonl"),
-		seqPath: filepath.Join(dir, peerHex+".seq"),
-	}
-	if err := j.load(); err != nil {
-		return nil, err
-	}
-	return j, nil
-}
-
-func (j *OutboxJournal) load() error {
-	data, err := os.ReadFile(j.path)
-	if err == nil {
-		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-			if line == "" {
-				continue
-			}
-			var e journalEntry
-			if err := json.Unmarshal([]byte(line), &e); err != nil {
-				return fmt.Errorf("parse %s: %w", j.path, err)
-			}
-			if e.Type == 0 {
-				e.Type = TypeMsg // pre-0.5.0 journal entries
-			}
-			j.entries = append(j.entries, e)
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	j.nextSeq = 1
-	for _, e := range j.entries {
-		if e.Seq >= j.nextSeq {
-			j.nextSeq = e.Seq + 1
-		}
-	}
-	if seqData, err := os.ReadFile(j.seqPath); err == nil {
-		var stored uint64
-		if _, err := fmt.Sscanf(strings.TrimSpace(string(seqData)), "%d", &stored); err == nil {
-			if stored > j.nextSeq {
-				j.nextSeq = stored
-			}
-		}
-	}
-	return nil
-}
-
+// NextSeq allocates the next monotonic seq for this peer. The counter lives in
+// its own table so acked (deleted) rows can never cause seq reuse.
 func (j *OutboxJournal) NextSeq() (uint64, error) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	seq := j.nextSeq
-	j.nextSeq++
-	if err := os.WriteFile(j.seqPath, []byte(fmt.Sprintf("%d\n", j.nextSeq)), 0o600); err != nil {
-		j.nextSeq--
-		return 0, fmt.Errorf("persist seq: %w", err)
+	tx, err := j.db.sql.Begin()
+	if err != nil {
+		return 0, err
 	}
-	return seq, nil
+	defer tx.Rollback()
+
+	var next int64
+	err = tx.QueryRow(`SELECT next FROM outbox_seq WHERE peer = ?`, j.peer).Scan(&next)
+	if err == sql.ErrNoRows {
+		next = 1
+		if _, err := tx.Exec(`INSERT INTO outbox_seq(peer, next) VALUES(?, 1)`, j.peer); err != nil {
+			return 0, err
+		}
+	} else if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`UPDATE outbox_seq SET next = next + 1 WHERE peer = ?`, j.peer); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return uint64(next), nil
 }
 
 func (j *OutboxJournal) Queue(seq uint64, ts int64, payload []byte) error {
@@ -103,267 +63,196 @@ func (j *OutboxJournal) Queue(seq uint64, ts int64, payload []byte) error {
 }
 
 func (j *OutboxJournal) QueueAs(seq uint64, ts int64, payload []byte, typ EnvelopeType) error {
-	entry := journalEntry{Seq: seq, Ts: ts, Payload: base64.StdEncoding.EncodeToString(payload), Type: typ}
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(j.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := f.Write(append(data, '\n')); err != nil {
-		return err
-	}
-	j.entries = append(j.entries, entry)
-	return nil
+	_, err := j.db.sql.Exec(
+		`INSERT OR REPLACE INTO outbox(peer, seq, ts, type, payload) VALUES(?, ?, ?, ?, ?)`,
+		j.peer, int64(seq), ts, int64(typ), payload,
+	)
+	return err
 }
 
+// Pending returns every unacked entry in seq order, with the transient SentAt
+// pacing stamp overlaid so the retry loop does not re-flood in-flight chunks.
 func (j *OutboxJournal) Pending() []journalEntry {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	out := make([]journalEntry, len(j.entries))
-	copy(out, j.entries)
+	rows, err := j.db.sql.Query(
+		`SELECT seq, ts, type, payload FROM outbox WHERE peer = ? ORDER BY seq`, j.peer)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	j.sentMu.Lock()
+	defer j.sentMu.Unlock()
+	var out []journalEntry
+	for rows.Next() {
+		var (
+			seq, typ int64
+			ts       int64
+			payload  []byte
+		)
+		if err := rows.Scan(&seq, &ts, &typ, &payload); err != nil {
+			continue
+		}
+		out = append(out, journalEntry{
+			Seq: uint64(seq), Ts: ts, Type: EnvelopeType(typ),
+			Payload: base64.StdEncoding.EncodeToString(payload), SentAt: j.sent[uint64(seq)],
+		})
+	}
 	return out
 }
 
 // MarkSent records the in-memory send time of an entry so the retry loop does
-// not re-send in-flight chunks. Transient state: on restart everything is
-// considered stale and re-sent, which is correct for durability.
+// not re-send in-flight chunks. Transient: on restart everything is considered
+// stale and re-sent, which is correct for durability.
 func (j *OutboxJournal) MarkSent(seq uint64, at int64) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	for i := range j.entries {
-		if j.entries[i].Seq == seq {
-			j.entries[i].SentAt = at
-			return
-		}
-	}
+	j.sentMu.Lock()
+	j.sent[seq] = at
+	j.sentMu.Unlock()
 }
 
+// Ack removes an entry. Returns true if the seq was still pending.
 func (j *OutboxJournal) Ack(seq uint64) (bool, error) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	found := -1
-	for i, e := range j.entries {
-		if e.Seq == seq {
-			found = i
-			break
-		}
+	res, err := j.db.sql.Exec(`DELETE FROM outbox WHERE peer = ? AND seq = ?`, j.peer, int64(seq))
+	if err != nil {
+		return false, err
 	}
-	if found < 0 {
+	n, _ := res.RowsAffected()
+	j.sentMu.Lock()
+	delete(j.sent, seq)
+	j.sentMu.Unlock()
+	return n > 0, nil
+}
+
+// InboxStore is the durable per-peer receive log. It retains the newest
+// `capacity` messages and remembers trimmed seqs as a bounded replay guard.
+type InboxStore struct {
+	db       *DB
+	peer     string
+	capacity int
+	seenCap  int
+}
+
+func NewInboxStore(db *DB, peerHex string, capacity int) (*InboxStore, error) {
+	if capacity < 1 {
+		capacity = 1
+	}
+	return &InboxStore{db: db, peer: peerHex, capacity: capacity, seenCap: 4 * capacity}, nil
+}
+
+// Add stores one message. It returns isNew=false for a duplicate seq (retained
+// or trimmed-and-remembered).
+func (in *InboxStore) Add(seq uint64, ts int64, payload []byte) (bool, error) {
+	tx, err := in.db.sql.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var one int
+	switch err := tx.QueryRow(`SELECT 1 FROM inbox WHERE peer = ? AND seq = ?`, in.peer, int64(seq)).Scan(&one); err {
+	case nil:
 		return false, nil
+	case sql.ErrNoRows:
+	default:
+		return false, err
 	}
-	j.entries = append(j.entries[:found], j.entries[found+1:]...)
-	data := make([]byte, 0, 256*len(j.entries))
-	for _, e := range j.entries {
-		line, err := json.Marshal(e)
-		if err != nil {
-			return true, err
-		}
-		data = append(data, append(line, '\n')...)
+	switch err := tx.QueryRow(`SELECT 1 FROM inbox_seen WHERE peer = ? AND seq = ?`, in.peer, int64(seq)).Scan(&one); err {
+	case nil:
+		return false, nil
+	case sql.ErrNoRows:
+	default:
+		return false, err
 	}
-	tmp := j.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return true, err
+
+	if _, err := tx.Exec(
+		`INSERT INTO inbox(peer, seq, ts, payload) VALUES(?, ?, ?, ?)`,
+		in.peer, int64(seq), ts, payload,
+	); err != nil {
+		return false, err
 	}
-	if err := os.Rename(tmp, j.path); err != nil {
+	if err := in.trimTx(tx); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
 		return true, err
 	}
 	return true, nil
 }
 
-type InboxStore struct {
-	mu          sync.Mutex
-	path        string
-	highSeqPath string
-	capacity    int
-	entries     []journalEntry
-	dedup       map[uint64]struct{}
-	seenBelow   map[uint64]struct{}
-	seenCap     int
-	retainedMin uint64
-}
-
-type highSeqFile struct {
-	RetainedMin uint64   `json:"retained_min"`
-	Seen        []uint64 `json:"seen"`
-}
-
-func NewInboxStore(datadir, peerHex string, capacity int) (*InboxStore, error) {
-	dir := inboxDir(datadir)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
-	}
-	in := &InboxStore{
-		path:        filepath.Join(dir, peerHex+".jsonl"),
-		highSeqPath: filepath.Join(dir, peerHex+".highseq"),
-		capacity:    capacity,
-		dedup:       make(map[uint64]struct{}),
-		seenBelow:   make(map[uint64]struct{}),
-		seenCap:     4 * capacity,
-	}
-	if err := in.load(); err != nil {
-		return nil, err
-	}
-	return in, nil
-}
-
-func (in *InboxStore) load() error {
-	data, err := os.ReadFile(in.path)
-	if err == nil {
-		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-			if line == "" {
-				continue
-			}
-			var e journalEntry
-			if err := json.Unmarshal([]byte(line), &e); err != nil {
-				return fmt.Errorf("parse %s: %w", in.path, err)
-			}
-			in.entries = append(in.entries, e)
-		}
-	} else if !os.IsNotExist(err) {
+// trimTx evicts oldest entries past capacity into the bounded replay guard.
+func (in *InboxStore) trimTx(tx *sql.Tx) error {
+	var count int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM inbox WHERE peer = ?`, in.peer).Scan(&count); err != nil {
 		return err
 	}
-	sort.Slice(in.entries, func(i, k int) bool { return in.entries[i].Seq < in.entries[k].Seq })
-	if scData, err := os.ReadFile(in.highSeqPath); err == nil {
-		var sc highSeqFile
-		if err := json.Unmarshal(scData, &sc); err == nil {
-			for _, s := range sc.Seen {
-				in.seenBelow[s] = struct{}{}
-			}
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	in.trimLocked()
-	for _, e := range in.entries {
-		in.dedup[e.Seq] = struct{}{}
-	}
-	return nil
-}
-
-// trimLocked drops the oldest entries past capacity, remembering their seqs in
-// the seen set so a later replay (which is no longer in `entries`) is rejected.
-func (in *InboxStore) trimLocked() {
-	for len(in.entries) > in.capacity {
-		oldest := in.entries[0]
-		in.entries = in.entries[1:]
-		delete(in.dedup, oldest.Seq)
-		in.addSeenLocked(oldest.Seq)
-	}
-	if len(in.entries) > 0 {
-		in.retainedMin = in.entries[0].Seq
-	}
-}
-
-// addSeenLocked records a seq that was accepted but now sits below the retained
-// window, bounded to seenCap entries (replay protection is windowed, not absolute).
-func (in *InboxStore) addSeenLocked(seq uint64) {
-	if _, ok := in.seenBelow[seq]; ok {
-		return
-	}
-	if len(in.seenBelow) >= in.seenCap {
-		var oldest uint64
-		first := true
-		for s := range in.seenBelow {
-			if first || s < oldest {
-				oldest, first = s, false
-			}
-		}
-		delete(in.seenBelow, oldest)
-	}
-	in.seenBelow[seq] = struct{}{}
-}
-
-func (in *InboxStore) persistLocked() error {
-	data := make([]byte, 0, 256*len(in.entries))
-	for _, e := range in.entries {
-		line, err := json.Marshal(e)
-		if err != nil {
+	for count > in.capacity {
+		var oldest int64
+		if err := tx.QueryRow(`SELECT MIN(seq) FROM inbox WHERE peer = ?`, in.peer).Scan(&oldest); err != nil {
 			return err
 		}
-		data = append(data, append(line, '\n')...)
-	}
-	tmp := in.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, in.path); err != nil {
-		return err
-	}
-	sc := highSeqFile{RetainedMin: in.retainedMin, Seen: in.sortedSeenLocked()}
-	scData, err := json.Marshal(sc)
-	if err != nil {
-		return err
-	}
-	tmp2 := in.highSeqPath + ".tmp"
-	if err := os.WriteFile(tmp2, scData, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp2, in.highSeqPath)
-}
-
-func (in *InboxStore) sortedSeenLocked() []uint64 {
-	out := make([]uint64, 0, len(in.seenBelow))
-	for s := range in.seenBelow {
-		out = append(out, s)
-	}
-	sort.Slice(out, func(i, k int) bool { return out[i] < out[k] })
-	return out
-}
-
-func (in *InboxStore) Add(seq uint64, ts int64, payload []byte) (bool, error) {
-	in.mu.Lock()
-	defer in.mu.Unlock()
-	if _, ok := in.dedup[seq]; ok {
-		return false, nil
-	}
-	if seq < in.retainedMin {
-		if _, ok := in.seenBelow[seq]; ok {
-			return false, nil
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO inbox_seen(peer, seq) VALUES(?, ?)`, in.peer, oldest); err != nil {
+			return err
 		}
-		in.addSeenLocked(seq)
+		if _, err := tx.Exec(`DELETE FROM inbox WHERE peer = ? AND seq = ?`, in.peer, oldest); err != nil {
+			return err
+		}
+		count--
 	}
-	entry := journalEntry{Seq: seq, Ts: ts, Payload: base64.StdEncoding.EncodeToString(payload)}
-	idx := sort.Search(len(in.entries), func(i int) bool { return in.entries[i].Seq > seq })
-	in.entries = append(in.entries, journalEntry{})
-	copy(in.entries[idx+1:], in.entries[idx:])
-	in.entries[idx] = entry
-	in.dedup[seq] = struct{}{}
-	in.trimLocked()
-	if err := in.persistLocked(); err != nil {
-		return true, err
+	// Bound the replay guard to seenCap newest seqs.
+	if _, err := tx.Exec(
+		`DELETE FROM inbox_seen WHERE peer = ? AND seq NOT IN (
+		     SELECT seq FROM inbox_seen WHERE peer = ? ORDER BY seq DESC LIMIT ?
+		 )`, in.peer, in.peer, in.seenCap); err != nil {
+		return err
 	}
-	return true, nil
+	var min sql.NullInt64
+	if err := tx.QueryRow(`SELECT MIN(seq) FROM inbox WHERE peer = ?`, in.peer).Scan(&min); err != nil {
+		return err
+	}
+	retained := int64(0)
+	if min.Valid {
+		retained = min.Int64
+	}
+	_, err := tx.Exec(
+		`INSERT INTO peer_state(peer, retained_min) VALUES(?, ?)
+		 ON CONFLICT(peer) DO UPDATE SET retained_min = excluded.retained_min`,
+		in.peer, retained)
+	return err
 }
 
+// After returns entries with seq strictly greater than afterSeq, in order.
 func (in *InboxStore) After(afterSeq uint64) []journalEntry {
-	in.mu.Lock()
-	defer in.mu.Unlock()
-	idx := sort.Search(len(in.entries), func(i int) bool { return in.entries[i].Seq > afterSeq })
-	out := make([]journalEntry, len(in.entries)-idx)
-	copy(out, in.entries[idx:])
+	rows, err := in.db.sql.Query(
+		`SELECT seq, ts, payload FROM inbox WHERE peer = ? AND seq > ? ORDER BY seq`,
+		in.peer, int64(afterSeq))
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []journalEntry
+	for rows.Next() {
+		var (
+			seq, ts int64
+			payload []byte
+		)
+		if err := rows.Scan(&seq, &ts, &payload); err != nil {
+			continue
+		}
+		out = append(out, journalEntry{Seq: uint64(seq), Ts: ts, Payload: base64.StdEncoding.EncodeToString(payload)})
+	}
 	return out
 }
 
 func (in *InboxStore) Oldest() uint64 {
-	in.mu.Lock()
-	defer in.mu.Unlock()
-	if len(in.entries) == 0 {
+	var v sql.NullInt64
+	if err := in.db.sql.QueryRow(`SELECT MIN(seq) FROM inbox WHERE peer = ?`, in.peer).Scan(&v); err != nil || !v.Valid {
 		return 0
 	}
-	return in.entries[0].Seq
+	return uint64(v.Int64)
 }
 
 func (in *InboxStore) Latest() uint64 {
-	in.mu.Lock()
-	defer in.mu.Unlock()
-	if len(in.entries) == 0 {
+	var v sql.NullInt64
+	if err := in.db.sql.QueryRow(`SELECT MAX(seq) FROM inbox WHERE peer = ?`, in.peer).Scan(&v); err != nil || !v.Valid {
 		return 0
 	}
-	return in.entries[len(in.entries)-1].Seq
+	return uint64(v.Int64)
 }

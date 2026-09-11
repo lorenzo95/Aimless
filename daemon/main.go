@@ -124,6 +124,7 @@ func run(datadir, apiPath, peersFlag, listenFlag string, retryInterval, probeInt
 	if err != nil {
 		return err
 	}
+	defer mail.Close()
 	node.OnPacket = mail.HandlePacket
 	node.OnPathUp = mail.PathUp
 	mail.Attach(node)

@@ -5,6 +5,7 @@ import os
 import pytest
 
 from aimless import crypto, protocol
+from aimless.store import Store
 
 
 def _split(data, size=None):
@@ -76,11 +77,11 @@ def test_file_size_cap():
 
 def test_cache_attachment_shape(tmp_path):
     path = str(tmp_path / "cache.json.enc")
-    c = crypto.Cache(path, "pw")
+    c = Store(path, "pw")
     att = {"path": "/x/attachments/1-a.jpg", "filename": "a.jpg", "mime_hint": "image", "size": 10}
     assert c.add_recv("conv", "n1", 7, 100, "a.jpg", attachment=att) is True
     assert c.add_recv("conv", "n1", 7, 100, "a.jpg", attachment=att) is False, "dedup by seq"
-    c2 = crypto.Cache(path, "pw")
+    c2 = Store(path, "pw")
     msgs = c2.msgs("conv")
     assert len(msgs) == 1
     assert msgs[0]["attachment"] == att

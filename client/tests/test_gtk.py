@@ -12,6 +12,7 @@ import test_e2e
 from test_e2e import two_nodes  # noqa: F401
 
 from aimless import crypto, protocol
+from aimless.store import Store
 from aimless import gtkui
 from aimless.daemon import Client, DaemonClient, DaemonError
 
@@ -49,7 +50,7 @@ def gtk_app(tmp_path, monkeypatch, two_nodes):
 
     alice_identity = crypto.new_identity()
     crypto.save_identity(str(home / "identity.json"), alice_identity, "testpass")
-    crypto.Cache(str(home / "cache.json.enc"), "testpass")
+    Store(str(home / "state.db"), "testpass")
 
     bob_identity = crypto.new_identity()
     bob = Client(DaemonClient(sock_b), bob_identity, "Bob")
@@ -249,9 +250,9 @@ def test_gui_old_daemon_warns(gtk_app):
                                "address": "x", "mtu": 65535})
     label = win.activity.info_label.get_text()
     assert "too old" in label, "an old daemon build must warn in the status line"
-    assert "0.5.2" in label, "warning must name the minimum build"
+    assert "0.8.0" in label, "warning must name the minimum build"
 
-    win.activity.refresh_info({"build": "aimlessd/0.5.2", "peers_up": 1, "peers_total": 2,
+    win.activity.refresh_info({"build": "aimlessd/0.8.0", "peers_up": 1, "peers_total": 2,
                                "address": "x", "mtu": 65535})
     label = win.activity.info_label.get_text()
     assert "too old" not in label, "a current daemon must not warn"
@@ -1384,32 +1385,29 @@ def test_clear_failure_aborts(gtk_app, monkeypatch):
     assert any("clear failed" in t for t in texts)
 
 
-def test_room_tombstone_and_mute_units():
-    import os
-    import tempfile
-    path = tempfile.mktemp(suffix=".enc")
-    c = crypto.Cache(path, "pw")
+def test_room_tombstone_and_mute_units(tmp_path):
+    c = Store(str(tmp_path / "state.db"), "pw")
     members = {"n1": {"node": "n1", "pubkey": "pk", "screen": "One"}}
     c.ensure_room("rr", members)
-    c.add_recv("rr", "n1", 4, 100, "hello")
+    c.ingest("rr", "n1", 4, 100, "hello")
     assert "rr" in c.rooms()
 
     c.delete_room("rr", {"n1": 9})
     assert c.rooms() == []
-    assert c.msgs("rr") == []
-    assert c.scan_last("rr", "n1") == 9
+    assert c.messages("rr") == []
+    assert c.cursor("n1") == 9
 
-    c.ensure_room("rr", members)
+    # resurrection on a new message keeps the dismissed cursor
+    c.ingest("rr", "n1", 10, 500, "new")
     assert "rr" in c.rooms()
-    assert c.scan_last("rr", "n1") == 9, "resurrection must keep the dismissed cursor"
+    assert c.cursor("n1") == 9, "resurrection must not reset the dismissed cursor"
 
     assert c.is_conversation_muted("nope") is False
-    assert "nope" not in c._data["conversations"], "mute check must not create records"
     c.mute_conversation("rr")
     assert c.is_conversation_muted("rr")
     c.unmute_conversation("rr")
     assert c.is_conversation_muted("rr") is False
-    os.remove(path)
+    c.close()
 
 
 def test_member_chips_add_and_jump(gtk_app, monkeypatch):

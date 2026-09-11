@@ -103,11 +103,12 @@ page gets your desktop with it).
   private key (or who later compromises it) can decrypt past traffic. This is a
   store-and-forward design — treat it like email, not Signal.
 - **No plaintext on disk anywhere** (text). History lives in an encrypted local
-  cache (passphrase-derived scrypt key); the identity keyfile is passphrase-
-  encrypted the same way. **Attachments are the one exception**: the actual file
+  SQLite database (`state.db`, passphrase-derived scrypt key; routing metadata is
+  plaintext, message text and attachment JSON are sealed); the identity keyfile is
+  passphrase-encrypted the same way. **Attachments are the one exception**: the actual file
   bytes are written to `~/.local/share/aimless/attachments/<conv>/` in plaintext
   (an image must be renderable/saveable locally), while only metadata is in the
-  encrypted cache. Also, the daemon learns a file's transfer id and chunk
+  encrypted database. Also, the daemon learns a file's transfer id and chunk
   index/total — but never its filename, mime type, hash, or contents, which stay
   end-to-end encrypted.
 
@@ -116,7 +117,7 @@ page gets your desktop with it).
 | Piece | Language | Role |
 |---|---|---|
 | `daemon/` | Go | `aimlessd` — embedded yggdrasil core (no TUN), packet transport, journals (text + file chunks), retry/ACK, persistent per-peer blocklist, presence probing, local JSON API on a Unix socket |
-| `client/` | Python | `aimless` CLI — identity, contacts, encrypted history cache; GTK desktop app — DMs + group rooms, attachments, clickable links, buddy list, presence/away, contacts with mute/block management, tray |
+| `client/` | Python | `aimless` CLI — identity, contacts, encrypted local state (SQLite `state.db`); GTK desktop app — DMs + group rooms, attachments, clickable links, buddy list, presence/away, contacts with mute/block management, tray |
 | `deploy/` | — | webtop container image (GHCR) + `package.sh` release builder + `check_dist.py` gate + two-node smoke test; `main.go`/`api.go` daemon |
 
 ## Packet format
@@ -154,7 +155,7 @@ Status is **announce-and-refresh, never stored**: the sender's app re-announces 
 
 ### Rooms and contact requests
 
-- **Rooms are conversations with 3+ members**, delivered by client-side fan-out: the sender seals one copy per member and the daemon's normal retry/ACK/offline machinery handles each copy. Membership is learned from the messages themselves (advisory by design — a member can restate it, but every message is individually signed, so nobody can impersonate anyone). The sidebar shows a liveness dot and online count (`● 6/10`); the conversation header shows one presence dot per member plus clickable member chips — the full roster with names, so nobody is just '+1'. A filled dot means they're your buddy (click opens your DM), a hollow dot means they aren't yet (click offers to add them — identity as claimed by the room roster; direct invite exchange is stronger). History is fetched per conversation: the daemon journals everything a buddy sends you in one stream, and each conversation scans that stream keeping only its own messages — DMs and rooms never mix. Clearing history or deleting a room **dismisses** the existing backlog (the scan cursor moves past it) — only messages that arrive afterwards are shown; deleted rooms reappear if someone sends to them again, containing just those new messages. **Muting** a conversation — a room *or* a 1:1 DM — keeps it in the sidebar, dimmed and silent (no badges, no previews, no request popups) while history still stores; unmute restores everything. All of this is local-only — you can't be removed from someone else's roster, and they can't be removed from yours; "leaving" means your side stops caring.
+- **Rooms are conversations with 3+ members**, delivered by client-side fan-out: the sender seals one copy per member and the daemon's normal retry/ACK/offline machinery handles each copy. Membership is learned from the messages themselves (advisory by design — a member can restate it, but every message is individually signed, so nobody can impersonate anyone). The sidebar shows a liveness dot and online count (`● 6/10`); the conversation header shows one presence dot per member plus clickable member chips — the full roster with names, so nobody is just '+1'. A filled dot means they're your buddy (click opens your DM), a hollow dot means they aren't yet (click offers to add them — identity as claimed by the room roster; direct invite exchange is stronger). History is fetched as a single per-peer sync: the daemon journals everything a buddy sends you in one stream, every entry is decrypted once and routed to its own conversation by the `conv` field, and one watermark per peer tracks progress — DMs and rooms never mix. Clearing history or deleting a room **dismisses** the existing backlog (the messages are dropped and the peer watermark moves past them) — only messages that arrive afterwards are shown; deleted rooms reappear if someone sends to them again, containing just those new messages. **Muting** a conversation — a room *or* a 1:1 DM — keeps it in the sidebar, dimmed and silent (no badges, no previews, no request popups) while history still stores; unmute restores everything. All of this is local-only — you can't be removed from someone else's roster, and they can't be removed from yours; "leaving" means your side stops caring.
 - **First contact is a handshake**: a chat message from someone not in your contacts pops an *Accept / Deny / Block* dialog:
   - **Accept** adds them and delivers the message.
   - **Deny** is a one-time decline — that message is discarded, the sender stays a stranger, and their *next* message re-prompts you.

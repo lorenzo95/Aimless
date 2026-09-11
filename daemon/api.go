@@ -13,7 +13,11 @@ import (
 	"sync"
 )
 
-const buildVersion = "aimlessd/0.5.6"
+const buildVersion = "aimlessd/0.8.0"
+
+// protocolVersion identifies the wire format spoken to other daemons. Peers on a
+// different version are ignored rather than misparsed; there is no compat layer.
+const protocolVersion = 2
 
 type peerStatus struct {
 	URI     string `json:"uri"`

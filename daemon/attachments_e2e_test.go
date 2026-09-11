@@ -3,26 +3,12 @@ package main
 import (
 	"crypto/ed25519"
 	"encoding/base64"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func mustB64(b []byte) string {
 	return base64.StdEncoding.EncodeToString(b)
-}
-
-func osWriteLegacyJournal(t *testing.T, dir, peer string) {
-	t.Helper()
-	if err := os.MkdirAll(journalDir(dir), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(journalDir(dir), peer+".jsonl")
-	// a pre-0.5.0 entry has no "type" field
-	if err := os.WriteFile(path, []byte(`{"seq":1,"ts":111,"payload":"eA=="}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestFileChunkDeliveryRetrievalAndAck(t *testing.T) {
@@ -201,7 +187,7 @@ func TestFileChunkDedupFiresDeliverOnce(t *testing.T) {
 func TestJournalTypeRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	peer := "aabb"
-	j, err := NewOutboxJournal(dir, peer)
+	j, err := NewOutboxJournal(testDB(t, dir), peer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,27 +195,12 @@ func TestJournalTypeRoundTrip(t *testing.T) {
 	if err := j.QueueAs(seq, 111, []byte("file chunk"), TypeFile); err != nil {
 		t.Fatal(err)
 	}
-	j2, err := NewOutboxJournal(dir, peer)
+	j2, err := NewOutboxJournal(testDB(t, dir), peer)
 	if err != nil {
 		t.Fatal(err)
 	}
 	pending := j2.Pending()
 	if len(pending) != 1 || pending[0].Type != TypeFile {
 		t.Fatalf("journal type = %v, want TypeFile", pending[0].Type)
-	}
-}
-
-func TestJournalLegacyEntriesNormalizeToMsg(t *testing.T) {
-	dir := t.TempDir()
-	peer := "aabb"
-	osWriteLegacyJournal(t, dir, peer)
-	j, err := NewOutboxJournal(dir, peer)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range j.Pending() {
-		if e.Type != TypeMsg {
-			t.Fatalf("legacy entry type = %v, want TypeMsg", e.Type)
-		}
 	}
 }

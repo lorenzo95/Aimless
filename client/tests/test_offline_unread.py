@@ -3,6 +3,7 @@ import time
 import pytest
 
 from aimless import crypto, gtkui
+from aimless.store import Store
 from aimless.daemon import DaemonClient, Client
 from aimless import protocol
 from test_e2e import _build_daemon, _free_port, _wait_socket
@@ -64,7 +65,7 @@ def daemon_up_client_later(tmp_path, monkeypatch):
     monkeypatch.setattr(gtkui, "APP_PID_FILE", str(config / "app.pid"))
     monkeypatch.setattr(gtkui, "AIMLESSD_PID_FILE", str(config / "aimlessd.pid"))
     crypto.save_identity(str(home / "identity.json"), a_ident, "testpass")
-    crypto.Cache(str(home / "cache.json.enc"), "testpass")
+    Store(str(home / "state.db"), "testpass")
     protocol.save_contacts(str(home / "client-contacts.json"), {
         "_self": {"screen": "Alice", "pubkey": a_pub},
         "bob": {"pubkey": bytes(b_ident.verify_key).hex(), "node": b_node, "screen": "Bob"},

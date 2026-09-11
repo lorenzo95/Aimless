@@ -33,6 +33,8 @@ from gi.repository import Gtk, GLib, Gdk, Pango, GdkPixbuf, Gio
 
 from . import crypto, protocol, logging
 from .daemon import DaemonClient, Client, DaemonError
+from .service import Sync
+from .store import Store
 from . import __version__ as client_version
 from . import MIN_DAEMON_BUILD
 
@@ -110,7 +112,7 @@ def identity_path():
 
 
 def cache_path():
-    return os.path.join(data_dir(), "cache.json.enc")
+    return os.path.join(data_dir(), "state.db")
 
 CSS = """
 headerbar {
@@ -327,7 +329,7 @@ def identity_path():
 
 
 def cache_path():
-    return os.path.join(data_dir(), "cache.json.enc")
+    return os.path.join(data_dir(), "state.db")
 
 
 def daemon_binary():
@@ -468,23 +470,26 @@ class Session:
         self.identity = crypto.load_identity(identity_path(), passphrase)
         self.cache_recovered = None
         try:
-            self.cache = crypto.Cache(cache_path(), passphrase)
+            self.store = Store(cache_path(), passphrase)
         except Exception as e:
             try:
                 os.replace(cache_path(), cache_path() + ".bad")
             except OSError:
                 pass
-            self.cache_recovered = f"corrupted cache recovered as .bad ({e})"
-            self.cache = crypto.Cache(cache_path(), passphrase)
+            self.cache_recovered = f"corrupted state recovered as .bad ({e})"
+            self.store = Store(cache_path(), passphrase)
+        # Transitional alias: the GTK layer still speaks the cache vocabulary.
+        self.cache = self.store
         self.daemon = DaemonClient(sock_path())
         self.self_node = self.daemon.request("whoami")["key"]
         contacts = protocol.load_contacts(contacts_path())
         for info in contacts.values():
             node = info.get("node")
-            if node and self.cache.is_muted(node):
-                self.cache.unmute(node)
+            if node and self.store.is_muted(node):
+                self.store.unmute(node)
         self.self_screen = contacts.get("_self", {}).get("screen", "anonymous")
         self.client = Client(self.daemon, self.identity, self.self_screen)
+        self.sync = Sync(self.client, self.store)
         self.pubkey_hex = self.client.pubkey_hex
 
     def contacts(self):
@@ -932,55 +937,39 @@ class MessagesView(Gtk.Box):
             w["badge"] = None
 
     def catchup_unread(self):
-        """One-time startup sweep: count messages that arrived while no client was
-        connected (the daemon keeps running between app sessions in the container,
-        and recv events broadcast to nobody are lost) as unread.
+        """Startup sweep: route everything the daemon journaled while no client
+        was connected, then count what arrived per conversation.
 
-        Fetches history past each conversation's scan cursor and adds anything new
-        to the cache WITHOUT advancing the cursor — so opening a thread still
-        fetches and shows the messages (and clears the badge)."""
+        Uses the single per-peer sync path (the daemon keeps running between app
+        sessions, and recv events broadcast to nobody are lost)."""
         if self._catchup_busy:
             return
         self._catchup_busy = True
         session = self.app.session
-        jobs = []
+        peers = set()
         for conv, thread in list(self.threads.items()):
             nodes = list(thread.get("members", {}).keys()) if thread.get("is_room") else [conv]
-            for n in nodes:
-                jobs.append((conv, n))
+            peers.update(nodes)
 
         def worker():
-            return [(conv, n, session.client.history(n, session.cache.scan_last(conv, n)))
-                    for conv, n in jobs]
+            return session.sync.fetch(peers)
 
-        def done(results):
+        def done(hists):
             self._catchup_busy = False
-            new_by_conv = {}
-            for conv, member, hist in results:
-                if not hist or not hist.get("msgs"):
-                    continue
-                count = 0
-                for m in hist["msgs"]:
-                    try:
-                        opened = protocol.open_message(session.identity, m["payload"])
-                    except (ValueError, KeyError):
-                        continue
-                    msg_conv = opened.get("conv") or member
-                    if msg_conv != conv:
-                        continue
-                    if session.cache.add_recv(conv, member, m["seq"], opened["ts"], opened["text"]):
-                        count += 1
-                if count:
-                    new_by_conv[conv] = new_by_conv.get(conv, 0) + count
-            for conv, count in new_by_conv.items():
-                thread = self.threads.get(conv)
-                if thread is None or self.selected is thread:
-                    continue
-                thread["unread"] += count
+            before = {c: len(session.store.messages(c)) for c in self.threads}
+            for peer, resp in hists.items():
+                session.sync.apply(peer, resp)
+            arrived = 0
+            for conv, thread in self.threads.items():
+                delta = len(session.store.messages(conv)) - before.get(conv, 0)
+                if delta > 0:
+                    arrived += delta
+                    if self.selected is not thread:
+                        thread["unread"] += delta
                 self.update_thread_row(conv)
-            if new_by_conv:
+            if arrived:
                 self.app.activity.log(
-                    f"unread sweep: {sum(new_by_conv.values())} message(s) arrived while you were away")
+                    f"unread sweep: {arrived} message(s) arrived while you were away")
 
         def fail(_e):
             self._catchup_busy = False
@@ -1002,6 +991,7 @@ class MessagesView(Gtk.Box):
         thread = self.threads[conv]
         self.selected = thread
         thread["unread"] = 0
+        self.app.session.store.mark_read(conv)
         self.update_thread_row(conv)
 
         if thread.get("is_room"):
@@ -1051,13 +1041,15 @@ class MessagesView(Gtk.Box):
         nodes = (list(thread["members"].keys()) if thread and thread.get("is_room") else [conv])
 
         def worker():
-            # the daemon journals everything a buddy ever sent us in one stream per
-            # sender; each conversation scans that stream and keeps only its own
-            return {n: session.client.history(n, session.cache.scan_last(conv, n)) for n in nodes}
+            # one stream per sender; every entry is decrypted once and routed to
+            # its own conversation, so a single cursor per peer covers all rooms.
+            return session.sync.fetch(nodes)
 
         def done(hists):
             self._history_busy = False
-            self._history_loaded(conv, hists)
+            for peer, resp in hists.items():
+                session.sync.apply(peer, resp)
+            self._history_loaded(conv)
 
         def fail(e):
             self._history_busy = False
@@ -1065,32 +1057,12 @@ class MessagesView(Gtk.Box):
 
         run_async(worker, on_done=done, on_error=fail)
 
-    def _history_loaded(self, conv, hists):
+    def _history_loaded(self, conv):
         if self.selected is None or self.selected.get("conv") != conv:
             return False
         thread = self.selected
-        for member, hist in hists.items():
-            pre_scan = self.app.session.cache.scan_last(conv, member)
-            max_seen = 0
-            for m in hist.get("msgs", []):
-                max_seen = max(max_seen, m["seq"])
-                try:
-                    opened = protocol.open_message(self.app.session.identity, m["payload"])
-                except (ValueError, KeyError):
-                    continue
-                msg_conv = opened.get("conv") or member
-                if msg_conv != conv:
-                    continue
-                self.app.session.cache.add_recv(conv, member, m["seq"], opened["ts"], opened["text"])
-            if max_seen:
-                self.app.session.cache.set_scan_last(conv, member, max_seen)
-            oldest = hist.get("oldest", 0)
-            if pre_scan and oldest and pre_scan + 1 < oldest:
-                self.append_system_note(
-                    f"gap — messages from {self._sender_label(thread, {'sender': member}) or member[:8]} "
-                    f"before seq {oldest} were dropped by retention")
         clear_children(self.conversation)
-        for m in sorted(self.app.session.cache.msgs(conv), key=lambda m: (m["ts"], min(m["seqs"].values()))):
+        for m in self.app.session.store.messages(conv):
             self.append_bubble(m["dir"] == "out", m["text"], m["ts"],
                                sender=None if m["dir"] == "out" else self._sender_label(thread, m),
                                attachment=m.get("attachment"))

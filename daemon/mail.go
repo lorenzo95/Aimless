@@ -45,6 +45,7 @@ type Mailbox struct {
 type Mail struct {
 	mu            sync.Mutex
 	datadir       string
+	db            *DB
 	inboxCapacity int
 	attachCap     int64
 	retryInterval time.Duration
@@ -73,18 +74,30 @@ func NewMail(datadir string, inboxCapacity int, attachCap int64, retryInterval t
 		return nil, err
 	}
 	m.blocked = blocked
-	dir := journalDir(datadir)
-	entries, err := osReadDir(dir)
+	db, err := OpenDB(datadir)
 	if err != nil {
 		return nil, err
 	}
-	for _, e := range entries {
-		name := e
-		if len(name) > 6 && name[len(name)-6:] == ".jsonl" {
-			peerHex := name[:len(name)-6]
-			if _, err := m.boxFor(peerHex); err != nil {
-				return nil, err
-			}
+	m.db = db
+	// Recreate mailbox state for every peer with an undelivered outbox row so
+	// the retry loop resumes after a restart.
+	rows, err := db.sql.Query(`SELECT DISTINCT peer FROM outbox`)
+	if err != nil {
+		return nil, err
+	}
+	var peers []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		peers = append(peers, p)
+	}
+	rows.Close()
+	for _, peerHex := range peers {
+		if _, err := m.boxFor(peerHex); err != nil {
+			return nil, err
 		}
 	}
 	contacts, err := m.loadContacts()
@@ -97,6 +110,13 @@ func NewMail(datadir string, inboxCapacity int, attachCap int64, retryInterval t
 		}
 	}
 	return m, nil
+}
+
+func (m *Mail) Close() error {
+	if m.db != nil {
+		return m.db.Close()
+	}
+	return nil
 }
 
 type contactsFile struct {
@@ -256,15 +276,15 @@ func (m *Mail) boxFor(peerHex string) (*Mailbox, error) {
 	if box, ok := m.boxes[peerHex]; ok {
 		return box, nil
 	}
-	journal, err := NewOutboxJournal(m.datadir, peerHex)
+	journal, err := NewOutboxJournal(m.db, peerHex)
 	if err != nil {
 		return nil, err
 	}
-	inbox, err := NewInboxStore(m.datadir, peerHex, m.inboxCapacity)
+	inbox, err := NewInboxStore(m.db, peerHex, m.inboxCapacity)
 	if err != nil {
 		return nil, err
 	}
-	attach, err := NewAttachmentStore(m.datadir, peerHex, m.attachCap)
+	attach, err := NewAttachmentStore(m.db, peerHex, m.attachCap)
 	if err != nil {
 		return nil, err
 	}

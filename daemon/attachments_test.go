@@ -19,8 +19,8 @@ func filePayload(tid string, index, total uint16, data []byte) []byte {
 func TestAttachmentStoreBudgetEvictsOldestIncompleteFirst(t *testing.T) {
 	dir := t.TempDir()
 	peer := "aabb"
-	// budget fits 4 stored chunks (each stored payload is 48 chars of base64)
-	as, err := NewAttachmentStore(dir, peer, 48*4)
+	// budget fits 4 stored chunks (each stored payload is 36 raw bytes)
+	as, err := NewAttachmentStore(testDB(t, dir), peer, 36*4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestAttachmentStoreBudgetEvictsOldestIncompleteFirst(t *testing.T) {
 func TestAttachmentStoreEvictsOldestCompleteWhenOnlyCompleteRemain(t *testing.T) {
 	dir := t.TempDir()
 	peer := "aabb"
-	as, err := NewAttachmentStore(dir, peer, 48*4)
+	as, err := NewAttachmentStore(testDB(t, dir), peer, 36*4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestAttachmentStoreEvictsOldestCompleteWhenOnlyCompleteRemain(t *testing.T)
 func TestAttachmentStoreCompleteRetainedUntilAck(t *testing.T) {
 	dir := t.TempDir()
 	peer := "aabb"
-	as, err := NewAttachmentStore(dir, peer, 1<<20)
+	as, err := NewAttachmentStore(testDB(t, dir), peer, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestAttachmentStorePersistsAndReloads(t *testing.T) {
 	dir := t.TempDir()
 	peer := "aabb"
 	chunk := make([]byte, 16)
-	as, err := NewAttachmentStore(dir, peer, 1<<20)
+	as, err := NewAttachmentStore(testDB(t, dir), peer, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestAttachmentStorePersistsAndReloads(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	as2, err := NewAttachmentStore(dir, peer, 1<<20)
+	as2, err := NewAttachmentStore(testDB(t, dir), peer, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestAttachmentStorePersistsAndReloads(t *testing.T) {
 	if err := as2.AckTid("tid1"); err != nil {
 		t.Fatal(err)
 	}
-	as3, err := NewAttachmentStore(dir, peer, 1<<20)
+	as3, err := NewAttachmentStore(testDB(t, dir), peer, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestAttachmentStoreFirstChunkUnderBudgetPressure(t *testing.T) {
 	dir := t.TempDir()
 	peer := "aabb"
 	// budget fills to exactly 4 stored chunks before "ef" starts
-	as, err := NewAttachmentStore(dir, peer, 48*4)
+	as, err := NewAttachmentStore(testDB(t, dir), peer, 36*4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestAttachmentStoreFirstChunkUnderBudgetPressure(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// "ij": incomplete (1 chunk) — budget now full (192 bytes)
+	// "ij": incomplete (1 chunk) — budget now full (144 bytes)
 	if _, err := as.Add("ij", 1, 2, uint64(30), int64(30), filePayload("ij", 1, 2, chunk)); err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestAttachmentStoreTightBudgetFailsCleanly(t *testing.T) {
 	peer := "aabb"
 	// budget fits 2 chunks; the transfer needs 3 — larger than the whole budget
 	// once it starts, so Add must fail cleanly instead of stranding chunks
-	as, err := NewAttachmentStore(dir, peer, 48*2)
+	as, err := NewAttachmentStore(testDB(t, dir), peer, 36*2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestAttachmentStoreTightBudgetFailsCleanly(t *testing.T) {
 		t.Fatalf("stored chunks = %d, want 2 (the two that fit)", got)
 	}
 	// the incomplete transfer survives a restart, still tracked and evictable
-	as2, err := NewAttachmentStore(dir, peer, 48*2)
+	as2, err := NewAttachmentStore(testDB(t, dir), peer, 36*2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func TestAttachmentStoreTightBudgetFailsCleanly(t *testing.T) {
 func TestAttachmentStoreDedupAndBudgetStable(t *testing.T) {
 	dir := t.TempDir()
 	peer := "aabb"
-	as, err := NewAttachmentStore(dir, peer, 1<<20)
+	as, err := NewAttachmentStore(testDB(t, dir), peer, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}

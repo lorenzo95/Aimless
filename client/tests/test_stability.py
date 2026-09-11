@@ -3,6 +3,7 @@ import os
 import pytest
 
 from aimless import crypto, logging
+from aimless.store import Store
 from aimless import gtkui
 
 
@@ -38,11 +39,11 @@ def test_corrupt_cache_recovers(tmp_path):
     import nacl
     recovered = None
     try:
-        c = crypto.Cache(str(cache), "pw")
+        c = Store(str(cache), "pw")
     except Exception as e:
         recovered = e
         os.replace(str(cache), str(cache) + ".bad")
-        c = crypto.Cache(str(cache), "pw")
+        c = Store(str(cache), "pw")
     assert recovered is not None
     assert os.path.exists(str(cache) + ".bad")
     assert c.msgs("aa") == []
@@ -69,10 +70,10 @@ def test_corrupt_cache_session_recovery(tmp_path, monkeypatch):
     session.identity = identity
     session.cache_recovered = None
     try:
-        session.cache = crypto.Cache(str(cache), "pw")
+        session.cache = Store(str(cache), "pw")
     except Exception as e:
         os.replace(str(cache), str(cache) + ".bad")
-        session.cache = crypto.Cache(str(cache), "pw")
+        session.cache = Store(str(cache), "pw")
         session.cache_recovered = str(e)
     assert session.cache_recovered
     assert os.path.exists(str(cache) + ".bad")

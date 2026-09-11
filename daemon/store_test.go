@@ -7,7 +7,7 @@ import (
 func TestOutboxJournalPersistAndAck(t *testing.T) {
 	dir := t.TempDir()
 	peerHex := "aabb"
-	j, err := NewOutboxJournal(dir, peerHex)
+	j, err := NewOutboxJournal(testDB(t, dir), peerHex)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func TestOutboxJournalPersistAndAck(t *testing.T) {
 		t.Fatalf("pending after ack: %+v", pending)
 	}
 
-	j2, err := NewOutboxJournal(dir, peerHex)
+	j2, err := NewOutboxJournal(testDB(t, dir), peerHex)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestOutboxJournalPersistAndAck(t *testing.T) {
 func TestInboxTrimAndGapFloor(t *testing.T) {
 	dir := t.TempDir()
 	peerHex := "ccdd"
-	in, err := NewInboxStore(dir, peerHex, 3)
+	in, err := NewInboxStore(testDB(t, dir), peerHex, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestInboxTrimAndGapFloor(t *testing.T) {
 
 func TestInboxOutOfOrderBothAccepted(t *testing.T) {
 	dir := t.TempDir()
-	in, err := NewInboxStore(dir, "peer", 3)
+	in, err := NewInboxStore(testDB(t, dir), "peer", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestInboxOutOfOrderBothAccepted(t *testing.T) {
 
 func TestInboxTrimmedReplayRejectedAndLateArrivalAccepted(t *testing.T) {
 	dir := t.TempDir()
-	in, err := NewInboxStore(dir, "peer", 2)
+	in, err := NewInboxStore(testDB(t, dir), "peer", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestInboxTrimmedReplayRejectedAndLateArrivalAccepted(t *testing.T) {
 func TestInboxSeenSetSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	peer := "peer"
-	in, err := NewInboxStore(dir, peer, 2)
+	in, err := NewInboxStore(testDB(t, dir), peer, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestInboxSeenSetSurvivesRestart(t *testing.T) {
 		}
 	}
 
-	in2, err := NewInboxStore(dir, peer, 2)
+	in2, err := NewInboxStore(testDB(t, dir), peer, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestInboxSeenSetSurvivesRestart(t *testing.T) {
 func TestInboxDedupLargeN(t *testing.T) {
 	dir := t.TempDir()
 	const n = 10000
-	in, err := NewInboxStore(dir, "peer", n)
+	in, err := NewInboxStore(testDB(t, dir), "peer", n)
 	if err != nil {
 		t.Fatal(err)
 	}

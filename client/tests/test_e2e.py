@@ -7,6 +7,7 @@ import time
 import pytest
 
 from aimless import crypto
+from aimless.store import Store
 from aimless.daemon import Client, DaemonClient
 
 DAEMON_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "daemon"))
@@ -240,7 +241,7 @@ def test_room_roundtrip(three_nodes, tmp_path):
     _, seq_c = wait_room_msg(sock_c, id_c, b_node, "bob replies")
 
     # dedup is per (sender, seq): replaying bob's message must not double-store
-    cache = crypto.Cache(str(tmp_path / "c.json.enc"), "pw")
+    cache = Store(str(tmp_path / "c.json.enc"), "pw")
     cache.add_recv(conv, b_node, seq_c, 2000, "bob replies")
     assert cache.add_recv(conv, b_node, seq_c, 2000, "bob replies") is False
     assert len(cache.msgs(conv)) == 1

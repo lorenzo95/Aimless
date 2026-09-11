@@ -22,7 +22,7 @@ func TestFlushPeerDoesNotMarkFailedEnqueues(t *testing.T) {
 		bulk:    make(chan outbound, 1),
 		writeFn: func(_ ed25519.PublicKey, _ []byte) {},
 	}
-	j, err := NewOutboxJournal(dir, peer)
+	j, err := NewOutboxJournal(testDB(t, dir), peer)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,26 +1,17 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"sort"
-	"strings"
-	"sync"
 )
 
 // TypeFile chunk wire payload layout: a 20-byte unencrypted routing header
 // (transfer id + chunk index/total) followed by the E2E-sealed chunk body. The
-// daemon reads only the header — enough to key the AttachmentStore and judge
+// daemon reads only the header — enough to key the store and judge
 // completeness — while filename/hash/data stay encrypted end to end.
 const attachHeaderSize = 20
-
-func attachmentDir(datadir string) string {
-	return filepath.Join(datadir, "attachments")
-}
 
 func parseFileHeader(payload []byte) (tid string, index, total uint16, ok bool) {
 	if len(payload) < attachHeaderSize {
@@ -44,283 +35,217 @@ type attachEntry struct {
 	Payload string `json:"payload"`
 }
 
-type attachTransfer struct {
-	total    uint16
-	firstTs  int64
-	chunks   map[uint16]attachEntry
-	complete bool
-}
-
-// AttachmentStore is a per-peer landing buffer for incoming TypeFile chunks.
-// It retains a transfer until the client acknowledges consumption (AckTid),
-// so files are as durable as text: an offline client can catch up later. A
-// per-peer byte budget bounds disk use; eviction drops the oldest incomplete
-// transfer wholesale first (it is unusable without its missing chunks), then
-// the oldest complete-but-unconsumed one.
-type AttachmentStore struct {
-	mu       sync.Mutex
-	path     string
-	capBytes int64
-	entries  []attachEntry
-	byTid    map[string]*attachTransfer
-	bytes    int64
-}
-
-func NewAttachmentStore(datadir, peerHex string, capBytes int64) (*AttachmentStore, error) {
-	dir := attachmentDir(datadir)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
-	}
-	as := &AttachmentStore{
-		path:     filepath.Join(dir, peerHex+".jsonl"),
-		capBytes: capBytes,
-		byTid:    make(map[string]*attachTransfer),
-	}
-	if err := as.load(); err != nil {
-		return nil, err
-	}
-	return as, nil
-}
-
-func (as *AttachmentStore) load() error {
-	data, err := os.ReadFile(as.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if line == "" {
-			continue
-		}
-		var e attachEntry
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			return err
-		}
-		as.entries = append(as.entries, e)
-		as.ingestLocked(e)
-	}
-	return nil
-}
-
-func (as *AttachmentStore) ingestLocked(e attachEntry) {
-	t := as.byTid[e.Tid]
-	if t == nil {
-		t = &attachTransfer{total: e.Total, chunks: make(map[uint16]attachEntry)}
-		as.byTid[e.Tid] = t
-	}
-	if _, exists := t.chunks[e.Index]; exists {
-		return
-	}
-	if t.firstTs == 0 || e.Ts < t.firstTs {
-		t.firstTs = e.Ts
-	}
-	t.chunks[e.Index] = e
-	if len(t.chunks) == int(t.total) {
-		t.complete = true
-	}
-	as.bytes += int64(len(e.Payload))
-}
-
-// Add stores one chunk (dedup by tid+index) after enforcing the byte budget.
-// It returns isNew=false for a duplicate chunk.
-func (as *AttachmentStore) Add(tid string, index, total uint16, seq uint64, ts int64, payload []byte) (bool, error) {
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	t := as.byTid[tid]
-	if t == nil {
-		t = &attachTransfer{total: total, chunks: make(map[uint16]attachEntry)}
-		as.byTid[tid] = t
-	}
-	if _, exists := t.chunks[index]; exists {
-		return false, nil
-	}
-	if err := as.makeRoomLocked(int64(len(payload)), tid); err != nil {
-		// Budget failure: keep any chunks of this transfer already stored (they
-		// stay tracked and evictable); only drop the empty husk a failed first
-		// chunk would otherwise leave behind.
-		if t2 := as.byTid[tid]; t2 != nil && len(t2.chunks) == 0 {
-			delete(as.byTid, tid)
-		}
-		return false, err
-	}
-	// makeRoom may have evicted and recreated bookkeeping — re-fetch so the
-	// chunk can never land in a struct nothing references anymore.
-	t = as.byTid[tid]
-	if t == nil {
-		t = &attachTransfer{total: total, chunks: make(map[uint16]attachEntry)}
-		as.byTid[tid] = t
-	}
-	e := attachEntry{Tid: tid, Seq: seq, Index: index, Total: total, Ts: ts,
-		Payload: base64.StdEncoding.EncodeToString(payload)}
-	if t.firstTs == 0 || ts < t.firstTs {
-		t.firstTs = ts
-	}
-	t.chunks[index] = e
-	if len(t.chunks) == int(t.total) {
-		t.complete = true
-	}
-	as.bytes += int64(len(e.Payload))
-	as.entries = append(as.entries, e)
-	// Append-only: a full rewrite per chunk would be O(n²) across a transfer
-	// (the receiver ACKs each chunk, and the ACK contract requires the chunk on
-	// disk first). Eviction/ack rewrite the file wholesale instead.
-	return true, as.appendLocked(e)
-}
-
-func (as *AttachmentStore) appendLocked(e attachEntry) error {
-	f, err := os.OpenFile(as.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	line, err := json.Marshal(e)
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(append(line, '\n'))
-	return err
-}
-
-// makeRoomLocked frees budget: oldest incomplete transfer wholesale first,
-// then oldest complete-but-unconsumed. The transfer being added (exclude) is
-// never an eviction target — evicting it mid-Add would strand its earlier
-// chunks and orphan the chunk being stored. Returns an error only if a single
-// chunk is larger than the whole budget (excluding the current transfer).
-func (as *AttachmentStore) makeRoomLocked(need int64, exclude string) error {
-	if need > as.capBytes {
-		return errAttachBudget
-	}
-	for as.bytes+need > as.capBytes {
-		tid := as.oldestLocked(false, exclude)
-		if tid == "" {
-			tid = as.oldestLocked(true, exclude)
-		}
-		if tid == "" {
-			return errAttachBudget
-		}
-		as.removeTransferLocked(tid)
-	}
-	return nil
-}
-
-// oldestLocked returns the tid of the oldest transfer whose completion state
-// matches `complete`, or "" if none. Empty transfers (created but not yet
-// stored) hold no bytes and must never be eviction targets: "evicting" one
-// frees nothing and orphans the chunk Add() is about to store into it.
-func (as *AttachmentStore) oldestLocked(complete bool, exclude string) string {
-	var best string
-	var bestTs int64
-	for tid, t := range as.byTid {
-		if len(t.chunks) == 0 {
-			continue
-		}
-		if tid == exclude {
-			continue
-		}
-		if t.complete != complete {
-			continue
-		}
-		if best == "" || t.firstTs < bestTs || (t.firstTs == bestTs && tid < best) {
-			best, bestTs = tid, t.firstTs
-		}
-	}
-	return best
-}
-
-func (as *AttachmentStore) removeTransferLocked(tid string) {
-	t := as.byTid[tid]
-	if t == nil {
-		return
-	}
-	keep := as.entries[:0]
-	for _, e := range as.entries {
-		if e.Tid == tid {
-			as.bytes -= int64(len(e.Payload))
-			continue
-		}
-		keep = append(keep, e)
-	}
-	as.entries = keep
-	delete(as.byTid, tid)
-}
-
-// AttachPending describes a complete-but-unconsumed transfer (the client has
-// not yet acked it), for the pendingattachments listing.
+// AttachPending describes a complete-but-unconsumed transfer.
 type AttachPending struct {
 	Tid   string `json:"tid"`
 	Total uint16 `json:"total"`
 	Ts    int64  `json:"ts"`
 }
 
+// AttachmentStore is the per-peer landing buffer for incoming TypeFile chunks.
+// A transfer is retained until the client acknowledges consumption (AckTid), so
+// files are as durable as text. A per-peer byte budget bounds disk use;
+// eviction drops the oldest incomplete transfer wholesale first, then the
+// oldest complete-but-unconsumed one.
+type AttachmentStore struct {
+	db       *DB
+	peer     string
+	capBytes int64
+}
+
+func NewAttachmentStore(db *DB, peerHex string, capBytes int64) (*AttachmentStore, error) {
+	return &AttachmentStore{db: db, peer: peerHex, capBytes: capBytes}, nil
+}
+
+// Add stores one chunk (dedup by tid+index) after enforcing the byte budget.
+// Returns isNew=false for a duplicate chunk.
+func (as *AttachmentStore) Add(tid string, index, total uint16, seq uint64, ts int64, payload []byte) (bool, error) {
+	tx, err := as.db.sql.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var one int
+	switch err := tx.QueryRow(
+		`SELECT 1 FROM attach WHERE peer = ? AND tid = ? AND idx = ?`,
+		as.peer, tid, int(index)).Scan(&one); err {
+	case nil:
+		return false, nil
+	case sql.ErrNoRows:
+	default:
+		return false, err
+	}
+
+	if err := as.makeRoomTx(tx, int64(len(payload)), tid); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO attach(peer, tid, idx, total, seq, ts, payload) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+		as.peer, tid, int(index), int(total), int64(seq), ts, payload,
+	); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+type attachTransferRow struct {
+	tid string
+	ts  int64
+	cnt int
+	tot int
+}
+
+func (as *AttachmentStore) transfersTx(tx *sql.Tx) ([]attachTransferRow, error) {
+	rows, err := tx.Query(
+		`SELECT tid, MIN(ts), COUNT(*), MAX(total) FROM attach WHERE peer = ? GROUP BY tid`, as.peer)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []attachTransferRow
+	for rows.Next() {
+		var r attachTransferRow
+		if err := rows.Scan(&r.tid, &r.ts, &r.cnt, &r.tot); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// makeRoomTx frees budget: oldest incomplete transfer first, then oldest
+// complete-but-unconsumed, never the transfer currently being written.
+func (as *AttachmentStore) makeRoomTx(tx *sql.Tx, need int64, exclude string) error {
+	if need > as.capBytes {
+		return errAttachBudget
+	}
+	var used int64
+	if err := tx.QueryRow(
+		`SELECT COALESCE(SUM(LENGTH(payload)), 0) FROM attach WHERE peer = ?`, as.peer).Scan(&used); err != nil {
+		return err
+	}
+	for used+need > as.capBytes {
+		transfers, err := as.transfersTx(tx)
+		if err != nil {
+			return err
+		}
+		victim := pickEviction(transfers, exclude)
+		if victim == "" {
+			return errAttachBudget
+		}
+		if _, err := tx.Exec(`DELETE FROM attach WHERE peer = ? AND tid = ?`, as.peer, victim); err != nil {
+			return err
+		}
+		used = 0
+		if err := tx.QueryRow(
+			`SELECT COALESCE(SUM(LENGTH(payload)), 0) FROM attach WHERE peer = ?`, as.peer).Scan(&used); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pickEviction returns the tid of the oldest incomplete transfer, else the
+// oldest complete one. Empty transfers hold no bytes and are never targets.
+func pickEviction(transfers []attachTransferRow, exclude string) string {
+	pick := func(incomplete bool) string {
+		best := ""
+		for _, t := range transfers {
+			if t.tid == exclude || t.cnt == 0 {
+				continue
+			}
+			if (t.cnt < t.tot) != incomplete {
+				continue
+			}
+			if best == "" || t.ts < bestTs(transfers, best) || (t.ts == bestTs(transfers, best) && t.tid < best) {
+				best = t.tid
+			}
+		}
+		return best
+	}
+	if v := pick(true); v != "" {
+		return v
+	}
+	return pick(false)
+}
+
+func bestTs(transfers []attachTransferRow, tid string) int64 {
+	for _, t := range transfers {
+		if t.tid == tid {
+			return t.ts
+		}
+	}
+	return 0
+}
+
 // Pending lists complete-but-unconsumed transfers (newest first).
 func (as *AttachmentStore) Pending() []AttachPending {
-	as.mu.Lock()
-	defer as.mu.Unlock()
+	rows, err := as.db.sql.Query(
+		`SELECT tid, MIN(ts) AS f, COUNT(*) AS cnt, MAX(total) AS tot
+		 FROM attach WHERE peer = ? GROUP BY tid
+		 HAVING cnt = tot ORDER BY f DESC`, as.peer)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
 	var out []AttachPending
-	seen := make(map[string]bool)
-	for i := len(as.entries) - 1; i >= 0; i-- {
-		e := as.entries[i]
-		if seen[e.Tid] {
+	for rows.Next() {
+		var (
+			tid      string
+			ts       int64
+			cnt, tot int
+		)
+		if err := rows.Scan(&tid, &ts, &cnt, &tot); err != nil {
 			continue
 		}
-		seen[e.Tid] = true
-		t := as.byTid[e.Tid]
-		if t != nil && t.complete {
-			out = append(out, AttachPending{Tid: e.Tid, Total: e.Total, Ts: e.Ts})
-		}
+		out = append(out, AttachPending{Tid: tid, Total: uint16(tot), Ts: ts})
 	}
 	return out
 }
 
 // FetchTid returns one transfer's chunks ordered by index.
 func (as *AttachmentStore) FetchTid(tid string) []attachEntry {
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	t := as.byTid[tid]
-	if t == nil {
+	rows, err := as.db.sql.Query(
+		`SELECT idx, seq, total, ts, payload FROM attach WHERE peer = ? AND tid = ? ORDER BY idx`,
+		as.peer, tid)
+	if err != nil {
 		return nil
 	}
-	out := make([]attachEntry, 0, len(t.chunks))
-	for _, e := range t.chunks {
-		out = append(out, e)
+	defer rows.Close()
+	var out []attachEntry
+	for rows.Next() {
+		var (
+			idx, seq, total, ts int64
+			payload             []byte
+		)
+		if err := rows.Scan(&idx, &seq, &total, &ts, &payload); err != nil {
+			continue
+		}
+		out = append(out, attachEntry{
+			Tid: tid, Seq: uint64(seq), Index: uint16(idx), Total: uint16(total), Ts: ts,
+			Payload: base64.StdEncoding.EncodeToString(payload),
+		})
 	}
-	sort.Slice(out, func(i, k int) bool { return out[i].Index < out[k].Index })
 	return out
 }
 
-// AckTid frees a transfer after the client has consumed it. Idempotent.
+// AckTid frees a transfer after the client consumed it. Idempotent.
 func (as *AttachmentStore) AckTid(tid string) error {
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	if as.byTid[tid] == nil {
-		return nil
-	}
-	as.removeTransferLocked(tid)
-	return as.persistLocked()
+	_, err := as.db.sql.Exec(`DELETE FROM attach WHERE peer = ? AND tid = ?`, as.peer, tid)
+	return err
 }
 
 func (as *AttachmentStore) Bytes() int64 {
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	return as.bytes
-}
-
-func (as *AttachmentStore) persistLocked() error {
-	data := make([]byte, 0, 256*len(as.entries))
-	for _, e := range as.entries {
-		line, err := json.Marshal(e)
-		if err != nil {
-			return err
-		}
-		data = append(data, append(line, '\n')...)
+	var used int64
+	if err := as.db.sql.QueryRow(
+		`SELECT COALESCE(SUM(LENGTH(payload)), 0) FROM attach WHERE peer = ?`, as.peer).Scan(&used); err != nil {
+		return 0
 	}
-	tmp := as.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, as.path)
+	return used
 }
 
 var errAttachBudget = &attachBudgetError{}

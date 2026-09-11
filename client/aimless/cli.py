@@ -5,6 +5,8 @@ import time
 
 from . import crypto, protocol
 from .daemon import DaemonClient, Client, DaemonError
+from .service import Sync
+from .store import Store
 
 
 def client_dir() -> str:
@@ -26,7 +28,7 @@ def contacts_path() -> str:
 
 
 def cache_path() -> str:
-    return os.path.join(client_dir(), "cache.json.enc")
+    return os.path.join(client_dir(), "state.db")
 
 
 def prompt_passphrase(confirm: bool) -> str:
@@ -194,10 +196,11 @@ def cmd_send(args):
     buddy = resolve_buddy(args.petname)
     daemon = connect_daemon()
     client = get_client(daemon)
-    cache = crypto.Cache(cache_path(), _passphrase_for_cache())
+    store = Store(cache_path(), _passphrase_for_cache())
     ts = int(time.time() * 1000)
     resp = client.send(buddy["pubkey"], buddy["node"], args.text, ts)
-    cache.add_sent(buddy["node"], {buddy["node"]: resp.get("seq", 0)}, ts, args.text)
+    store.add_sent(buddy["node"], {buddy["node"]: resp.get("seq", 0)}, ts, args.text)
+    store.close()
     print(f"queued (seq {resp.get('seq')})")
 
 
@@ -209,7 +212,7 @@ def _passphrase_for_cache() -> str:
 
 
 def cmd_blocked(args):
-    cache = crypto.Cache(cache_path(), _passphrase_for_cache())
+    store = Store(cache_path(), _passphrase_for_cache())
     daemon = connect_daemon()
     try:
         nodes = get_client(daemon).blocklist()
@@ -220,16 +223,18 @@ def cmd_blocked(args):
         daemon.close()
     if not nodes:
         print("nothing blocked")
+        store.close()
         return
     for node in sorted(nodes):
-        print(f"{node} · {cache.blocked_screen(node) or '?'}")
+        print(f"{node} · {store.blocked_screen(node) or '?'}")
+    store.close()
 
 
 def cmd_unblock(args):
     node = args.node
-    cache = crypto.Cache(cache_path(), _passphrase_for_cache())
-    cache.unmute(node)
-    cache.clear_blocked_screen(node)
+    store = Store(cache_path(), _passphrase_for_cache())
+    store.unmute(node)
+    store.clear_blocked_screen(node)
     print(f"cleared local suppression for {node[:16]}…")
     try:
         daemon = DaemonClient(socket_path())
@@ -268,23 +273,10 @@ def cmd_chat(args):
     buddy_screen = buddy.get("screen", args.petname)
     daemon = connect_daemon()
     client = get_client(daemon)
-    pw = _passphrase_for_cache()
-    cache = crypto.Cache(cache_path(), pw)
+    store = Store(cache_path(), _passphrase_for_cache())
+    sync = Sync(client, store)
 
-    resp = client.history(buddy_node, cache.recv_last(buddy_node, buddy_node))
-    oldest, latest = resp.get("oldest", 0), resp.get("latest", 0)
-    cur = cache.recv_last(buddy_node, buddy_node)
-    if latest and cur and cur + 1 < oldest:
-        print(f"[gap: history before seq {oldest} no longer held by daemon]")
-    for m in resp.get("msgs", []):
-        try:
-            opened = protocol.open_message(client.identity, m["payload"])
-        except (ValueError, KeyError):
-            continue
-        if opened.get("conv") is not None:
-            continue
-        cache.add_recv(buddy_node, buddy_node, m["seq"], opened["ts"], opened["text"])
-
+    sync.sync_peer(buddy_node)
     client.add_contact(buddy_node)
     try:
         client.set_status(buddy_client, buddy_node, None)
@@ -292,7 +284,7 @@ def cmd_chat(args):
         pass
 
     print(f"── chat with {buddy_screen} ({args.petname}) ──  /away <msg> /back /quit")
-    for m in sorted(cache.msgs(buddy_node), key=lambda m: (m["ts"], m["seqs"].get(buddy_node, 0))):
+    for m in sorted(store.messages(buddy_node), key=lambda m: (m["ts"], min(m["seqs"].values()))):
         who = client.screen_name if m["dir"] == "out" else buddy_screen
         stamp = time.strftime("%H:%M", time.localtime(m["ts"] / 1000))
         print(f"[{stamp}] {who}: {m['text']}")
@@ -314,27 +306,27 @@ def cmd_chat(args):
             continue
         ts = int(time.time() * 1000)
         resp = client.send(buddy_client, buddy_node, line, ts)
-        cache.add_sent(buddy_node, {buddy_node: resp.get("seq", 0)}, ts, line)
+        store.add_sent(buddy_node, {buddy_node: resp.get("seq", 0)}, ts, line)
         stamp = time.strftime("%H:%M")
         print(f"[{stamp}] {client.screen_name}: {line}")
         while True:
             ev = client.daemon.next_event(timeout=0.2)
             if ev is None:
                 break
-            _handle_event(client, cache, buddy_node, buddy_screen, ev)
+            _handle_event(sync, store, buddy_node, buddy_screen, ev)
+    store.close()
 
 
-def _handle_event(client, cache, buddy_node, buddy_screen, ev):
+def _handle_event(sync, store, buddy_node, buddy_screen, ev):
     if ev.get("op") != "recv" or ev.get("from") != buddy_node:
         return
-    try:
-        opened = client.decrypt_recv(ev)
-        cache.add_recv(buddy_node, buddy_node, ev.get("seq", 0), opened["ts"], opened["text"])
-        stamp = time.strftime("%H:%M", time.localtime(opened["ts"] / 1000))
-        print(f"\r[{stamp}] {buddy_screen}: {opened['text']}")
-        print("> ", end="", flush=True)
-    except (ValueError, KeyError):
-        pass
+    conv, new = sync.on_event(ev)
+    if not new or conv != buddy_node:
+        return
+    last = store.messages(buddy_node)[-1]
+    stamp = time.strftime("%H:%M", time.localtime(last["ts"] / 1000))
+    print(f"\r[{stamp}] {buddy_screen}: {last['text']}")
+    print("> ", end="", flush=True)
 
 
 def cmd_gui(args):

@@ -6,7 +6,7 @@ def test_cli_unblock_clears_mute_without_daemon(tmp_path, monkeypatch):
     cache_file = str(tmp_path / "cache.json.enc")
     node = "ab" * 32
 
-    cache = cli.crypto.Cache(cache_file, "pw")
+    cache = cli.Store(cache_file, "pw")
     cache.mute(node)
     cache.set_blocked_screen(node, "Spammy")
 
@@ -18,6 +18,7 @@ def test_cli_unblock_clears_mute_without_daemon(tmp_path, monkeypatch):
 
     cli.cmd_unblock(type("A", (), {"node": node})())
 
-    cache2 = cli.crypto.Cache(cache_file, "pw")
+    cache2 = cli.Store(cache_file, "pw")
     assert not cache2.is_muted(node), "client mute must be cleared even without the daemon"
     assert cache2.blocked_screen(node) is None, "stored blocked name must be cleared"
+    cache2.close()
