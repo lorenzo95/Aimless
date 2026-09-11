@@ -1,6 +1,6 @@
 """aimless — serverless chat with an AIM heart."""
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 
 # v2 is a clean break: client and daemon must match. The daemon refuses peers
 # whose protocol version differs, and the client refuses an older daemon rather

@@ -591,6 +591,11 @@ class MessagesView(Gtk.Box):
         self._history_busy = False
         self._catchup_busy = False
         self._file_bufs = {}
+        # Sent-file delivery tracking: (node, seq) -> delivery record, plus a
+        # small buffer of already-seen acks so an ack that lands while a send is
+        # still being enqueued is not lost.
+        self._pending_files = {}
+        self._acked_seen = set()
 
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
 
@@ -1533,24 +1538,31 @@ class MessagesView(Gtk.Box):
 
         def worker():
             seqs = {}
+            expected = set()
             for i, piece in enumerate(pieces):
                 chunk = protocol.make_chunk(tid, i, total, filename, mime_hint, sha, size, piece,
                                             conv=conv if is_room else None)
                 if is_room:
-                    seqs.update(client.send_file_room(list(thread["members"].values()), conv, chunk))
+                    chunk_seqs = client.send_file_room(list(thread["members"].values()), conv, chunk)
+                    seqs.update(chunk_seqs)
+                    for n, s in chunk_seqs.items():
+                        expected.add((n, int(s)))
                 else:
                     payload = protocol.build_file_payload(
                         session.identity, thread["contact"]["pubkey"], chunk)
                     resp = client.send_file(conv, payload)
-                    seqs[conv] = resp.get("seq", 0)
+                    seq = int(resp.get("seq", 0))
+                    seqs[conv] = seq
+                    expected.add((conv, seq))
                 GLib.idle_add(_progress, i + 1)
-            return seqs
+            return seqs, expected
 
         def _progress(done):
             self._update_status_row(row, f"Sending {filename} — {done}/{total}")
             return False
 
-        def done(seqs):
+        def done(result):
+            seqs, expected = result
             if row is not None:
                 row.destroy()
             ts = int(time.time() * 1000)
@@ -1559,6 +1571,11 @@ class MessagesView(Gtk.Box):
             if thread is self.selected:
                 thread["preview"] = filename
                 self.update_thread_row(conv)
+            # Persistent indicator under the bubble: the daemon reports an ack
+            # per chunk once the peer has stored it, so we can show delivery
+            # progress instead of the file silently vanishing into the queue.
+            deliver_row = self._append_status_row("")
+            self.register_file_delivery(deliver_row, filename, expected)
             scroll_to_bottom(self.conversation_scroll)
 
         def fail(e):
@@ -1567,6 +1584,45 @@ class MessagesView(Gtk.Box):
             self.app.activity.log(f"send failed: {e}")
 
         run_async(worker, on_done=done, on_error=fail)
+
+    def register_file_delivery(self, row, filename, keys):
+        """Begin tracking delivery of a sent file. ``keys`` is the set of
+        (node, seq) chunk acks still outstanding; the daemon emits one acked
+        event per chunk across every recipient (rooms fan out per member)."""
+        keys = {k for k in keys if k[1]}
+        already = keys & self._acked_seen
+        keys = keys - already
+        rec = {"row": row, "filename": filename, "keys": keys,
+               "total": len(keys) + len(already)}
+        for k in keys:
+            self._pending_files[k] = rec
+        self._set_delivery_text(rec)
+
+    def note_acked(self, node, seq):
+        """A sent chunk was delivered (the daemon saw the peer's ACK). Returns
+        True when it belonged to a tracked file transfer, so callers can keep
+        the activity log for ordinary text acks without spamming it per chunk."""
+        key = (node, int(seq or 0))
+        self._acked_seen.add(key)
+        if len(self._acked_seen) > 4096:
+            self._acked_seen.clear()
+        rec = self._pending_files.pop(key, None)
+        if rec is None:
+            return False
+        rec["keys"].discard(key)
+        self._set_delivery_text(rec)
+        return True
+
+    def _set_delivery_text(self, rec):
+        total = rec["total"]
+        outstanding = len(rec["keys"])
+        if total == 0:
+            text = f"Sent {rec['filename']}"
+        elif outstanding == 0:
+            text = f"Delivered {rec['filename']} ✓"
+        else:
+            text = f"Waiting for delivery {rec['filename']} — {total - outstanding}/{total}"
+        self._update_status_row(rec["row"], text)
 
     def incoming(self, ev):
         if ev.get("type") == "file":
@@ -2329,7 +2385,8 @@ class AimlessWindow(Gtk.Window):
                 if ev.get("op") == "recv":
                     self.messages.incoming(ev)
                 elif ev.get("op") == "acked":
-                    self.activity.log(f"delivered: seq {ev.get('seq')} → {str(ev.get('to'))[:16]}…")
+                    if not self.messages.note_acked(ev.get("to"), ev.get("seq")):
+                        self.activity.log(f"delivered: seq {ev.get('seq')} → {str(ev.get('to'))[:16]}…")
         except Exception as e:
             try:
                 self.activity.log(f"event error: {e}")

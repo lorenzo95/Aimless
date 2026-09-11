@@ -1087,6 +1087,34 @@ def test_gui_file_send_queues_and_renders(gtk_app, tmp_path):
     assert _pump(win, save_btn, timeout=10), "sent attachment must render with a Save button"
 
 
+def test_gui_file_send_delivery_indicator(gtk_app):
+    """Sent files get a persistent delivery line that advances with the daemon's
+    per-chunk ack events, so a sender can tell the file actually arrived."""
+    win = gtk_app["win"]
+    m = win.messages
+
+    row = m._append_status_row("")
+    m.register_file_delivery(row, "big.bin", {("n1", 1), ("n1", 2), ("n2", 3)})
+    assert "Waiting for delivery" in row.get_child().get_text()
+    assert "0/3" in row.get_child().get_text()
+
+    m.note_acked("n1", 1)
+    assert "1/3" in row.get_child().get_text()
+    m.note_acked("n2", 3)
+    assert "2/3" in row.get_child().get_text()
+    m.note_acked("n1", 2)
+    text = row.get_child().get_text()
+    assert "Delivered" in text and "big.bin" in text
+
+    # An ack that lands before the send finishes registering must still count.
+    m.note_acked("n9", 7)
+    row2 = m._append_status_row("")
+    m.register_file_delivery(row2, "race.bin", {("n9", 7), ("n9", 8)})
+    assert "1/2" in row2.get_child().get_text()
+    m.note_acked("n9", 8)
+    assert "Delivered" in row2.get_child().get_text()
+
+
 def test_gui_file_send_to_room(gtk_app, tmp_path):
     """Regression: sending an attachment into a 3+ member room used to pass the
     raw members dict (node-hex -> info) into send_file_room, whose per-member
