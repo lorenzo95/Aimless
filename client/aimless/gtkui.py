@@ -1069,6 +1069,12 @@ class MessagesView(Gtk.Box):
         scroll_to_bottom(self.conversation_scroll)
         return False
 
+    def refresh_conversation(self, conv):
+        """Redraw an open conversation after messages were stored outside the
+        live-event path (e.g. a message released by Accept on a request popup)."""
+        if self.selected is not None and self.selected.get("conv") == conv:
+            self._history_loaded(conv)
+
     def _history_failed(self, e):
         self.append_system_note(f"history unavailable: {e}")
         return False
@@ -2234,16 +2240,20 @@ class AimlessWindow(Gtk.Window):
             petname = _add_contact_from_roster(req["node"], req["pubkey"], req.get("screen"))
             self.session.cache.unmute(req["node"])
             self.daemon_block_set(req["node"], blocked=False)
+            conv = req.get("conv") or req["node"]
             if req.get("conv"):
                 members = {m["node"]: {"node": m["node"], "pubkey": m["pubkey"],
                                        "screen": m.get("screen", "")}
                            for m in req.get("members", [])}
                 if members:
                     self.session.cache.ensure_room(req["conv"], members)
-            self.session.cache.add_recv(req.get("conv") or req["node"], req["node"],
+            self.session.cache.add_recv(conv, req["node"],
                                         req.get("seq", 0), req.get("ts", 0), req.get("text", ""))
             self.contacts.refresh()
             self.messages.sync_sidebar()
+            # The withheld message is now stored: redraw it if its conversation
+            # is already open, otherwise it only appears after switching threads.
+            self.messages.refresh_conversation(conv)
             self.activity.log(f"added {petname}")
         elif choice == Gtk.ResponseType.NO:
             self.session.cache.mute(req["node"])

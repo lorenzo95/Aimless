@@ -540,6 +540,7 @@ def test_status_survives_own_daemon_restart(gtk_app):
 
     who = DaemonClient(app["sock_a"]).request("whoami")
     old_pid = int(who["pid"])
+    daemon_exe = _os.readlink(f"/proc/{old_pid}/exe")
     cmdline = open(f"/proc/{old_pid}/cmdline", "rb").read().decode().split("\x00")
     port = cmdline[cmdline.index("-listen") + 1].split(":")[-1]
     _os.kill(old_pid, 9)
@@ -552,7 +553,7 @@ def test_status_survives_own_daemon_restart(gtk_app):
             break
 
     proc = subprocess.Popen(
-        [gtkui.daemon_binary(), "-datadir", app["dir_a"], "-api", app["sock_a"],
+        [daemon_exe, "-datadir", app["dir_a"], "-api", app["sock_a"],
          "-listen", f"tcp://127.0.0.1:{port}", "-peers", "none",
          "-retry", "300ms", "-probe", "300ms"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -639,6 +640,41 @@ def test_gui_request_accept_and_deny(gtk_app, tmp_path, monkeypatch):
     assert not win.session.cache.is_muted(stranger2), "Deny is a one-time decline, not a mute"
     assert win.session.cache.msgs(stranger2) == []
     assert stranger2 not in win.messages.threads
+
+
+def test_gui_accepted_room_message_redraws_open_conversation(gtk_app, monkeypatch):
+    """A message from a non-buddy in an open room is withheld behind the
+    Accept/Deny prompt; accepting must draw it immediately, not only after
+    switching threads."""
+    app = gtk_app
+    win = app["win"]
+    session = app["session"]
+
+    stranger = "ab" * 32
+    room = "r" + "0" * 63
+    members = {
+        session.self_node: {"node": session.self_node, "pubkey": session.client.pubkey_hex,
+                            "screen": "Alice"},
+        stranger: {"node": stranger, "pubkey": "ff" * 32, "screen": "Mallory"},
+    }
+    session.cache.ensure_room(room, members)
+    win.messages.sync_sidebar()
+    thread = win.messages.threads[room]
+    win.messages.thread_list.select_row(thread["row"])
+    pump(0.5)  # let the async history load settle (room still empty)
+
+    req = {"node": stranger, "pubkey": "ff" * 32, "screen": "Mallory", "conv": room,
+           "members": [{"node": n, **m} for n, m in members.items()],
+           "seq": 1, "ts": 1000, "text": "hello group"}
+    session.cache.add_pending(req)
+    assert session.cache.msgs(room) == [], "the message must stay withheld until accepted"
+
+    monkeypatch.setattr(win, "_ask_request", lambda r: Gtk.ResponseType.ACCEPT)
+    win.surface_pending_requests()
+
+    assert [m["text"] for m in session.cache.msgs(room)] == ["hello group"]
+    assert "hello group" in all_texts(win.messages.conversation), \
+        "accepted message must be drawn in the already-open room"
 
 
 def test_gui_deny_accept_block_responses(gtk_app, monkeypatch):
