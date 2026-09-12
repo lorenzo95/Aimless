@@ -3027,8 +3027,8 @@ class AimlessWindow(Gtk.Window):
                 f"peers {st['peers_up']}/{st['peers_total']}")
 
     # -- Keys & Identity --------------------------------------------------
-    def _info_dialog(self, title, text, secondary=None):
-        dlg = Gtk.MessageDialog(transient_for=self, modal=True,
+    def _info_dialog(self, title, text, secondary=None, parent=None):
+        dlg = Gtk.MessageDialog(transient_for=parent or self, modal=True,
                                 message_type=Gtk.MessageType.INFO,
                                 text=title, buttons=Gtk.ButtonsType.OK)
         if secondary:
@@ -3036,8 +3036,8 @@ class AimlessWindow(Gtk.Window):
         dlg.run()
         dlg.destroy()
 
-    def _confirm(self, title, secondary):
-        dlg = Gtk.MessageDialog(transient_for=self, modal=True,
+    def _confirm(self, title, secondary, parent=None):
+        dlg = Gtk.MessageDialog(transient_for=parent or self, modal=True,
                                 message_type=Gtk.MessageType.WARNING,
                                 text=title, buttons=Gtk.ButtonsType.OK_CANCEL)
         dlg.format_secondary_text(secondary)
@@ -3045,6 +3045,39 @@ class AimlessWindow(Gtk.Window):
         resp = dlg.run()
         dlg.destroy()
         return resp == Gtk.ResponseType.OK
+
+    def _backup_payload(self):
+        node_seed = None
+        try:
+            with open(os.path.join(data_dir(), "node.key")) as f:
+                node_seed = f.read().strip()
+        except OSError:
+            pass
+        return {
+            "identitySeed": bytes(self.session.identity).hex(),
+            "nodeSeed": node_seed,
+            "screen": self.session.self_screen,
+            "pubkey": self.session.client.pubkey_hex,
+            "contacts": protocol.load_contacts(contacts_path()),
+        }
+
+    def export_backup_to(self, path, passphrase):
+        """Write the encrypted backup bundle to an explicit path (testable)."""
+        keysmod.save_bundle(path, passphrase, self._backup_payload())
+
+    def restore_backup_from(self, path, passphrase, app_passphrase):
+        """Restore a bundle onto disk (no daemon restart). Returns the bundle.
+        Raises ValueError on a bad passphrase/missing fields."""
+        data = keysmod.load_bundle(path, passphrase)
+        seed = bytes.fromhex(data.get("identitySeed", ""))
+        if len(seed) != 32:
+            raise ValueError("backup is missing the identity seed")
+        crypto.save_identity(identity_path(), keysmod.signing_key(seed), app_passphrase)
+        if data.get("nodeSeed"):
+            keysmod.write_node_key(data_dir(), bytes.fromhex(data["nodeSeed"]))
+        if data.get("contacts"):
+            protocol.save_contacts(contacts_path(), data["contacts"])
+        return data
 
     def _daemon_restart(self):
         sup = self.supervisor
@@ -3123,11 +3156,16 @@ class AimlessWindow(Gtk.Window):
             addr = keysmod.yggdrasil_address(pub)
             if not self._confirm("Replace your Yggdrasil node key?",
                                  f"Your address becomes {addr}. Anyone who saved your old "
-                                 "invite must add you again. The daemon restarts now."):
+                                 "invite must add you again. The daemon restarts now.",
+                                 parent=dlg):
                 return
-            self._apply_node_seed(seed)
+            try:
+                self._apply_node_seed(seed)
+            except OSError as e:
+                self._info_dialog("Could not write node key", str(e), parent=dlg)
+                return
             node_status.set_text(f"current: {addr}")
-            self._info_dialog("Node key applied", f"Your address is now {addr}.")
+            self._info_dialog("Node key applied", f"Your address is now {addr}.", parent=dlg)
 
         def gen_node(*_):
             seed_hex, addr = keysmod.random_node_key()
@@ -3137,7 +3175,8 @@ class AimlessWindow(Gtk.Window):
         def reset_node(*_):
             if not self._confirm("Reset to a fresh node key?",
                                  "Your current address is discarded and a new one is generated; "
-                                 "old invites stop working. The daemon restarts now."):
+                                 "old invites stop working. The daemon restarts now.",
+                                 parent=dlg):
                 return
             keysmod.remove_node_key(data_dir())
             self._daemon_restart()
@@ -3183,16 +3222,17 @@ class AimlessWindow(Gtk.Window):
                 return
             if not self._confirm("Replace your client identity?",
                                  "This breaks existing conversations and cannot be undone here. "
-                                 "Restart aimless afterwards to use it."):
+                                 "Restart aimless afterwards to use it.",
+                                 parent=dlg):
                 return
             pw = self.app_ref.passphrase if self.app_ref else None
             if not pw:
                 self._info_dialog("Passphrase unavailable",
-                                  "Reopen aimless to import an identity.")
+                                  "Reopen aimless to import an identity.", parent=dlg)
                 return
             crypto.save_identity(identity_path(), keysmod.signing_key(seed), pw)
             self._info_dialog("Identity written",
-                              "Quit and reopen aimless to use the new identity.")
+                              "Quit and reopen aimless to use the new identity.", parent=dlg)
         idbtn = Gtk.Button(label="Import identity")
         idbtn.connect("clicked", import_identity)
         ident.pack_start(idbtn, False, False, 0)
@@ -3206,25 +3246,13 @@ class AimlessWindow(Gtk.Window):
         bk.pack_start(bk_status, False, False, 0)
 
         def export_backup(*_):
-            pw = ask_secret(self, "Backup passphrase", confirm=True)
-            if not pw:
+            pw = ask_secret(dlg, "Backup passphrase", confirm=True)
+            if pw is None:
                 return
-            node_seed = None
-            try:
-                with open(os.path.join(data_dir(), "node.key")) as f:
-                    node_seed = f.read().strip()
-            except OSError:
-                pass
-            payload = {
-                "identitySeed": bytes(self.session.identity).hex(),
-                "nodeSeed": node_seed,
-                "screen": self.session.self_screen,
-                "pubkey": self.session.client.pubkey_hex,
-                "contacts": protocol.load_contacts(contacts_path()),
-            }
             chooser = Gtk.FileChooserDialog(
-                title="Export backup", transient_for=self, action=Gtk.FileChooserAction.SAVE,
+                title="Export backup", transient_for=dlg, action=Gtk.FileChooserAction.SAVE,
                 buttons=("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK))
+            chooser.set_modal(True)
             chooser.set_current_name(f"aimless-backup-{datetime.now():%Y%m%d}.json")
             resp = chooser.run()
             path = chooser.get_filename()
@@ -3232,22 +3260,25 @@ class AimlessWindow(Gtk.Window):
             if resp != Gtk.ResponseType.OK or not path:
                 return
             try:
-                keysmod.save_bundle(path, pw, payload)
+                self.export_backup_to(path, pw)
                 bk_status.set_text(f"backup written to {path}")
-            except OSError as e:
+                self._info_dialog("Backup written", path, parent=dlg)
+            except (OSError, ValueError) as e:
                 bk_status.set_text(f"backup failed: {e}")
+                self._info_dialog("Backup failed", str(e), parent=dlg)
 
         def import_backup(*_):
             chooser = Gtk.FileChooserDialog(
-                title="Import backup", transient_for=self, action=Gtk.FileChooserAction.OPEN,
+                title="Import backup", transient_for=dlg, action=Gtk.FileChooserAction.OPEN,
                 buttons=("Cancel", Gtk.ResponseType.CANCEL, "Open", Gtk.ResponseType.OK))
+            chooser.set_modal(True)
             resp = chooser.run()
             path = chooser.get_filename()
             chooser.destroy()
             if resp != Gtk.ResponseType.OK or not path:
                 return
-            pw = ask_secret(self, "Backup passphrase")
-            if not pw:
+            pw = ask_secret(dlg, "Backup passphrase")
+            if pw is None:
                 return
             try:
                 data = keysmod.load_bundle(path, pw)
@@ -3256,6 +3287,7 @@ class AimlessWindow(Gtk.Window):
                     raise ValueError("missing identity seed")
             except (ValueError, OSError, KeyError) as e:
                 bk_status.set_text(f"import failed: {e}")
+                self._info_dialog("Import failed", str(e), parent=dlg)
                 return
             addr = "?"
             if data.get("nodeSeed"):
@@ -3268,21 +3300,24 @@ class AimlessWindow(Gtk.Window):
             if not self._confirm(
                     "Restore this backup?",
                     f"identity {data.get('pubkey', '?')[:16]}…\nnode address {addr}\n"
-                    f"{n} contact(s)\n\nThis overwrites your current keys; restart aimless after."):
+                    f"{n} contact(s)\n\nThis overwrites your current keys; restart aimless after.",
+                    parent=dlg):
                 return
             app_pw = self.app_ref.passphrase if self.app_ref else None
             if not app_pw:
                 self._info_dialog("Passphrase unavailable",
-                                  "Reopen aimless to import a backup.")
+                                  "Reopen aimless to import a backup.", parent=dlg)
                 return
-            crypto.save_identity(identity_path(), keysmod.signing_key(seed), app_pw)
-            if data.get("nodeSeed"):
-                keysmod.write_node_key(data_dir(), bytes.fromhex(data["nodeSeed"]))
-            if data.get("contacts"):
-                protocol.save_contacts(contacts_path(), data["contacts"])
+            try:
+                self.restore_backup_from(path, pw, app_pw)
+            except (ValueError, OSError) as e:
+                bk_status.set_text(f"restore failed: {e}")
+                self._info_dialog("Restore failed", str(e), parent=dlg)
+                return
             self._daemon_restart()
             self._info_dialog("Backup restored",
-                              "Quit and reopen aimless to use the restored identity.")
+                              "Quit and reopen aimless to use the restored identity.",
+                              parent=dlg)
 
         bbtn = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         eb = Gtk.Button(label="Export encrypted backup")
@@ -3567,9 +3602,23 @@ def ask_secret(parent, title, confirm=False):
     pw = e1.get_text()
     conf = e2.get_text() if e2 is not None else pw
     dlg.destroy()
-    if resp != Gtk.ResponseType.OK or not pw or pw != conf:
+    if resp != Gtk.ResponseType.OK:
+        return None
+    if not pw:
+        parent and _error_dialog(parent, "Passphrase must not be empty.")
+        return None
+    if pw != conf:
+        parent and _error_dialog(parent, "Passphrases do not match.")
         return None
     return pw
+
+
+def _error_dialog(parent, text):
+    dlg = Gtk.MessageDialog(transient_for=parent, modal=True,
+                            message_type=Gtk.MessageType.ERROR, text=text,
+                            buttons=Gtk.ButtonsType.OK)
+    dlg.run()
+    dlg.destroy()
 
 
 def ask_passphrase(parent):

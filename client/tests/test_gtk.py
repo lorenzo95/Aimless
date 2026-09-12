@@ -1956,3 +1956,23 @@ def test_incoming_message_plays_sound_when_hidden(gtk_app, monkeypatch):
     win.messages.selected = None  # conversation not showing
     bob.send(win.session.client.pubkey_hex, a_node, "ping", int(time.time() * 1000))
     assert _pump(win, lambda: bool(played), timeout=30), "a hidden incoming message must beep"
+
+
+def test_backup_export_and_restore_round_trip(gtk_app, tmp_path):
+    win = gtk_app["win"]
+    session = win.session
+    path = str(tmp_path / "backup.json")
+
+    win.export_backup_to(path, "backup-pw")
+    from aimless import keys, crypto
+    data = keys.load_bundle(path, "backup-pw")
+    assert data["identitySeed"] == bytes(session.identity).hex()
+    assert data["pubkey"] == session.client.pubkey_hex
+    assert isinstance(data["contacts"], dict)
+    with pytest.raises(ValueError):
+        keys.load_bundle(path, "wrong")
+
+    # Restoring rewrites identity.json, decryptable under the app passphrase.
+    win.restore_backup_from(path, "backup-pw", "testpass")
+    restored = crypto.load_identity(gtkui.identity_path(), "testpass")
+    assert bytes(restored) == bytes(session.identity)
