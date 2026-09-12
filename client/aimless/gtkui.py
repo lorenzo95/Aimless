@@ -114,162 +114,312 @@ def identity_path():
 def cache_path():
     return os.path.join(data_dir(), "state.db")
 
-CSS = """
-headerbar {
+# --- theme palettes ---------------------------------------------------------
+# Every colour the UI uses lives here (CSS *and* the Pango markup strings), so
+# switching a theme is one dict swap + a CSS reload. Keys are semantic roles.
+
+THEMES = {
+    "dark": {
+        "name": "Aimless Dark",
+        "bg": "#191b22", "header": "#14161d", "surface": "#1e212b",
+        "sidebar": "#21242e", "sidebar_hover": "#262a35", "sidebar_selected": "#323748",
+        "button": "#262a35", "button_hover": "#2e3240", "button_active": "#33363f",
+        "border": "#3a3e4a", "border_dark": "#0d0e13", "sep": "#2a2d37",
+        "text": "#e8eaf0", "text2": "#dfe3ec", "text_bright": "#f2f4f8",
+        "muted": "#9aa0ad", "muted2": "#aab0bd", "subtitle": "#8c8c8c",
+        "bubble_in": "#31343d", "bubble_in_fg": "#e8eaf0",
+        "bubble_out": "#8ab4f8", "bubble_out_fg": "#10131a", "out_link": "#0b3d91",
+        "badge_bg": "#7fa8f0", "badge_fg": "#10131a", "focus": "#4a5060",
+        "log_text": "#c8cdd8",
+        "away_bg": "#3a3020", "away_border": "#5a4a28", "away_text": "#f5d78e",
+        "away_icon": "#f5d36b", "chip": "#22252e", "chip_hover": "#2c313d",
+        "online": "#a6e3a1", "away": "#fab387", "offline": "#6c7086",
+        "danger": "#f38ba8", "link": "#8ab4f8",
+    },
+    "mocha": {
+        "name": "Mocha", "mono": False,
+        "bg": "#1e1e2e", "header": "#11111b", "surface": "#181825",
+        "sidebar": "#181825", "sidebar_hover": "#1e1e2e", "sidebar_selected": "#313244",
+        "button": "#313244", "button_hover": "#45475a", "button_active": "#45475a",
+        "border": "#45475a", "border_dark": "#11111b", "sep": "#313244",
+        "text": "#cdd6f4", "text2": "#cdd6f4", "text_bright": "#ffffff",
+        "muted": "#7f849c", "muted2": "#6c7086", "subtitle": "#6c7086",
+        "bubble_in": "#313244", "bubble_in_fg": "#cdd6f4",
+        "bubble_out": "#89b4fa", "bubble_out_fg": "#1e1e2e", "out_link": "#11111b",
+        "badge_bg": "#89b4fa", "badge_fg": "#11111b", "focus": "#6c7086",
+        "log_text": "#cdd6f4",
+        "away_bg": "#313244", "away_border": "#fab387", "away_text": "#f9e2af",
+        "away_icon": "#f9e2af", "chip": "#313244", "chip_hover": "#45475a",
+        "online": "#a6e3a1", "away": "#fab387", "offline": "#6c7086",
+        "danger": "#f38ba8", "link": "#89b4fa",
+    },
+    "nord": {
+        "name": "Nord", "mono": False,
+        "bg": "#2e3440", "header": "#242933", "surface": "#2e3440",
+        "sidebar": "#2e3440", "sidebar_hover": "#3b4252", "sidebar_selected": "#434c5e",
+        "button": "#3b4252", "button_hover": "#434c5e", "button_active": "#4c566a",
+        "border": "#4c566a", "border_dark": "#1b1f27", "sep": "#434c5e",
+        "text": "#eceff4", "text2": "#e5e9f0", "text_bright": "#ffffff",
+        "muted": "#7b8ea1", "muted2": "#9caabb", "subtitle": "#4c566a",
+        "bubble_in": "#3b4252", "bubble_in_fg": "#eceff4",
+        "bubble_out": "#88c0d0", "bubble_out_fg": "#2e3440", "out_link": "#2e3440",
+        "badge_bg": "#88c0d0", "badge_fg": "#2e3440", "focus": "#4c566a",
+        "log_text": "#d8dee9",
+        "away_bg": "#3b4252", "away_border": "#d08770", "away_text": "#ebcb8b",
+        "away_icon": "#ebcb8b", "chip": "#3b4252", "chip_hover": "#434c5e",
+        "online": "#a3be8c", "away": "#ebcb8b", "offline": "#4c566a",
+        "danger": "#bf616a", "link": "#88c0d0",
+    },
+    "tokyo": {
+        "name": "Tokyo Night", "mono": False,
+        "bg": "#1a1b26", "header": "#16161e", "surface": "#1f2335",
+        "sidebar": "#1a1b26", "sidebar_hover": "#24283b", "sidebar_selected": "#292e42",
+        "button": "#24283b", "button_hover": "#292e42", "button_active": "#3b4261",
+        "border": "#3b4261", "border_dark": "#0f0f14", "sep": "#292e42",
+        "text": "#c0caf5", "text2": "#c0caf5", "text_bright": "#ffffff",
+        "muted": "#565f89", "muted2": "#737aa2", "subtitle": "#565f89",
+        "bubble_in": "#24283b", "bubble_in_fg": "#c0caf5",
+        "bubble_out": "#7aa2f7", "bubble_out_fg": "#1a1b26", "out_link": "#1a1b26",
+        "badge_bg": "#7aa2f7", "badge_fg": "#1a1b26", "focus": "#565f89",
+        "log_text": "#a9b1d6",
+        "away_bg": "#24283b", "away_border": "#e0af68", "away_text": "#e0af68",
+        "away_icon": "#e0af68", "chip": "#24283b", "chip_hover": "#292e42",
+        "online": "#9ece6a", "away": "#e0af68", "offline": "#414868",
+        "danger": "#f7768e", "link": "#7aa2f7",
+    },
+    "latte": {
+        "name": "Latte (light)", "mono": False,
+        "bg": "#eff1f5", "header": "#e6e9ef", "surface": "#ffffff",
+        "sidebar": "#e6e9ef", "sidebar_hover": "#dce0e8", "sidebar_selected": "#ccd0da",
+        "button": "#ccd0da", "button_hover": "#bcc0cc", "button_active": "#acb0be",
+        "border": "#bcc0cc", "border_dark": "#dce0e8", "sep": "#ccd0da",
+        "text": "#4c4f69", "text2": "#4c4f69", "text_bright": "#11111b",
+        "muted": "#7c7f93", "muted2": "#9ca0b0", "subtitle": "#8c8fa1",
+        "bubble_in": "#e6e9ef", "bubble_in_fg": "#4c4f69",
+        "bubble_out": "#1e66f5", "bubble_out_fg": "#eff1f5", "out_link": "#eff1f5",
+        "badge_bg": "#1e66f5", "badge_fg": "#eff1f5", "focus": "#9ca0b0",
+        "log_text": "#4c4f69",
+        "away_bg": "#f2e9de", "away_border": "#df8e1d", "away_text": "#df8e1d",
+        "away_icon": "#df8e1d", "chip": "#e6e9ef", "chip_hover": "#dce0e8",
+        "online": "#40a02b", "away": "#df8e1d", "offline": "#9ca0b0",
+        "danger": "#d20f39", "link": "#1e66f5",
+    },
+    "dawn": {
+        "name": "Dawn (light)", "mono": False,
+        "bg": "#faf4ed", "header": "#f2e9de", "surface": "#fffaf3",
+        "sidebar": "#f2e9de", "sidebar_hover": "#e4dfde", "sidebar_selected": "#dfdad9",
+        "button": "#e4dfde", "button_hover": "#dfdad9", "button_active": "#cecacd",
+        "border": "#cecacd", "border_dark": "#e4dfde", "sep": "#dfdad9",
+        "text": "#575279", "text2": "#575279", "text_bright": "#26233a",
+        "muted": "#9893a5", "muted2": "#797593", "subtitle": "#9893a5",
+        "bubble_in": "#f2e9de", "bubble_in_fg": "#575279",
+        "bubble_out": "#907aa9", "bubble_out_fg": "#faf4ed", "out_link": "#faf4ed",
+        "badge_bg": "#907aa9", "badge_fg": "#faf4ed", "focus": "#9893a5",
+        "log_text": "#575279",
+        "away_bg": "#f4ede8", "away_border": "#ea9d34", "away_text": "#ea9d34",
+        "away_icon": "#ea9d34", "chip": "#f2e9de", "chip_hover": "#e4dfde",
+        "online": "#56949f", "away": "#ea9d34", "offline": "#9893a5",
+        "danger": "#b4637a", "link": "#907aa9",
+    },
+    "matrix": {
+        "name": "Matrix", "mono": True,
+        "bg": "#000000", "header": "#001100", "surface": "#001a0d",
+        "sidebar": "#001100", "sidebar_hover": "#032006", "sidebar_selected": "#063a0d",
+        "button": "#03310f", "button_hover": "#064a15", "button_active": "#0a5a1e",
+        "border": "#0a5a1e", "border_dark": "#001100", "sep": "#03310f",
+        "text": "#b8ffb8", "text2": "#b8ffb8", "text_bright": "#e8ffe8",
+        "muted": "#0a8a2a", "muted2": "#0a8a2a", "subtitle": "#0a8a2a",
+        "bubble_in": "#071f0d", "bubble_in_fg": "#b8ffb8",
+        "bubble_out": "#00ff41", "bubble_out_fg": "#001100", "out_link": "#00260a",
+        "badge_bg": "#00ff41", "badge_fg": "#001100", "focus": "#0a8a2a",
+        "log_text": "#00c22e",
+        "away_bg": "#1a1200", "away_border": "#ffb000", "away_text": "#ffb000",
+        "away_icon": "#ffb000", "chip": "#03310f", "chip_hover": "#064a15",
+        "online": "#00ff41", "away": "#ffb000", "offline": "#1f5a1f",
+        "danger": "#ff2a2a", "link": "#39ff88",
+    },
+    "amber": {
+        "name": "Amber CRT", "mono": True,
+        "bg": "#0a0700", "header": "#120d00", "surface": "#1a1200",
+        "sidebar": "#120d00", "sidebar_hover": "#241a00", "sidebar_selected": "#332500",
+        "button": "#241a00", "button_hover": "#332500", "button_active": "#4a3600",
+        "border": "#5a4200", "border_dark": "#120d00", "sep": "#332500",
+        "text": "#ffc95c", "text2": "#ffc95c", "text_bright": "#ffe9b0",
+        "muted": "#a8791f", "muted2": "#a8791f", "subtitle": "#a8791f",
+        "bubble_in": "#241a00", "bubble_in_fg": "#ffc95c",
+        "bubble_out": "#ffb000", "bubble_out_fg": "#1a1200", "out_link": "#4a3000",
+        "badge_bg": "#ffb000", "badge_fg": "#1a1200", "focus": "#a8791f",
+        "log_text": "#d9a23a",
+        "away_bg": "#241a00", "away_border": "#ffb000", "away_text": "#ffe9b0",
+        "away_icon": "#ffb000", "chip": "#241a00", "chip_hover": "#332500",
+        "online": "#ffb000", "away": "#ff8c00", "offline": "#5a4200",
+        "danger": "#ff5544", "link": "#ffd27f",
+    },
+}
+
+THEME_ENTRIES = [
+    ("system", "System", "Match the desktop"),
+    ("dark", "Aimless Dark", "Default"),
+    ("mocha", "Mocha", "Catppuccin · dark"),
+    ("nord", "Nord", "Arctic · dark"),
+    ("tokyo", "Tokyo Night", "Deep blue · dark"),
+    ("latte", "Latte", "Catppuccin · light"),
+    ("dawn", "Dawn", "Rosé Pine · light"),
+    ("matrix", "Matrix", "Hacker green · monospace"),
+    ("amber", "Amber CRT", "Phosphor amber · monospace"),
+]
+
+
+def detect_system_palette():
+    """Desktop dark/light -> the palette 'System' resolves to."""
+    try:
+        s = Gtk.Settings.get_default()
+        name = (s.get_property("gtk-theme-name") or "").lower()
+        dark = bool(s.get_property("gtk-application-prefer-dark-theme")) or any(
+            k in name for k in ("dark", "black", "night", "midnight"))
+        return "dark" if dark else "latte"
+    except Exception:
+        return "dark"
+
+
+def get_theme(name):
+    if name == "system" or name not in THEMES:
+        name = detect_system_palette()
+    return THEMES[name]
+
+
+_ENV_THEME = os.environ.get("AIMLESS_THEME")
+CURRENT_THEME = _ENV_THEME if (_ENV_THEME in THEMES or _ENV_THEME == "system") else "system"
+C = get_theme(CURRENT_THEME)
+CSS_PROVIDER = None
+
+
+def build_css(C):
+    mono = "font-family: monospace;" if C.get("mono") else ""
+    return f"""
+* {{ {mono} }}
+headerbar {{
     background-image: none;
-    background-color: #14161d;
-    color: #e8eaf0;
-    border-bottom: 1px solid #0d0e13;
+    background-color: {C['header']};
+    color: {C['text']};
+    border-bottom: 1px solid {C['border_dark']};
     min-height: 40px;
-}
+}}
 
-.aimless-window {
+.aimless-window {{ background-image: none; background-color: {C['bg']}; color: {C['text']}; }}
+.aimless-window label {{ color: {C['text']}; }}
+.aimless-window .muted {{ color: {C['muted']}; }}
+
+.aimless-window button {{
     background-image: none;
-    background-color: #191b22;
-    color: #e8eaf0;
-}
-
-.aimless-window label { color: #e8eaf0; }
-
-.aimless-window .muted { color: #9aa0ad; }
-
-.aimless-window button {
-    background-image: none;
-    background-color: #262a35;
-    color: #dfe3ec;
-    border: 1px solid #3a3e4a;
+    background-color: {C['button']};
+    color: {C['text2']};
+    border: 1px solid {C['border']};
     border-radius: 8px;
-}
+}}
+.aimless-window button:hover {{ background-color: {C['button_hover']}; }}
+.aimless-window button:active {{ background-color: {C['button_active']}; }}
+.aimless-window button:checked {{ background-color: {C['button_active']}; }}
+.aimless-window button:disabled {{ opacity: 0.5; }}
 
-.aimless-window button:hover { background-color: #2e3240; }
-.aimless-window button:active { background-color: #33363f; }
-.aimless-window button:checked { background-color: #33363f; }
-.aimless-window button:disabled { opacity: 0.5; }
+.aimless-send {{ padding: 10px 20px; }}
 
-.aimless-send { padding: 10px 20px; }
+stackswitcher {{ background-color: {C['surface']}; border-radius: 8px; }}
+stackswitcher > button {{
+    background-image: none; background-color: transparent; border: none; box-shadow: none;
+    color: {C['muted2']}; padding: 5px 14px; margin: 2px; border-radius: 6px; outline: none;
+}}
+stackswitcher > button:checked {{ background-color: {C['button_active']}; color: {C['text_bright']}; }}
 
-stackswitcher {
-    background-color: #1d2029;
-    border-radius: 8px;
-}
+menu {{ background-color: {C['surface']}; color: {C['text2']}; border: 1px solid {C['border']}; border-radius: 6px; }}
+menuitem {{ color: {C['text2']}; }}
+menuitem:hover {{ background-color: {C['button_active']}; }}
 
-stackswitcher > button {
-    background-image: none;
-    background-color: transparent;
-    border: none;
-    box-shadow: none;
-    color: #aab0bd;
-    padding: 5px 14px;
-    margin: 2px;
-    border-radius: 6px;
-    outline: none;
-}
-
-stackswitcher > button:checked {
-    background-color: #33363f;
-    color: #f2f4f8;
-}
-
-menu { background-color: #1e212b; color: #dfe3ec; border: 1px solid #3a3e4a; border-radius: 6px; }
-menuitem { color: #dfe3ec; }
-menuitem:hover { background-color: #33363f; }
-
-.muted { color: #9aa0ad; font-size: 90%; }
+.muted {{ color: {C['muted']}; font-size: 90%; }}
 
 .aimless-sidebar scrolledwindow,
 .aimless-sidebar list,
-.aimless-sidebar row { background-color: #21242e; }
+.aimless-sidebar row {{ background-color: {C['sidebar']}; }}
+.aimless-sidebar row:hover {{ background-color: {C['sidebar_hover']}; }}
+.aimless-sidebar row:selected {{ background-color: {C['sidebar_selected']}; }}
+.aimless-sidebar row label {{ color: {C['text2']}; }}
 
-.aimless-sidebar row:hover { background-color: #262a35; }
-.aimless-sidebar row:selected { background-color: #323748; }
-.aimless-sidebar row label { color: #dfe3ec; }
-
-.aimless-chat row label { color: #e8eaf0; }
-
+.aimless-chat row label {{ color: {C['text']}; }}
 .aimless-chat,
 .aimless-chat stack,
 .aimless-chat scrolledwindow,
 .aimless-chat list,
-.aimless-chat row { background-color: #191b22; }
+.aimless-chat row {{ background-color: {C['bg']}; }}
+.aimless-chat separator {{ background-color: {C['sep']}; min-height: 1px; }}
 
-.aimless-chat separator { background-color: #2a2d37; min-height: 1px; }
+.aimless-bubble {{ padding: 8px 12px; border-radius: 14px; }}
+.aimless-bubble-in {{ background-color: {C['bubble_in']}; }}
+.aimless-bubble-out {{ background-color: {C['bubble_out']}; }}
+.aimless-chat row .aimless-bubble-in {{ color: {C['bubble_in_fg']}; }}
+.aimless-chat row .aimless-bubble-out {{ color: {C['bubble_out_fg']}; }}
+.aimless-bubble-out link, .aimless-bubble-out link:visited {{ color: {C['out_link']}; }}
+.aimless-bubble-in link, .aimless-bubble-in link:visited {{ color: {C['link']}; }}
 
-.aimless-bubble { padding: 8px 12px; border-radius: 14px; }
-.aimless-bubble-in { background-color: #31343d; }
-.aimless-bubble-out { background-color: #8ab4f8; }
-.aimless-chat row .aimless-bubble-in { color: #e8eaf0; }
-.aimless-chat row .aimless-bubble-out { color: #10131a; }
-.aimless-bubble-out link, .aimless-bubble-out link:visited { color: #0b3d91; }
-.aimless-bubble-in link, .aimless-bubble-in link:visited { color: #8ab4f8; }
+.aimless-badge {{
+    background-color: {C['badge_bg']}; color: {C['badge_fg']};
+    border-radius: 10px; padding: 0 8px; font-size: 85%;
+}}
 
-.aimless-badge {
-    background-color: #7fa8f0;
-    color: #10131a;
-    border-radius: 10px;
-    padding: 0 8px;
-    font-size: 85%;
-}
-
-.aimless-composer-frame { background-color: #1e212b; border: 1px solid #3a3e4a; border-radius: 6px; }
-
+.aimless-composer-frame {{ background-color: {C['surface']}; border: 1px solid {C['border']}; border-radius: 6px; }}
 .aimless-composer-frame textview,
-.aimless-composer-frame textview text {
-    background-color: transparent;
-    color: #e8eaf0;
-    caret-color: #e8eaf0;
-}
+.aimless-composer-frame textview text {{ background-color: transparent; color: {C['text']}; caret-color: {C['text']}; }}
 
-.aimless-window entry {
-    background-color: #1e212b;
-    color: #e8eaf0;
-    border: 1px solid #3a3e4a;
-    border-radius: 6px;
-    padding: 6px 10px;
-}
-
-.aimless-window entry:focus { border-color: #4a5060; }
+.aimless-window entry {{
+    background-color: {C['surface']}; color: {C['text']};
+    border: 1px solid {C['border']}; border-radius: 6px; padding: 6px 10px;
+}}
+.aimless-window entry:focus {{ border-color: {C['focus']}; }}
 
 .aimless-log text,
 .aimless-log textview,
-.aimless-log textview text {
-    background-color: #14161d;
-    color: #c8cdd8;
-}
+.aimless-log textview text {{ background-color: {C['header']}; color: {C['log_text']}; }}
 
-.aimless-away-banner {
-    background-color: #3a3020;
-    border-top: 1px solid #5a4a28;
-    border-bottom: 1px solid #5a4a28;
-    color: #f5d78e;
-}
+.aimless-away-banner {{
+    background-color: {C['away_bg']};
+    border-top: 1px solid {C['away_border']};
+    border-bottom: 1px solid {C['away_border']};
+    color: {C['away_text']};
+}}
+.aimless-away-banner image {{ color: {C['away_icon']}; }}
 
-.aimless-away-banner image { color: #f5d36b; }
+.aimless-route-bar {{ background-color: {C['header']}; border-top: 1px solid {C['sep']}; color: {C['muted2']}; }}
+.aimless-route-bar image {{ color: {C['muted2']}; }}
 
-.aimless-route-bar {
-    background-color: #16181f;
-    border-top: 1px solid #2a2d37;
-    color: #aab0bd;
-}
+.aimless-contacts frame {{ border-color: {C['border']}; }}
+.aimless-muted {{ opacity: 0.55; }}
 
-.aimless-route-bar image { color: #aab0bd; }
+.aimless-chip {{ padding: 2px 8px; margin: 1px; border-radius: 11px; background-color: {C['chip']}; }}
+.aimless-chip:hover {{ background-color: {C['chip_hover']}; }}
 
-.aimless-contacts frame { border-color: #3a3e4a; }
-
-.aimless-muted {
-    opacity: 0.55;
-}
-
-.aimless-chip {
-    padding: 2px 8px;
-    margin: 1px;
-    border-radius: 11px;
-    background-color: #22252e;
-}
-
-.aimless-chip:hover {
-    background-color: #2c313d;
-}
+.aimless-jump {{
+    background-color: {C['badge_bg']}; color: {C['badge_fg']};
+    border-radius: 14px; padding: 4px 12px;
+}}
 """
+
+
+def install_css_provider():
+    """Create the single app CSS provider and load the current palette."""
+    global CSS_PROVIDER
+    CSS_PROVIDER = Gtk.CssProvider()
+    CSS_PROVIDER.load_from_data(build_css(C).encode())
+    Gtk.StyleContext.add_provider_for_screen(
+        Gdk.Screen.get_default(), CSS_PROVIDER, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+
+def set_theme(name):
+    """Swap the active palette and reload the CSS in place (no re-add needed)."""
+    global CURRENT_THEME, C
+    CURRENT_THEME = name
+    C = get_theme(name)
+    if CSS_PROVIDER is not None:
+        CSS_PROVIDER.load_from_data(build_css(C).encode())
+    return C
 
 
 def load_prefs():
@@ -608,7 +758,7 @@ def _room_dots_markup(members, presence_by_node, exclude):
     for screen, node in sorted((m.get("screen") or n[:8], n) for n, m in members.items()
                                if n != exclude):
         p = presence_by_node.get(node, {})
-        color = "#a6e3a1" if p.get("online") else ("#fab387" if p.get("away") else "#6c7086")
+        color = C["online"] if p.get("online") else (C["away"] if p.get("away") else C["offline"])
         parts.append(f"<span foreground='{color}'>●</span>")
     return "".join(parts)
 
@@ -621,11 +771,11 @@ def _sidebar_title_markup(thread, self_node):
         pb = thread.get("presence_by_node", {})
         others = [n for n in thread.get("members", {}) if n != self_node]
         online = sum(1 for n in others if pb.get(n, {}).get("online"))
-        dot_color = "#a6e3a1" if online else "#6c7086"
+        dot_color = C["online"] if online else C["offline"]
         return (f"<span foreground='{dot_color}'>●</span>  "
-                f"<span size='small' foreground='#8c8c8c'>{online}/{len(others)}</span>  "
+                f"<span size='small' foreground='{C['subtitle']}'>{online}/{len(others)}</span>  "
                 f"<b>{esc(thread['screen'])}</b>")
-    dot_color = "#a6e3a1" if thread["online"] else ("#fab387" if thread["away"] else "#6c7086")
+    dot_color = C["online"] if thread["online"] else (C["away"] if thread["away"] else C["offline"])
     return f"<span foreground='{dot_color}'>●</span>  <b>{esc(thread['screen'])}</b>"
 
 
@@ -635,7 +785,7 @@ def _room_header_markup(thread, self_node):
     pb = thread.get("presence_by_node", {})
     online = sum(1 for n in others if pb.get(n, {}).get("online"))
     return (f"<big><b>{GLib.markup_escape_text(thread['screen'])}</b></big>  {dots}  "
-            f"<span size='small' foreground='#8c8c8c'>{online}/{len(others)} online</span>")
+            f"<span size='small' foreground='{C['subtitle']}'>{online}/{len(others)} online</span>")
 
 
 def _free_petname(contacts, base):
@@ -1148,7 +1298,7 @@ class MessagesView(Gtk.Box):
             self._render_member_chips(None)
             self.conversation_header.set_markup(
                 f"<big><b>{GLib.markup_escape_text(thread['screen'])}</b></big>"
-                f"  <span size='small' foreground='#8c8c8c'>{conv[:16]}…</span>")
+                f"  <span size='small' foreground='{C['subtitle']}'>{conv[:16]}…</span>")
         self._render_messages(conv, thread)
         self.stack.set_visible_child_name("conversation")
         self.load_history_async(conv)
@@ -1564,7 +1714,7 @@ class MessagesView(Gtk.Box):
                          if n != session.self_node)
         for screen, n in entries:
             p = pb.get(n, {})
-            color = "#a6e3a1" if p.get("online") else ("#fab387" if p.get("away") else "#6c7086")
+            color = C["online"] if p.get("online") else (C["away"] if p.get("away") else C["offline"])
             known = n in contact_nodes
             glyph = "●" if known else "○"
             btn = Gtk.Button()
@@ -2253,7 +2403,7 @@ class ContactsView(Gtk.Box):
                 node = petname
                 label = self.app.session.cache.blocked_screen(petname) or label
             p = presence.get(node, {})
-            color = "#a6e3a1" if p.get("online") else "#9aa0ad"
+            color = C["online"] if p.get("online") else C["muted"]
             state = "online" if p.get("online") else "offline"
             title.set_markup(
                 f"<b>{GLib.markup_escape_text(label)}</b> "
@@ -2357,16 +2507,17 @@ class ActivityView(Gtk.Box):
         self.log_view.set_right_margin(10)
         scroll.add(self.log_view)
         self.pack_start(scroll, True, True, 0)
-        self.info_label.set_markup("<span foreground='#9aa0ad'>○  checking daemon …</span>")
+        self.info_label.set_markup(f"<span foreground='{C['muted']}'>○  checking daemon …</span>")
 
     def refresh_info(self, st):
         if not st:
-            self.info_label.set_markup("<span foreground='#f38ba8'>●  offline — daemon not reachable</span>")
+            self.info_label.set_markup(
+                f"<span foreground='{C['danger']}'>●  offline — daemon not reachable</span>")
             return
         build = st.get("build", "")
         version_note = ""
         if not build:
-            version_note = ("\n<span foreground='#f38ba8'>this daemon is an old build — "
+            version_note = (f"\n<span foreground='{C['danger']}'>this daemon is an old build — "
                             "run `aimless stop`, then reopen aimless to update</span>")
             build = "unknown"
         else:
@@ -2376,15 +2527,15 @@ class ActivityView(Gtk.Box):
                 dv = None
             if dv is not None and dv < MIN_DAEMON_BUILD:
                 need = ".".join(str(x) for x in MIN_DAEMON_BUILD)
-                version_note = ("\n<span foreground='#f38ba8'>daemon {b} is too old for this client "
-                                "(needs ≥ {n}) — update aimlessd-linux-amd64, then `aimless stop` and "
-                                "reopen</span>".format(b=build, n=need))
+                version_note = (f"\n<span foreground='{C['danger']}'>daemon {build} is too old for this client "
+                                f"(needs ≥ {need}) — update aimlessd-linux-amd64, then `aimless stop` and "
+                                "reopen</span>")
                 if not getattr(self, "_version_warned", False):
                     self._version_warned = True
                     self.log(f"⚠ daemon {build} is too old for this client (needs ≥ {need}) "
                              f"— update aimlessd-linux-amd64, then `aimless stop` and reopen")
-        state = ("<span foreground='#a6e3a1'>●  you are online</span>" if st["peers_up"] > 0
-                 else "<span foreground='#fab387'>●  connecting — no Yggdrasil peers yet</span>")
+        state = (f"<span foreground='{C['online']}'>●  you are online</span>" if st["peers_up"] > 0
+                 else f"<span foreground='{C['away']}'>●  connecting — no Yggdrasil peers yet</span>")
         self.info_label.set_markup(
             f"{state}  —  address <b>{st['address']}</b>  ·  peers {st['peers_up']}/{st['peers_total']}\n"
             f"daemon: {build}  ·  client: aimless/{client_version}{version_note}")
@@ -2544,6 +2695,14 @@ class AimlessWindow(Gtk.Window):
         self._push_status(self.prefs.get("away") or None)
         GLib.timeout_add_seconds(STATUS_REASSERT_SECONDS, self._reassert_status)
         GLib.idle_add(self.surface_pending_requests)
+
+        self.apply_theme(os.environ.get("AIMLESS_THEME") or pref(self.prefs, "theme"))
+        try:
+            settings = Gtk.Settings.get_default()
+            for prop in ("gtk-theme-name", "gtk-application-prefer-dark-theme"):
+                settings.connect(f"notify::{prop}", self._on_system_theme)
+        except Exception:
+            pass
 
     def _ask_request(self, req):
         is_room = bool(req.get("conv"))
@@ -2755,13 +2914,14 @@ class AimlessWindow(Gtk.Window):
 
     def refresh_route(self, st):
         if not st:
-            self.route_label.set_markup("<span foreground='#f38ba8'>●  offline — daemon not reachable</span>")
+            self.route_label.set_markup(
+                f"<span foreground='{C['danger']}'>●  offline — daemon not reachable</span>")
         elif st["peers_up"] == 0:
             self.route_label.set_markup(
-                "<span foreground='#fab387'>●  connecting — no Yggdrasil peers yet</span>")
+                f"<span foreground='{C['away']}'>●  connecting — no Yggdrasil peers yet</span>")
         else:
             self.route_label.set_markup(
-                f"<span foreground='#a6e3a1'>●  online</span>  —  {st['address']}  ·  "
+                f"<span foreground='{C['online']}'>●  online</span>  —  {st['address']}  ·  "
                 f"peers {st['peers_up']}/{st['peers_total']}")
 
     def on_delete(self, *_):
@@ -2875,6 +3035,30 @@ class AimlessWindow(Gtk.Window):
             except Exception:
                 pass
 
+    def apply_theme(self, name):
+        # AIMLESS_THEME is a session override and wins over the saved choice.
+        env = os.environ.get("AIMLESS_THEME")
+        if env in THEMES or env == "system":
+            name = env
+        if name != "system" and name not in THEMES:
+            name = "system"
+        set_theme(name)
+        # Palette colours also live in Pango markup outside the CSS, so redraw
+        # the widgets that embed them.
+        try:
+            self.messages.sync_sidebar()
+            if self.messages.selected is not None:
+                self.messages._render_messages(self.messages.selected["conv"],
+                                               self.messages.selected)
+            self.contacts.refresh()
+            self.poll_status()
+        except Exception:
+            pass
+
+    def _on_system_theme(self, *_):
+        if CURRENT_THEME == "system":
+            self.apply_theme("system")
+
     def on_preferences(self, *_):
         dlg = Gtk.Dialog(title="Preferences", transient_for=self, modal=True)
         dlg.add_button("Close", Gtk.ResponseType.CLOSE)
@@ -2928,6 +3112,25 @@ class AimlessWindow(Gtk.Window):
                 self.messages._history_loaded(self.messages.selected["conv"])
         fmt.connect("changed", on_fmt)
         row("Timestamp format", fmt)
+
+        box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+        theme_combo = Gtk.ComboBoxText()
+        for tid, label, _desc in THEME_ENTRIES:
+            theme_combo.append(tid, label)
+        theme_combo.set_active_id(os.environ.get("AIMLESS_THEME") or pref(self.prefs, "theme"))
+
+        def on_theme(w):
+            name = w.get_active_id() or "system"
+            self.prefs["theme"] = name
+            save_prefs(self.prefs)
+            self.apply_theme(name)
+        theme_combo.connect("changed", on_theme)
+        row("Theme", theme_combo)
+        if os.environ.get("AIMLESS_THEME"):
+            env_note = Gtk.Label(label="AIMLESS_THEME is set and overrides this choice.")
+            env_note.set_xalign(0.0)
+            env_note.get_style_context().add_class("muted")
+            box.pack_start(env_note, False, False, 0)
 
         box.show_all()
         dlg.run()
@@ -3144,10 +3347,7 @@ class AimlessApp:
         sys.excepthook = _make_excepthook(self.log)
         threading.excepthook = _make_thread_hook(self.log)
 
-        provider = Gtk.CssProvider()
-        provider.load_from_data(CSS.encode())
-        Gtk.StyleContext.add_provider_for_screen(
-            Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        install_css_provider()
 
         self.lock_fh, holder = acquire_app_lock()
         if self.lock_fh is None:

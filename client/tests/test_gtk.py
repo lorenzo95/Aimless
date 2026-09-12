@@ -1847,3 +1847,59 @@ def test_group_text_shows_partial_delivery(gtk_app):
     m.note_acked("n3", 3)
     texts = [lbl.get_text() for lbl in m._bubble_status.values()]
     assert any(t.startswith("✓ delivered") for t in texts), texts
+
+
+# --- 0.8.5 theming ----------------------------------------------------------
+
+REQUIRED_PALETTE_KEYS = {
+    "name", "bg", "header", "surface", "sidebar", "sidebar_hover", "sidebar_selected",
+    "button", "button_hover", "button_active", "border", "border_dark", "sep",
+    "text", "text2", "text_bright", "muted", "muted2", "subtitle",
+    "bubble_in", "bubble_in_fg", "bubble_out", "bubble_out_fg", "out_link",
+    "badge_bg", "badge_fg", "focus", "log_text",
+    "away_bg", "away_border", "away_text", "away_icon", "chip", "chip_hover",
+    "online", "away", "offline", "danger", "link",
+}
+
+
+def test_themes_have_all_keys():
+    assert set(gtkui.THEMES) == {"dark", "mocha", "nord", "tokyo", "latte", "dawn", "matrix", "amber"}
+    for name, pal in gtkui.THEMES.items():
+        missing = REQUIRED_PALETTE_KEYS - set(pal)
+        assert not missing, f"{name} palette missing {missing}"
+
+
+def test_build_css_uses_palette_and_mono():
+    css = gtkui.build_css(gtkui.THEMES["matrix"])
+    assert gtkui.THEMES["matrix"]["bg"] in css
+    assert "monospace" in css, "Matrix must request the generic monospace family"
+    assert "monospace" not in gtkui.build_css(gtkui.THEMES["dark"]), "default stays proportional"
+
+
+def test_no_hardcoded_colors_outside_palette():
+    import re
+    src = open(gtkui.__file__).read()
+    in_source = re.findall(r"#[0-9a-fA-F]{6}", src)
+    in_palette = re.findall(r"#[0-9a-fA-F]{6}", repr(gtkui.THEMES))
+    assert len(in_source) == len(in_palette), (
+        "every colour must live in THEMES; found a stray hardcoded hex")
+
+
+def test_theme_switch_and_env_override(gtk_app, monkeypatch):
+    win = gtk_app["win"]
+    gtkui.install_css_provider()
+    win.apply_theme("matrix")
+    assert gtkui.CURRENT_THEME == "matrix"
+    assert gtkui.C["bg"] == "#000000"
+    assert gtkui.CSS_PROVIDER is not None
+    # AIMLESS_THEME wins over the selected theme.
+    monkeypatch.setenv("AIMLESS_THEME", "amber")
+    win.apply_theme("nord")
+    assert gtkui.CURRENT_THEME == "amber"
+    monkeypatch.delenv("AIMLESS_THEME")
+    win.apply_theme("dark")
+    assert gtkui.CURRENT_THEME == "dark"
+
+
+def test_detect_system_palette_returns_a_theme():
+    assert gtkui.detect_system_palette() in ("dark", "latte")

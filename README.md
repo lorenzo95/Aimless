@@ -107,6 +107,11 @@ Open the header menu → **Preferences …**. Settings are stored in
 - **Press Enter to send** — off means Ctrl+Enter sends and Enter inserts a
   newline.
 - **Timestamp format** — 24-hour or 12-hour.
+- **Theme** — System (follows the desktop light/dark live), Aimless Dark, Mocha,
+  Nord, Tokyo Night, Latte/Dawn (light), and **Matrix**/**Amber CRT** (monospace).
+  The `AIMLESS_THEME` environment variable overrides the saved choice for a
+  session (handy for the web-desktop container); no extra packages are needed —
+  the monospace themes use the system's generic `monospace` family.
 
 ## Security model
 
