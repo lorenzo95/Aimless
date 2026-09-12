@@ -1800,3 +1800,34 @@ def test_window_geometry_saves(gtk_app):
     assert (w, h) != (0, 0)
     win.reset_geometry()
     assert "window_x" not in win.prefs and "window_maximized" not in win.prefs
+
+
+def test_apply_saved_position_moves_and_clamps(gtk_app, monkeypatch):
+    win = gtk_app["win"]
+    calls = []
+    monkeypatch.setattr(win, "move", lambda x, y: calls.append((x, y)))
+    monkeypatch.setattr(win, "get_size", lambda: (1000, 700))
+    monkeypatch.setattr(win, "_workareas",
+                        lambda: [(0, 0, 1920, 1080), (1920, 0, 1920, 1080)])
+    win.prefs["window_x"], win.prefs["window_y"] = 1957, 0
+    win._apply_saved_position()
+    assert calls[-1] == (1957, 0), "saved second-monitor position is restored"
+    calls.clear()
+    win.prefs["window_x"], win.prefs["window_y"] = 9000, 9000
+    win._apply_saved_position()
+    x, y = calls[-1]
+    assert x <= 1920 and y <= 1080, "off-screen saved position is clamped on-screen"
+
+
+def test_on_map_applies_pending_geometry_once(gtk_app, monkeypatch):
+    win = gtk_app["win"]
+    applied = []
+    monkeypatch.setattr(win, "_apply_saved_position", lambda: applied.append(1))
+    win._want_geometry = True
+    win._on_map()
+    pump(0.2)
+    assert applied, "map-time restore must apply the saved position"
+    applied.clear()
+    win._on_map()  # nothing pending now
+    pump(0.2)
+    assert applied == [], "geometry must not be re-applied on later map events"

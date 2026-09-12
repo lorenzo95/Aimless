@@ -2493,7 +2493,9 @@ class AimlessWindow(Gtk.Window):
         self.connect("destroy", self.on_destroy)
         self._geometry_restoring = False
         self._geometry_timer = 0
+        self._want_geometry = False
         self.connect("configure-event", self.on_configure)
+        self.connect("map-event", self._on_map)
         self._presence_busy = False
         self._status_busy = False
         self._request_open = False
@@ -2808,6 +2810,13 @@ class AimlessWindow(Gtk.Window):
     def restore_geometry(self):
         if not pref(self.prefs, "remember_position"):
             return
+        # Apply now (works as the initial-position hint on X11), and again once
+        # the window is mapped — most window managers ignore pre-map move
+        # requests and only honour one made after the window is shown.
+        self._want_geometry = True
+        self._apply_saved_position()
+
+    def _apply_saved_position(self):
         x, y = self.prefs.get("window_x"), self.prefs.get("window_y")
         w, h = self.get_size()
         self._geometry_restoring = True
@@ -2821,6 +2830,12 @@ class AimlessWindow(Gtk.Window):
             pass
         finally:
             self._geometry_restoring = False
+
+    def _on_map(self, *_):
+        if getattr(self, "_want_geometry", False):
+            self._want_geometry = False
+            GLib.idle_add(self._apply_saved_position)
+        return False
 
     def reset_geometry(self):
         for k in ("window_x", "window_y", "window_maximized"):
@@ -3230,8 +3245,8 @@ class AimlessApp:
             self.log(f"cache recovery: {session.cache_recovered}")
         self.session = session
         self.window = AimlessWindow(session, self.supervisor, app_ref=self)
-        self.window.show_all()
         self.window.restore_geometry()
+        self.window.show_all()
 
     def _cancel_or_quit(self):
         """User cancelled and there is no usable tray: log it so the caller (a
