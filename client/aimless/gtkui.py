@@ -32,6 +32,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GLib, Gdk, Pango, GdkPixbuf, Gio
 
 from . import crypto, protocol, logging
+from . import keys as keysmod
 from .daemon import DaemonClient, Client, DaemonError
 from .service import Sync
 from .store import Store
@@ -827,6 +828,11 @@ class Session:
     def my_invite(self):
         who = self.client.whoami()
         return protocol.make_invite(self.identity, who["key"], self.self_screen)
+
+    def refresh_node(self):
+        """Re-read the daemon's node key after a restart (address may change)."""
+        self.self_node = self.daemon.request("whoami")["key"]
+        return self.self_node
 
 
 def _room_dots_markup(members, presence_by_node, exclude):
@@ -2742,6 +2748,9 @@ class AimlessWindow(Gtk.Window):
         avail_item.connect("activate", lambda *_: self.set_away(None))
         options_menu.append(avail_item)
         options_menu.append(Gtk.SeparatorMenuItem())
+        keys_item = Gtk.MenuItem(label="Keys & Identity …")
+        keys_item.connect("activate", self.on_keys)
+        options_menu.append(keys_item)
         prefs_item = Gtk.MenuItem(label="Preferences …")
         prefs_item.connect("activate", self.on_preferences)
         options_menu.append(prefs_item)
@@ -3017,6 +3026,277 @@ class AimlessWindow(Gtk.Window):
                 f"<span foreground='{C['online']}'>●  online</span>  —  {st['address']}  ·  "
                 f"peers {st['peers_up']}/{st['peers_total']}")
 
+    # -- Keys & Identity --------------------------------------------------
+    def _info_dialog(self, title, text, secondary=None):
+        dlg = Gtk.MessageDialog(transient_for=self, modal=True,
+                                message_type=Gtk.MessageType.INFO,
+                                text=title, buttons=Gtk.ButtonsType.OK)
+        if secondary:
+            dlg.format_secondary_text(secondary)
+        dlg.run()
+        dlg.destroy()
+
+    def _confirm(self, title, secondary):
+        dlg = Gtk.MessageDialog(transient_for=self, modal=True,
+                                message_type=Gtk.MessageType.WARNING,
+                                text=title, buttons=Gtk.ButtonsType.OK_CANCEL)
+        dlg.format_secondary_text(secondary)
+        dlg.set_default_response(Gtk.ResponseType.CANCEL)
+        resp = dlg.run()
+        dlg.destroy()
+        return resp == Gtk.ResponseType.OK
+
+    def _daemon_restart(self):
+        sup = self.supervisor
+        try:
+            sup.stop()
+        except Exception:
+            pass
+        for _ in range(50):
+            if not sup.is_running():
+                break
+            time.sleep(0.1)
+        try:
+            sup.ensure(log=(self.app_ref.log if self.app_ref else None))
+        except Exception:
+            pass
+        for _ in range(150):
+            if sup.is_running():
+                break
+            time.sleep(0.1)
+
+    def _apply_node_seed(self, seed):
+        keysmod.write_node_key(data_dir(), seed)
+        self._daemon_restart()
+        try:
+            self.session.refresh_node()
+        except Exception:
+            pass
+        self.messages.sync_sidebar()
+
+    def on_keys(self, *_):
+        st = self.supervisor.status() or {}
+        dlg = Gtk.Dialog(title="Keys & Identity", transient_for=self, modal=True)
+        dlg.add_button("Close", Gtk.ResponseType.CLOSE)
+        dlg.set_default_size(620, -1)
+        box = dlg.get_content_area()
+        box.set_spacing(10)
+        box.set_border_width(14)
+
+        def section(text):
+            frame = Gtk.Frame(label=text)
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            inner.set_border_width(10)
+            frame.add(inner)
+            box.pack_start(frame, False, False, 0)
+            return inner
+
+        # --- Yggdrasil node key ---
+        node = section("Yggdrasil node key — your address")
+        node_status = Gtk.Label(label=f"current: {st.get('address', '?')}")
+        node_status.set_xalign(0.0)
+        node_status.set_line_wrap(True)
+        node.pack_start(node_status, False, False, 0)
+        node_entry = Gtk.Entry(placeholder_text="paste a 64- or 128-hex node key")
+        node.pack_start(node_entry, False, False, 0)
+        node_preview = Gtk.Label(label="")
+        node_preview.set_xalign(0.0)
+        node_preview.set_line_wrap(True)
+        node_preview.get_style_context().add_class("muted")
+        node.pack_start(node_preview, False, False, 0)
+
+        def preview_node(*_):
+            try:
+                _seed, pub = keysmod.parse_node_key(node_entry.get_text())
+            except ValueError as e:
+                node_preview.set_text(f"error: {e}")
+                return
+            node_preview.set_text(f"address: {keysmod.yggdrasil_address(pub)}\n"
+                                  f"pubkey: {pub.hex()}")
+
+        def apply_node(*_):
+            try:
+                seed, pub = keysmod.parse_node_key(node_entry.get_text())
+            except ValueError as e:
+                node_preview.set_text(f"error: {e}")
+                return
+            addr = keysmod.yggdrasil_address(pub)
+            if not self._confirm("Replace your Yggdrasil node key?",
+                                 f"Your address becomes {addr}. Anyone who saved your old "
+                                 "invite must add you again. The daemon restarts now."):
+                return
+            self._apply_node_seed(seed)
+            node_status.set_text(f"current: {addr}")
+            self._info_dialog("Node key applied", f"Your address is now {addr}.")
+
+        def gen_node(*_):
+            seed_hex, addr = keysmod.random_node_key()
+            node_entry.set_text(seed_hex)
+            node_preview.set_text(f"address: {addr}")
+
+        def reset_node(*_):
+            if not self._confirm("Reset to a fresh node key?",
+                                 "Your current address is discarded and a new one is generated; "
+                                 "old invites stop working. The daemon restarts now."):
+                return
+            keysmod.remove_node_key(data_dir())
+            self._daemon_restart()
+            try:
+                self.session.refresh_node()
+            except Exception:
+                pass
+            self.messages.sync_sidebar()
+            node_status.set_text(
+                f"current: {(self.supervisor.status() or {}).get('address', '?')}")
+
+        nbtn = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        for label, cb in (("Preview", preview_node), ("Apply", apply_node),
+                          ("Generate random", gen_node), ("Reset to default", reset_node)):
+            b = Gtk.Button(label=label)
+            b.connect("clicked", cb)
+            nbtn.pack_start(b, False, False, 0)
+        node.pack_start(nbtn, False, False, 0)
+
+        # --- client identity ---
+        ident = section("Client identity — your encryption key")
+        id_status = Gtk.Label(label=f"current pubkey: {self.session.client.pubkey_hex}")
+        id_status.set_xalign(0.0)
+        id_status.set_line_wrap(True)
+        ident.pack_start(id_status, False, False, 0)
+        id_entry = Gtk.Entry(placeholder_text="paste a 64-hex identity seed to replace it")
+        ident.pack_start(id_entry, False, False, 0)
+        id_warn = Gtk.Label(
+            label="Replacing your identity changes the key friends encrypt to; existing "
+                  "conversations break and everyone must re-add your invite.")
+        id_warn.set_xalign(0.0)
+        id_warn.set_line_wrap(True)
+        id_warn.get_style_context().add_class("muted")
+        ident.pack_start(id_warn, False, False, 0)
+
+        def import_identity(*_):
+            try:
+                seed = bytes.fromhex(id_entry.get_text().strip())
+                if len(seed) != 32:
+                    raise ValueError
+            except ValueError:
+                id_warn.set_text("error: expected a 64-hex identity seed")
+                return
+            if not self._confirm("Replace your client identity?",
+                                 "This breaks existing conversations and cannot be undone here. "
+                                 "Restart aimless afterwards to use it."):
+                return
+            pw = self.app_ref.passphrase if self.app_ref else None
+            if not pw:
+                self._info_dialog("Passphrase unavailable",
+                                  "Reopen aimless to import an identity.")
+                return
+            crypto.save_identity(identity_path(), keysmod.signing_key(seed), pw)
+            self._info_dialog("Identity written",
+                              "Quit and reopen aimless to use the new identity.")
+        idbtn = Gtk.Button(label="Import identity")
+        idbtn.connect("clicked", import_identity)
+        ident.pack_start(idbtn, False, False, 0)
+
+        # --- backup / restore ---
+        bk = section("Backup & restore")
+        bk_status = Gtk.Label(label="")
+        bk_status.set_xalign(0.0)
+        bk_status.set_line_wrap(True)
+        bk_status.get_style_context().add_class("muted")
+        bk.pack_start(bk_status, False, False, 0)
+
+        def export_backup(*_):
+            pw = ask_secret(self, "Backup passphrase", confirm=True)
+            if not pw:
+                return
+            node_seed = None
+            try:
+                with open(os.path.join(data_dir(), "node.key")) as f:
+                    node_seed = f.read().strip()
+            except OSError:
+                pass
+            payload = {
+                "identitySeed": bytes(self.session.identity).hex(),
+                "nodeSeed": node_seed,
+                "screen": self.session.self_screen,
+                "pubkey": self.session.client.pubkey_hex,
+                "contacts": protocol.load_contacts(contacts_path()),
+            }
+            chooser = Gtk.FileChooserDialog(
+                title="Export backup", transient_for=self, action=Gtk.FileChooserAction.SAVE,
+                buttons=("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK))
+            chooser.set_current_name(f"aimless-backup-{datetime.now():%Y%m%d}.json")
+            resp = chooser.run()
+            path = chooser.get_filename()
+            chooser.destroy()
+            if resp != Gtk.ResponseType.OK or not path:
+                return
+            try:
+                keysmod.save_bundle(path, pw, payload)
+                bk_status.set_text(f"backup written to {path}")
+            except OSError as e:
+                bk_status.set_text(f"backup failed: {e}")
+
+        def import_backup(*_):
+            chooser = Gtk.FileChooserDialog(
+                title="Import backup", transient_for=self, action=Gtk.FileChooserAction.OPEN,
+                buttons=("Cancel", Gtk.ResponseType.CANCEL, "Open", Gtk.ResponseType.OK))
+            resp = chooser.run()
+            path = chooser.get_filename()
+            chooser.destroy()
+            if resp != Gtk.ResponseType.OK or not path:
+                return
+            pw = ask_secret(self, "Backup passphrase")
+            if not pw:
+                return
+            try:
+                data = keysmod.load_bundle(path, pw)
+                seed = bytes.fromhex(data.get("identitySeed", ""))
+                if len(seed) != 32:
+                    raise ValueError("missing identity seed")
+            except (ValueError, OSError, KeyError) as e:
+                bk_status.set_text(f"import failed: {e}")
+                return
+            addr = "?"
+            if data.get("nodeSeed"):
+                try:
+                    addr = keysmod.yggdrasil_address(
+                        keysmod.parse_node_key(data["nodeSeed"])[1])
+                except ValueError:
+                    addr = "?"
+            n = len([k for k in (data.get("contacts") or {}) if k != "_self"])
+            if not self._confirm(
+                    "Restore this backup?",
+                    f"identity {data.get('pubkey', '?')[:16]}…\nnode address {addr}\n"
+                    f"{n} contact(s)\n\nThis overwrites your current keys; restart aimless after."):
+                return
+            app_pw = self.app_ref.passphrase if self.app_ref else None
+            if not app_pw:
+                self._info_dialog("Passphrase unavailable",
+                                  "Reopen aimless to import a backup.")
+                return
+            crypto.save_identity(identity_path(), keysmod.signing_key(seed), app_pw)
+            if data.get("nodeSeed"):
+                keysmod.write_node_key(data_dir(), bytes.fromhex(data["nodeSeed"]))
+            if data.get("contacts"):
+                protocol.save_contacts(contacts_path(), data["contacts"])
+            self._daemon_restart()
+            self._info_dialog("Backup restored",
+                              "Quit and reopen aimless to use the restored identity.")
+
+        bbtn = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        eb = Gtk.Button(label="Export encrypted backup")
+        eb.connect("clicked", export_backup)
+        ib = Gtk.Button(label="Import backup")
+        ib.connect("clicked", import_backup)
+        bbtn.pack_start(eb, False, False, 0)
+        bbtn.pack_start(ib, False, False, 0)
+        bk.pack_start(bbtn, False, False, 0)
+
+        box.show_all()
+        dlg.run()
+        dlg.destroy()
+
     def on_delete(self, *_):
         self.save_geometry()
         if self.app_ref is not None and self.app_ref.tray is not None and self.app_ref.tray.is_embedded():
@@ -3251,9 +3531,45 @@ class AimlessWindow(Gtk.Window):
             env_note.get_style_context().add_class("muted")
             box.pack_start(env_note, False, False, 0)
 
+        box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+        keys_btn = Gtk.Button(label="Keys & identity…")
+        keys_btn.set_halign(Gtk.Align.START)
+        keys_btn.connect("clicked", lambda *_: self.on_keys())
+        box.pack_start(keys_btn, False, False, 0)
+
         box.show_all()
         dlg.run()
         dlg.destroy()
+
+
+def ask_secret(parent, title, confirm=False):
+    dlg = Gtk.Dialog(title=title, transient_for=parent, modal=True)
+    dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "OK", Gtk.ResponseType.OK)
+    dlg.set_default_response(Gtk.ResponseType.OK)
+    dlg.set_default_size(380, -1)
+    box = dlg.get_content_area()
+    box.set_spacing(8)
+    box.set_border_width(10)
+    lbl = Gtk.Label(label=title)
+    lbl.set_xalign(0.0)
+    box.add(lbl)
+    e1 = Gtk.Entry()
+    e1.set_visibility(False)
+    box.add(e1)
+    e2 = None
+    if confirm:
+        e2 = Gtk.Entry()
+        e2.set_visibility(False)
+        e2.set_placeholder_text("confirm")
+        box.add(e2)
+    box.show_all()
+    resp = dlg.run()
+    pw = e1.get_text()
+    conf = e2.get_text() if e2 is not None else pw
+    dlg.destroy()
+    if resp != Gtk.ResponseType.OK or not pw or pw != conf:
+        return None
+    return pw
 
 
 def ask_passphrase(parent):

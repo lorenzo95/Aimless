@@ -117,6 +117,24 @@ Open the header menu → **Preferences …**. Settings are stored in
   session (handy for the web-desktop container); no extra packages are needed —
   the monospace themes use the system's generic `monospace` family.
 
+## Keys & identity
+
+Header menu → **Keys & Identity …** (also linked from Preferences):
+
+- **Yggdrasil node key** — see your address, and set a specific node key by
+  pasting 64- or 128-hex (e.g. from a vanity generator), generate a random one,
+  or reset to default. The address is previewed before applying. Changing it
+  changes your address; the daemon restarts and anyone holding your old invite
+  must add you again.
+- **Client identity** — replace your encryption key by pasting a 64-hex seed.
+  This changes the key friends encrypt to and breaks existing conversations;
+  restart aimless afterwards.
+- **Backup & restore** — export/import one passphrase-encrypted bundle (client
+  identity seed, node key seed, screen name, contacts). Restoring overwrites
+  your current keys and restarts the daemon; restart aimless afterwards.
+
+Keys are written `0600` and atomically; seeds are never logged.
+
 ## Security model
 
 - **Identity** = client Ed25519 keypair (PyNaCl). Your invite string (`aimless1:<client-pk>:<node-pk>:<screen>`, keys base58-encoded) contains your client key (what buddies encrypt to) and your daemon's node key (where to route). The Yggdrasil address is derived from the node key — permanent, unspoofable.
