@@ -124,9 +124,12 @@ def test_store_outgoing_delivery_tracking(tmp_path):
     assert c.add_sent("conv", seqs, 100, "hi", delivery_keys={("n1", 5), ("n2", 6)}) is True
     mid = c.out_id(seqs)
     assert c.is_delivered(mid) is False
-    assert c.messages("conv")[0]["delivered"] is False
+    msg = c.messages("conv")[0]
+    assert (msg["delivery_total"], msg["delivered_count"], msg["delivered"]) == (2, 0, False)
     c.mark_delivered("n1", 5)
     assert c.is_delivered(mid) is False, "one recipient outstanding"
+    msg = c.messages("conv")[0]
+    assert (msg["delivery_total"], msg["delivered_count"], msg["delivered"]) == (2, 1, False)
     c.mark_delivered("n2", 6)
     assert c.is_delivered(mid) is True
     assert c.messages("conv")[0]["delivered"] is True

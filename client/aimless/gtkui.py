@@ -1236,13 +1236,21 @@ class MessagesView(Gtk.Box):
             style.add_class("aimless-bubble")
             style.add_class("aimless-bubble-out" if outgoing else "aimless-bubble-in")
             box.pack_start(bubble, False, False, 0)
-        if outgoing and msg is not None and not attachment and msg.get("delivered") is not None:
-            status = Gtk.Label()
-            status.set_xalign(1.0)
-            status.get_style_context().add_class("muted")
-            status.set_text("✓ delivered" if msg["delivered"] else "• sending…")
-            box.pack_start(status, False, False, 0)
-            self._bubble_status[msg["id"]] = status
+        if outgoing and msg is not None and not attachment:
+            total = msg.get("delivery_total")
+            if total:
+                acked = msg.get("delivered_count", 0)
+                status = Gtk.Label()
+                status.set_xalign(1.0)
+                status.get_style_context().add_class("muted")
+                if acked >= total:
+                    status.set_text("✓ delivered")
+                elif acked:
+                    status.set_text(f"• {acked}/{total} delivered")
+                else:
+                    status.set_text("• sending…")
+                box.pack_start(status, False, False, 0)
+                self._bubble_status[msg["id"]] = status
         if stamp:
             time_label = Gtk.Label(label=stamp)
             time_label.set_xalign(1.0 if outgoing else 0.0)
@@ -1304,10 +1312,10 @@ class MessagesView(Gtk.Box):
                                sender=None if m["dir"] == "out" else self._sender_label(thread, m),
                                attachment=m.get("attachment"), msg=m)
             if m["dir"] == "out" and m.get("attachment") and m.get("delivered") is not None:
-                total, _acked = store.delivery_progress(m["id"])
+                total, _done = store.delivery_members(m["id"])
                 if total:
                     row = self._append_status_row("")
-                    rec = {"row": row, "filename": m["text"], "total": total,
+                    rec = {"row": row, "filename": m["text"], "members_total": total,
                            "keys": set(store.undelivered(m["id"]))}
                     for k in rec["keys"]:
                         self._pending_files[k] = rec
@@ -1319,8 +1327,11 @@ class MessagesView(Gtk.Box):
         store = self.app.session.store
         store.add_sent(conv, seqs, ts, text, attachment, delivery_keys)
         mid = store.out_id(seqs)
+        total, done = store.delivery_members(mid)
         msg = {"id": mid, "dir": "out", "ts": ts, "text": text,
-               "attachment": attachment, "delivered": False}
+               "attachment": attachment,
+               "delivered": (done == total) if total else False,
+               "delivery_total": total or None, "delivered_count": done}
         self._maybe_date_divider(ts)
         self.append_bubble(True, text, ts, attachment=attachment, msg=msg)
         return mid
@@ -1818,14 +1829,14 @@ class MessagesView(Gtk.Box):
 
     def register_file_delivery(self, row, filename, keys):
         """Begin tracking delivery of a sent file. ``keys`` is the set of
-        (node, seq) chunk acks still outstanding; the daemon emits one acked
-        event per chunk across every recipient (rooms fan out per member)."""
-        keys = {k for k in keys if k[1]}
-        already = keys & self._acked_seen
-        keys = keys - already
-        rec = {"row": row, "filename": filename, "keys": keys,
-               "total": len(keys) + len(already)}
-        for k in keys:
+        (node, seq) chunk acks still outstanding; progress is reported per
+        recipient (a recipient is done when all their chunks are acked)."""
+        keys = {(n, int(s)) for n, s in keys if int(s)}
+        members_total = len({n for n, _ in keys})
+        pending = keys - (keys & self._acked_seen)
+        rec = {"row": row, "filename": filename, "keys": pending,
+               "members_total": members_total}
+        for k in pending:
             self._pending_files[k] = rec
         self._set_delivery_text(rec)
 
@@ -1848,18 +1859,25 @@ class MessagesView(Gtk.Box):
         if mid is not None:
             lbl = self._bubble_status.get(mid)
             if lbl is not None:
-                lbl.set_text("✓ delivered" if store.is_delivered(mid) else "• sending…")
+                total, done = store.delivery_members(mid)
+                if total and done >= total:
+                    lbl.set_text("✓ delivered")
+                elif total:
+                    lbl.set_text(f"• {done}/{total} delivered")
         return hit_file
 
     def _set_delivery_text(self, rec):
-        total = rec["total"]
-        outstanding = len(rec["keys"])
+        total = rec.get("members_total", 0)
+        left = len({n for n, _ in rec["keys"]})
+        done = total - left
         if total == 0:
             text = f"Sent {rec['filename']}"
-        elif outstanding == 0:
+        elif left == 0:
             text = f"Delivered {rec['filename']} ✓"
+        elif total == 1:
+            text = f"Sending {rec['filename']}…"
         else:
-            text = f"Waiting for delivery {rec['filename']} — {total - outstanding}/{total}"
+            text = f"Sending {rec['filename']} — {done}/{total} delivered"
         self._update_status_row(rec["row"], text)
 
     def incoming(self, ev):

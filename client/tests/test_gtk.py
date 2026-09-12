@@ -1100,15 +1100,16 @@ def test_gui_file_send_delivery_indicator(gtk_app):
     m = win.messages
 
     row = m._append_status_row("")
+    # n1 has two chunks, n2 has one: progress is per recipient (2 people).
     m.register_file_delivery(row, "big.bin", {("n1", 1), ("n1", 2), ("n2", 3)})
-    assert "Waiting for delivery" in row.get_child().get_text()
-    assert "0/3" in row.get_child().get_text()
+    assert "Sending big.bin" in row.get_child().get_text()
+    assert "0/2" in row.get_child().get_text()
 
     m.note_acked("n1", 1)
-    assert "1/3" in row.get_child().get_text()
-    m.note_acked("n2", 3)
-    assert "2/3" in row.get_child().get_text()
+    assert "0/2" in row.get_child().get_text(), "n1 still has a chunk outstanding"
     m.note_acked("n1", 2)
+    assert "1/2" in row.get_child().get_text(), "n1 fully delivered"
+    m.note_acked("n2", 3)
     text = row.get_child().get_text()
     assert "Delivered" in text and "big.bin" in text
 
@@ -1116,7 +1117,7 @@ def test_gui_file_send_delivery_indicator(gtk_app):
     m.note_acked("n9", 7)
     row2 = m._append_status_row("")
     m.register_file_delivery(row2, "race.bin", {("n9", 7), ("n9", 8)})
-    assert "1/2" in row2.get_child().get_text()
+    assert "Sending race.bin" in row2.get_child().get_text(), "one recipient outstanding"
     m.note_acked("n9", 8)
     assert "Delivered" in row2.get_child().get_text()
 
@@ -1831,3 +1832,18 @@ def test_on_map_applies_pending_geometry_once(gtk_app, monkeypatch):
     win._on_map()  # nothing pending now
     pump(0.2)
     assert applied == [], "geometry must not be re-applied on later map events"
+
+
+def test_group_text_shows_partial_delivery(gtk_app):
+    win = gtk_app["win"]
+    m = win.messages
+    conv = "roomx"
+    win.session.store.add_sent(conv, {"n1": 1, "n2": 2, "n3": 3}, 100, "hi all")
+    m._render_messages(conv, {"conv": conv})
+    m.note_acked("n1", 1)
+    m.note_acked("n2", 2)
+    texts = [lbl.get_text() for lbl in m._bubble_status.values()]
+    assert any("2/3" in t and "delivered" in t for t in texts), texts
+    m.note_acked("n3", 3)
+    texts = [lbl.get_text() for lbl in m._bubble_status.values()]
+    assert any(t.startswith("✓ delivered") for t in texts), texts

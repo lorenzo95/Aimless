@@ -248,6 +248,17 @@ class Store:
             (mid,)).fetchone()
         return row[0], row[1]
 
+    def delivery_members(self, mid: str):
+        """(recipients, fully-delivered recipients) for a message. A recipient
+        counts as delivered only once every chunk sent to them is acked — the
+        human-meaningful progress for a group file, rather than chunk counts."""
+        rows = self.conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(acked), 0) FROM deliveries "
+            "WHERE msg_id=? GROUP BY node", (mid,)).fetchall()
+        total = len(rows)
+        done = sum(1 for cnt, acked in rows if (acked or 0) == cnt)
+        return total, done
+
     def undelivered(self, mid: str):
         return [(n, s) for n, s in self.conn.execute(
             "SELECT node, seq FROM deliveries WHERE msg_id=? AND acked=0", (mid,))]
@@ -273,10 +284,13 @@ class Store:
         if not ids:
             return summary
         marks = ",".join("?" for _ in ids)
-        for mid, total, acked in self.conn.execute(
-                f"SELECT msg_id, COUNT(*), SUM(acked) FROM deliveries "
-                f"WHERE msg_id IN ({marks}) GROUP BY msg_id", ids):
-            summary[mid] = (total, acked)
+        # Summarise per recipient: a group file must read "1/3 delivered" (people)
+        # not "3/15" (chunks). A recipient is done when all their chunks acked.
+        for mid, _node, cnt, acked in self.conn.execute(
+                f"SELECT msg_id, node, COUNT(*), SUM(acked) FROM deliveries "
+                f"WHERE msg_id IN ({marks}) GROUP BY msg_id, node", ids):
+            total, done = summary.get(mid, (0, 0))
+            summary[mid] = (total + 1, done + (1 if (acked or 0) == cnt else 0))
         return summary
 
     def _row_to_msg(self, row, summary=None) -> dict:
@@ -288,9 +302,18 @@ class Store:
         }
         if direction == "out":
             s = (summary or {}).get(mid)
-            # None = untracked (legacy message): render no tick; False = in
-            # flight; True = every recipient chunk acked.
-            msg["delivered"] = None if s is None else (s[0] == s[1])
+            # None = untracked (legacy message): render no tick; otherwise carry
+            # progress so a group message shows "2/3 delivered" instead of a
+            # flat "sending" until every recipient acks.
+            if s is None:
+                msg["delivered"] = None
+                msg["delivery_total"] = None
+                msg["delivered_count"] = 0
+            else:
+                total, acked = s
+                msg["delivered"] = (acked == total)
+                msg["delivery_total"] = total
+                msg["delivered_count"] = acked
         return msg
 
     def messages(self, conv: str) -> list:
