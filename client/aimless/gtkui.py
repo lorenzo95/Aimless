@@ -3873,6 +3873,10 @@ class AimlessApp:
         if self.window:
             self.window.deiconify()
             self.window.present()
+            # Re-map can make the WM apply its own placement, and the debounced
+            # configure handler would then save that wrong spot. Re-assert the
+            # remembered geometry on every tray reopen.
+            self.window.restore_geometry()
             return
         if self._unlocking:
             return

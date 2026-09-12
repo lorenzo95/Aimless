@@ -1834,6 +1834,21 @@ def test_on_map_applies_pending_geometry_once(gtk_app, monkeypatch):
     assert applied == [], "geometry must not be re-applied on later map events"
 
 
+def test_tray_reopen_reapplies_saved_geometry(gtk_app, monkeypatch):
+    """Reopening from the tray must re-assert the remembered position: a remap
+    can let the WM re-place the window, and the debounced saver would then
+    persist that wrong spot."""
+    win = gtk_app["win"]
+    app = gtkui.AimlessApp.__new__(gtkui.AimlessApp)
+    app.window = win
+    calls = []
+    monkeypatch.setattr(win, "deiconify", lambda: calls.append("deiconify"))
+    monkeypatch.setattr(win, "present", lambda: calls.append("present"))
+    monkeypatch.setattr(win, "restore_geometry", lambda: calls.append("restore"))
+    app.open_window()
+    assert calls == ["deiconify", "present", "restore"]
+
+
 def test_group_text_shows_partial_delivery(gtk_app):
     win = gtk_app["win"]
     m = win.messages
