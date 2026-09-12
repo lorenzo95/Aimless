@@ -1900,6 +1900,28 @@ def test_no_hardcoded_colors_outside_palette():
         "every colour must live in THEMES; found a stray hardcoded hex")
 
 
+def test_away_banner_tinted_from_theme_accent():
+    """The banner background must be a warm tint of the theme's accent (so it
+    stands out in every palette), not the neutral per-theme ``away_bg``."""
+    for name, pal in gtkui.THEMES.items():
+        block = gtkui.build_css(pal).split(".aimless-away-banner {")[1].split("}")[0]
+        assert f"mix({pal['away_border']}, {pal['bg']}, 0.45)" in block, name
+        assert pal["away_bg"] not in block, f"{name}: neutral away_bg should not be used"
+
+
+def test_contacts_list_follows_theme():
+    """The contacts page's frames and buddy list must use palette colours; the
+    default GTK theme otherwise leaks through in every non-system theme."""
+    for name, pal in gtkui.THEMES.items():
+        css = gtkui.build_css(pal)
+        frame = css.split(".aimless-contacts frame {")[1].split("}")[0]
+        assert pal["surface"] in frame and pal["border"] in frame, name
+        assert ".aimless-contacts scrolledwindow," in css, name
+        assert ".aimless-contacts list," in css, name
+        row = css.split(".aimless-contacts row {")[1].split("}")[0]
+        assert pal["surface"] in row, name
+
+
 def test_theme_switch_and_env_override(gtk_app, monkeypatch):
     win = gtk_app["win"]
     gtkui.install_css_provider()

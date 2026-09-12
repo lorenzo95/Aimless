@@ -381,17 +381,38 @@ menuitem:hover {{ background-color: {C['button_active']}; }}
 .aimless-log textview text {{ background-color: {C['header']}; color: {C['log_text']}; }}
 
 .aimless-away-banner {{
-    background-color: {C['away_bg']};
+    background-color: mix({C['away_border']}, {C['bg']}, 0.45);
     border-top: 1px solid {C['away_border']};
     border-bottom: 1px solid {C['away_border']};
-    color: {C['away_text']};
+    color: {C['text']};
 }}
 .aimless-away-banner image {{ color: {C['away_icon']}; }}
+.aimless-away-banner button {{
+    background-image: none;
+    background-color: transparent;
+    border: 1px solid {C['away_border']};
+    color: {C['text']};
+}}
+.aimless-away-banner button:hover {{ background-color: alpha({C['away_border']}, 0.25); }}
 
 .aimless-route-bar {{ background-color: {C['header']}; border-top: 1px solid {C['sep']}; color: {C['muted2']}; }}
 .aimless-route-bar image {{ color: {C['muted2']}; }}
 
-.aimless-contacts frame {{ border-color: {C['border']}; }}
+.aimless-contacts frame {{
+    background-color: {C['surface']};
+    border: 1px solid {C['border']};
+    border-radius: 6px;
+}}
+.aimless-contacts frame > label {{
+    color: {C['muted2']};
+    background-color: {C['bg']};
+    padding: 0 4px;
+}}
+.aimless-contacts scrolledwindow,
+.aimless-contacts list,
+.aimless-contacts row {{ background-color: {C['surface']}; }}
+.aimless-contacts row:hover {{ background-color: {C['button_hover']}; }}
+.aimless-contacts row label {{ color: {C['text2']}; }}
 .aimless-muted {{ opacity: 0.55; }}
 
 .aimless-chip {{ padding: 2px 8px; margin: 1px; border-radius: 11px; background-color: {C['chip']}; }}
