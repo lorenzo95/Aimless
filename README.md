@@ -104,6 +104,10 @@ Open the header menu → **Preferences …**. Settings are stored in
 - **Desktop notifications for new messages** — libnotify (falling back to
   `notify-send`) when the window isn't focused; muted/blocked conversations stay
   quiet. The window title and tray tooltip show the total unread count.
+- **Notification sound** — Off, or a single/double/triple/long synthesised beep
+  (no audio files needed; `speaker-test` with `paplay`/display-bell fallbacks).
+  Independent of the pop-up toggle, with a **Test** button. `AIMLESS_SOUND`
+  overrides the saved choice for a session.
 - **Press Enter to send** — off means Ctrl+Enter sends and Enter inserts a
   newline.
 - **Timestamp format** — 24-hour or 12-hour.

@@ -439,6 +439,7 @@ def save_prefs(prefs):
 DEFAULT_PREFS = {
     "remember_position": True,
     "notifications": True,
+    "notification_sound": "single",
     "enter_to_send": True,
     "time_format": "24h",
     "theme": "system",           # used by the 0.8.3 theming work
@@ -531,6 +532,82 @@ def should_notify(window_visible, muted, blocked, prefs):
     if muted or blocked:
         return False
     return not window_visible
+
+
+# --- notification sounds (synthesised; no audio files shipped) ---------------
+# A short tone via speaker-test (as SimpleCal does), with paplay of a system
+# event file and the display bell as fallbacks. Everything is best-effort and
+# silent when there is no sound backend (e.g. in the container).
+
+SOUND_OPTIONS = ("off", "single", "double", "triple", "long")
+SOUND_MIN_GAP = 2.0
+_BEEP = "timeout {dur}s speaker-test -t sine -f 800 -l 1"
+_LAST_SOUND = [0.0]
+
+
+def sound_command(kind):
+    """The shell sequence for a sound option ("" for off/unknown). Pure."""
+    if kind not in SOUND_OPTIONS or kind == "off":
+        return ""
+    if kind == "long":
+        return _BEEP.format(dur="0.5")
+    parts = []
+    for i in range({"single": 1, "double": 2, "triple": 3}.get(kind, 0)):
+        if i:
+            parts.append("sleep 0.12")
+        parts.append(_BEEP.format(dur="0.2"))
+    return "; ".join(parts)
+
+
+def sound_enabled(prefs):
+    """Effective sound choice: AIMLESS_SOUND env overrides the saved pref."""
+    env = os.environ.get("AIMLESS_SOUND")
+    if env in SOUND_OPTIONS:
+        return env
+    kind = pref(prefs, "notification_sound")
+    return kind if kind in SOUND_OPTIONS else "single"
+
+
+def should_play_sound(window_visible, muted, blocked, prefs):
+    if muted or blocked or window_visible:
+        return False
+    return sound_enabled(prefs) != "off"
+
+
+def _run_beep(shell_cmd):
+    if shutil.which("speaker-test") and shell_cmd:
+        try:
+            subprocess.Popen(["bash", "-c", shell_cmd], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+            return
+        except OSError:
+            pass
+    if shutil.which("paplay"):
+        for path in ("/usr/share/sounds/freedesktop/stereo/message.oga",
+                     "/usr/share/sounds/freedesktop/stereo/bell.oga"):
+            if os.path.exists(path):
+                try:
+                    subprocess.Popen(["paplay", path], stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, start_new_session=True)
+                    return
+                except OSError:
+                    pass
+    try:
+        display = Gdk.Display.get_default()
+        if display is not None and hasattr(display, "beep"):
+            display.beep()
+    except Exception:
+        pass
+
+
+def play_notification_sound(kind, force=False):
+    if kind not in SOUND_OPTIONS or kind == "off":
+        return
+    now = time.monotonic()
+    if not force and now - _LAST_SOUND[0] < SOUND_MIN_GAP:
+        return
+    _LAST_SOUND[0] = now
+    _run_beep(sound_command(kind))
 
 
 def first_icon(*names):
@@ -2083,12 +2160,20 @@ class MessagesView(Gtk.Box):
         else:
             thread["unread"] += 1
         self.update_thread_row(conv)
+        visible, muted, blocked = self._alert_state(conv, node)
+        if should_notify(visible, muted, blocked, self.app.prefs):
+            notify_new_message(opened.get("screen") or node[:8], opened["text"])
+        if should_play_sound(visible, muted, blocked, self.app.prefs):
+            play_notification_sound(sound_enabled(self.app.prefs))
+
+    def _alert_state(self, conv, node):
+        """(visible, muted, blocked) for alerting on a message from ``node``."""
         visible = (self.app.is_active()
                    and self.app.stack.get_visible_child_name() == "messages"
-                   and self.selected is thread)
-        if should_notify(visible, session.cache.is_conversation_muted(conv),
-                         session.cache.is_muted(node), self.app.prefs):
-            notify_new_message(opened.get("screen") or node[:8], opened["text"])
+                   and self.selected is not None and self.selected.get("conv") == conv)
+        return (visible,
+                self.app.session.cache.is_conversation_muted(conv),
+                self.app.session.cache.is_muted(node))
 
     def _incoming_file(self, ev):
         node = ev.get("from")
@@ -2118,7 +2203,8 @@ class MessagesView(Gtk.Box):
             self._update_status_row(buf["row"], f"Receiving {chunk.get('filename') or 'file'} — {have}/{chunk['total']}")
             self._maybe_scroll()
         if have == buf["total"]:
-            if not self._finalize_attachment(conv, node, buf, ev.get("seq", 0), ev.get("ts", 0)):
+            if not self._finalize_attachment(conv, node, buf, ev.get("seq", 0), ev.get("ts", 0),
+                                              notify=True):
                 self._mark_file_failed(buf)
             del self._file_bufs[key]
 
@@ -2155,7 +2241,7 @@ class MessagesView(Gtk.Box):
         os.replace(tmp, path)
         return path
 
-    def _finalize_attachment(self, conv, node, buf, seq, ts):
+    def _finalize_attachment(self, conv, node, buf, seq, ts, notify=False):
         chunk = buf["meta"]
         rebuilt = protocol.reassemble_file(buf["chunks"], buf["total"])
         if rebuilt is None:
@@ -2181,6 +2267,13 @@ class MessagesView(Gtk.Box):
                 thread["unread"] += 1
             self.update_thread_row(conv)
         run_async(lambda: self.app.session.client.ack_attachment(node, chunk["transfer_id"]))
+        if notify:
+            visible, muted, blocked = self._alert_state(conv, node)
+            if should_notify(visible, muted, blocked, self.app.prefs):
+                notify_new_message(self._sender_label(self.threads.get(conv) or {}, {"sender": node})
+                                   or node[:8], f"file: {filename}")
+            if should_play_sound(visible, muted, blocked, self.app.prefs):
+                play_notification_sound(sound_enabled(self.app.prefs))
         return True
 
     def _process_fetched_transfer(self, node, tid, chunks):
@@ -3098,6 +3191,32 @@ class AimlessWindow(Gtk.Window):
                                                  self.activity.log("window position reset")))
         box.pack_start(reset_btn, False, False, 0)
         row("Desktop notifications for new messages", switch("notifications"))
+
+        snd = Gtk.ComboBoxText()
+        for value, label in (("off", "Off"), ("single", "Single beep"),
+                             ("double", "Double beep"), ("triple", "Triple beep"),
+                             ("long", "Long beep")):
+            snd.append(value, label)
+        snd.set_active_id(pref(self.prefs, "notification_sound"))
+
+        def on_snd(w):
+            self.prefs["notification_sound"] = w.get_active_id() or "single"
+            save_prefs(self.prefs)
+        snd.connect("changed", on_snd)
+        snd_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        snd_box.pack_start(snd, False, False, 0)
+        test_btn = Gtk.Button(label="Test")
+        test_btn.get_style_context().add_class("muted")
+        test_btn.connect("clicked", lambda *_: play_notification_sound(
+            sound_enabled(self.prefs), force=True))
+        snd_box.pack_start(test_btn, False, False, 0)
+        row("Notification sound", snd_box)
+        if os.environ.get("AIMLESS_SOUND"):
+            note = Gtk.Label(label="AIMLESS_SOUND is set and overrides this choice.")
+            note.set_xalign(0.0)
+            note.get_style_context().add_class("muted")
+            box.pack_start(note, False, False, 0)
+
         row("Press Enter to send (Shift+Enter for a new line)", switch("enter_to_send"))
 
         fmt = Gtk.ComboBoxText()

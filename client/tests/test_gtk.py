@@ -1903,3 +1903,56 @@ def test_theme_switch_and_env_override(gtk_app, monkeypatch):
 
 def test_detect_system_palette_returns_a_theme():
     assert gtkui.detect_system_palette() in ("dark", "latte")
+
+
+# --- 0.8.6 notification sounds ---------------------------------------------
+
+def test_sound_command_options():
+    assert gtkui.sound_command("off") == ""
+    assert gtkui.sound_command("bogus") == ""
+    assert gtkui.sound_command("single").count("speaker-test") == 1
+    assert gtkui.sound_command("double").count("speaker-test") == 2
+    assert gtkui.sound_command("triple").count("speaker-test") == 3
+    assert "0.5s" in gtkui.sound_command("long")
+
+
+def test_should_play_sound_gating():
+    p = {"notification_sound": "double"}
+    assert gtkui.should_play_sound(False, False, False, p) is True
+    assert gtkui.should_play_sound(True, False, False, p) is False, "visible conversation stays quiet"
+    assert gtkui.should_play_sound(False, True, False, p) is False, "muted stays quiet"
+    assert gtkui.should_play_sound(False, False, True, p) is False, "blocked stays quiet"
+    assert gtkui.should_play_sound(False, False, False, {"notification_sound": "off"}) is False
+
+
+def test_sound_env_override(monkeypatch):
+    monkeypatch.setenv("AIMLESS_SOUND", "triple")
+    assert gtkui.sound_enabled({"notification_sound": "off"}) == "triple", "env wins"
+    monkeypatch.setenv("AIMLESS_SOUND", "bogus")
+    assert gtkui.sound_enabled({"notification_sound": "off"}) == "off", "invalid env ignored"
+    monkeypatch.delenv("AIMLESS_SOUND")
+    assert gtkui.sound_enabled({"notification_sound": "double"}) == "double"
+
+
+def test_play_sound_throttle(gtk_app, monkeypatch):
+    played = []
+    monkeypatch.setattr(gtkui, "_run_beep", lambda cmd: played.append(cmd))
+    gtkui._LAST_SOUND[0] = 0.0
+    gtkui.play_notification_sound("single")
+    gtkui.play_notification_sound("single")
+    assert len(played) == 1, "a second alert within the gap is throttled"
+    gtkui.play_notification_sound("single", force=True)
+    assert len(played) == 2, "Test/forced sound bypasses the throttle"
+
+
+def test_incoming_message_plays_sound_when_hidden(gtk_app, monkeypatch):
+    win = gtk_app["win"]
+    bob = gtk_app["bob"]
+    a_node = gtk_app["a_node"]
+    played = []
+    monkeypatch.setattr(gtkui, "play_notification_sound", lambda kind, force=False: played.append(kind))
+    monkeypatch.setattr(gtkui, "notify_new_message", lambda *a, **k: None)
+    win.prefs["notification_sound"] = "single"
+    win.messages.selected = None  # conversation not showing
+    bob.send(win.session.client.pubkey_hex, a_node, "ping", int(time.time() * 1000))
+    assert _pump(win, lambda: bool(played), timeout=30), "a hidden incoming message must beep"
