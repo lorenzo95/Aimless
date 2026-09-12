@@ -191,7 +191,7 @@ def test_gui_unread_badge_and_activity_log(gtk_app):
     assert _pump(win, unread_badge, timeout=30), "unread never incremented"
 
 
-def test_gui_contacts_add_remove_and_self_guard(gtk_app):
+def test_gui_contacts_add_remove_and_self_guard(gtk_app, monkeypatch):
     app = gtk_app
     win = app["win"]
     contacts_path = str(app["home"] / "client-contacts.json")
@@ -221,6 +221,12 @@ def test_gui_contacts_add_remove_and_self_guard(gtk_app):
     contacts = protocol.load_contacts(contacts_path)
     assert "Alice" not in contacts
 
+    # Remove now confirms: declining keeps the contact, accepting removes it.
+    monkeypatch.setattr(contacts_view, "_confirm_remove", lambda petname: False)
+    contacts_view.on_remove(None, "Carol")
+    assert "Carol" in protocol.load_contacts(contacts_path), "declined remove must keep the contact"
+
+    monkeypatch.setattr(contacts_view, "_confirm_remove", lambda petname: True)
     contacts_view.on_remove(None, "Carol")
     contacts = protocol.load_contacts(contacts_path)
     assert "Carol" not in contacts
@@ -1707,3 +1713,90 @@ def test_on_link_activated_launches_and_logs(gtk_app, monkeypatch):
     buf = win.activity.log_view.get_buffer()
     start, end = buf.get_bounds()
     assert "no default handler" in buf.get_text(start, end, False)
+
+
+# --- 0.8.2 UX helpers -------------------------------------------------------
+
+def test_clamp_to_workarea():
+    areas = [(0, 0, 1920, 1080), (1920, 0, 1920, 1080)]
+    assert gtkui.clamp_to_workarea(100, 100, 800, 600, areas) == (100, 100)
+    assert gtkui.clamp_to_workarea(2000, 200, 800, 600, areas) == (2000, 200), "second monitor kept"
+    x, y = gtkui.clamp_to_workarea(9000, 9000, 800, 600, areas)
+    assert 0 <= x <= 1920 and 0 <= y <= 1080, "off-screen window clamped on-screen"
+    assert gtkui.clamp_to_workarea(5, 5, 800, 600, []) == (5, 5), "no monitors = unchanged"
+
+
+def test_date_label_and_format_time():
+    import datetime as _dt
+    now = _dt.datetime(2024, 5, 10, 12, 0, 0)
+    ts = lambda d: d.timestamp() * 1000
+    assert gtkui.date_label(ts(_dt.datetime(2024, 5, 10, 9, 0)), now) == "Today"
+    assert gtkui.date_label(ts(_dt.datetime(2024, 5, 9, 9, 0)), now) == "Yesterday"
+    assert "2023" in gtkui.date_label(ts(_dt.datetime(2023, 1, 2, 9, 0)), now)
+    t = 1700000000000
+    assert ":" in gtkui.format_time(t, "24h")
+    assert gtkui.format_time(t, "12h").upper().endswith(("AM", "PM"))
+
+
+def test_should_notify_gating():
+    p = {"notifications": True}
+    assert gtkui.should_notify(False, False, False, p) is True
+    assert gtkui.should_notify(True, False, False, p) is False, "focused window stays quiet"
+    assert gtkui.should_notify(False, True, False, p) is False, "muted conversation stays quiet"
+    assert gtkui.should_notify(False, False, True, p) is False, "blocked sender stays quiet"
+    assert gtkui.should_notify(False, False, False, {"notifications": False}) is False
+
+
+def test_near_bottom(gtk_app):
+    m = gtk_app["win"].messages
+    adj = m.conversation_scroll.get_vadjustment()
+    adj.set_value(adj.get_upper() - adj.get_page_size())
+    assert m._near_bottom(adj) is True
+    if adj.get_upper() > adj.get_page_size() + 100:
+        adj.set_value(0)
+        assert m._near_bottom(adj) is False
+
+
+def test_unread_indicator_title(gtk_app):
+    win = gtk_app["win"]
+    win.messages.threads["x"] = {"unread": 3}
+    win.refresh_unread_indicator()
+    assert "(3)" in win.get_title()
+    win.messages.threads["x"]["unread"] = 0
+    win.refresh_unread_indicator()
+    assert "(" not in win.get_title()
+
+
+def test_outgoing_text_delivery_tick(gtk_app):
+    win = gtk_app["win"]
+    m = win.messages
+    conv = "n1"
+    win.session.store.add_sent(conv, {conv: 7}, 100, "hi")
+    m._render_messages(conv, {"conv": conv})
+    assert any("sending" in lbl.get_text() for lbl in m._bubble_status.values())
+    m.note_acked(conv, 7)
+    assert any("delivered" in lbl.get_text() for lbl in m._bubble_status.values())
+
+
+def test_attachment_open_button(gtk_app, tmp_path):
+    win = gtk_app["win"]
+    p = tmp_path / "a.txt"
+    p.write_bytes(b"hi")
+    box = Gtk.Box()
+    win.messages._render_attachment_box(
+        box, True, {"path": str(p), "filename": "a.txt", "mime_hint": "application", "size": 2})
+    labels = [b.get_label() for b in box.get_children() if isinstance(b, Gtk.Button)]
+    assert "Open" in labels and "Save" in labels
+
+
+def test_window_geometry_saves(gtk_app):
+    win = gtk_app["win"]
+    win.prefs["remember_position"] = True
+    win.resize(701, 502)
+    pump(0.2)
+    w, h = win.get_size()
+    win.save_geometry()
+    assert (win.prefs["window_width"], win.prefs["window_height"]) == (w, h)
+    assert (w, h) != (0, 0)
+    win.reset_geometry()
+    assert "window_x" not in win.prefs and "window_maximized" not in win.prefs

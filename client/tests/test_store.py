@@ -118,6 +118,41 @@ def test_store_blocked_screen_roundtrip(tmp_path):
     assert c3.blocked_screen(node) is None, "cleared blocked screen must stay cleared"
 
 
+def test_store_outgoing_delivery_tracking(tmp_path):
+    c = Store(str(tmp_path / "state.db"), "pw")
+    seqs = {"n1": 5, "n2": 6}
+    assert c.add_sent("conv", seqs, 100, "hi", delivery_keys={("n1", 5), ("n2", 6)}) is True
+    mid = c.out_id(seqs)
+    assert c.is_delivered(mid) is False
+    assert c.messages("conv")[0]["delivered"] is False
+    c.mark_delivered("n1", 5)
+    assert c.is_delivered(mid) is False, "one recipient outstanding"
+    c.mark_delivered("n2", 6)
+    assert c.is_delivered(mid) is True
+    assert c.messages("conv")[0]["delivered"] is True
+
+
+def test_store_file_delivery_spans_all_chunks(tmp_path):
+    c = Store(str(tmp_path / "state.db"), "pw")
+    seqs = {"n1": 9}  # message identity is the last chunk's seq
+    keys = {("n1", 1), ("n1", 2), ("n1", 9)}
+    c.add_sent("conv", seqs, 100, "file.bin", delivery_keys=keys)
+    mid = c.out_id(seqs)
+    assert c.is_delivered(mid) is False
+    for s in (1, 2, 9):
+        c.mark_delivered("n1", s)
+    assert c.is_delivered(mid) is True
+
+
+def test_store_legacy_outgoing_has_no_tick(tmp_path):
+    c = Store(str(tmp_path / "state.db"), "pw")
+    c.conn.execute(
+        "INSERT INTO messages(id, conv, sender, dir, ts, seqs, text) "
+        "VALUES('out:x','c','self','out',1,'{}',NULL)")
+    c.conn.commit()
+    assert c.messages("c")[0]["delivered"] is None, "untracked legacy message renders no tick"
+
+
 def test_room_id_order_independent():
     from aimless import protocol
     assert protocol.room_id(["aa", "bb", "cc"]) == protocol.room_id(["cc", "aa", "bb"])

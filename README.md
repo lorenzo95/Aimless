@@ -93,6 +93,21 @@ public host, put it behind a TLS reverse proxy with auth or an SSH tunnel —
 and **change `VNC_PASS`** (`aimless` is only the default; whoever can reach the
 page gets your desktop with it).
 
+## Preferences
+
+Open the header menu → **Preferences …**. Settings are stored in
+`~/.config/aimless/gtk.json` and apply immediately:
+
+- **Remember window position and size** — reopens where you left it (with an
+  off-screen guard for monitor changes; best-effort on Wayland). *Reset window
+  position* clears it.
+- **Desktop notifications for new messages** — libnotify (falling back to
+  `notify-send`) when the window isn't focused; muted/blocked conversations stay
+  quiet. The window title and tray tooltip show the total unread count.
+- **Press Enter to send** — off means Ctrl+Enter sends and Enter inserts a
+  newline.
+- **Timestamp format** — 24-hour or 12-hour.
+
 ## Security model
 
 - **Identity** = client Ed25519 keypair (PyNaCl). Your invite string (`aimless1:<client-pk>:<node-pk>:<screen>`, keys base58-encoded) contains your client key (what buddies encrypt to) and your daemon's node key (where to route). The Yggdrasil address is derived from the node key — permanent, unspoofable.

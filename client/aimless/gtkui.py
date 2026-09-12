@@ -23,7 +23,7 @@ import threading
 import traceback
 import time
 import warnings
-from datetime import datetime
+from datetime import datetime, timedelta
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -284,6 +284,103 @@ def save_prefs(prefs):
     os.makedirs(CONFIG_DIR, exist_ok=True)
     with open(prefs_file(), "w") as f:
         json.dump(prefs, f, indent=2)
+
+
+DEFAULT_PREFS = {
+    "remember_position": True,
+    "notifications": True,
+    "enter_to_send": True,
+    "time_format": "24h",
+    "theme": "system",           # used by the 0.8.3 theming work
+    "seen_onboarding": False,
+}
+
+
+def pref(prefs, key):
+    return prefs.get(key, DEFAULT_PREFS.get(key))
+
+
+def format_time(ts, time_format="24h"):
+    dt = datetime.fromtimestamp(ts / 1000)
+    if time_format == "12h":
+        return dt.strftime("%I:%M %p").lstrip("0")
+    return dt.strftime("%H:%M")
+
+
+def date_label(ts, now=None):
+    """Divider label for a message timestamp: Today / Yesterday / date."""
+    day = datetime.fromtimestamp(ts / 1000).date()
+    today = (now or datetime.now()).date()
+    if day == today:
+        return "Today"
+    if day == today - timedelta(days=1):
+        return "Yesterday"
+    if day.year == today.year:
+        return day.strftime("%A, %d %b")
+    return day.strftime("%d %b %Y")
+
+
+def clamp_to_workarea(x, y, w, h, areas, margin=40):
+    """Nudge a saved top-left so some of the window is visible.
+
+    ``areas`` is an iterable of monitor workareas (ax, ay, aw, ah). If the point
+    already lands on a monitor it is kept; otherwise it is clamped into the
+    first (primary) workarea so a window closed on a since-removed monitor
+    reopens on-screen."""
+    areas = list(areas)
+    if not areas:
+        return x, y
+    for ax, ay, aw, ah in areas:
+        if (ax - w + margin <= x <= ax + aw - margin
+                and ay - h + margin <= y <= ay + ah - margin):
+            return x, y
+    ax, ay, aw, ah = areas[0]
+    return (min(max(x, ax), ax + max(0, aw - w)),
+            min(max(y, ay), ay + max(0, ah - h)))
+
+
+# --- desktop notifications (best-effort) ------------------------------------
+# libnotify bindings if present, else notify-send, else silently nothing.
+_NOTIFY = {"ready": None, "mod": None}
+
+
+def _notify_init():
+    if _NOTIFY["ready"] is not None:
+        return _NOTIFY["ready"]
+    _NOTIFY["ready"] = False
+    try:
+        import gi
+        gi.require_version("Notify", "0.7")
+        from gi.repository import Notify
+        Notify.init(APP_NAME)
+        _NOTIFY["mod"] = Notify
+        _NOTIFY["ready"] = True
+    except Exception:
+        _NOTIFY["mod"] = None
+    return _NOTIFY["ready"]
+
+
+def notify_new_message(sender, text):
+    body = (text or "")[:200]
+    if _notify_init():
+        try:
+            _NOTIFY["mod"].Notification.new(sender, body, "mail-unread").show()
+            return
+        except Exception:
+            pass
+    if shutil.which("notify-send"):
+        try:
+            subprocess.Popen(["notify-send", "--app-name", APP_NAME, sender, body])
+        except Exception:
+            pass
+
+
+def should_notify(window_visible, muted, blocked, prefs):
+    if not pref(prefs, "notifications"):
+        return False
+    if muted or blocked:
+        return False
+    return not window_visible
 
 
 def first_icon(*names):
@@ -596,6 +693,9 @@ class MessagesView(Gtk.Box):
         # still being enqueued is not lost.
         self._pending_files = {}
         self._acked_seen = set()
+        self._bubble_status = {}   # outgoing message id -> status Gtk.Label
+        self._last_msg_date = None
+        self._at_bottom = True
 
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
 
@@ -631,6 +731,18 @@ class MessagesView(Gtk.Box):
         self.thread_scroll.add(self.thread_list)
         sidebar.pack_start(self.thread_scroll, True, True, 0)
 
+        self.sidebar_empty = Gtk.Label(
+            label="No conversations yet.\nAdd a buddy in Contacts and share your invite.")
+        self.sidebar_empty.set_xalign(0.0)
+        self.sidebar_empty.set_line_wrap(True)
+        self.sidebar_empty.set_margin_start(10)
+        self.sidebar_empty.set_margin_end(10)
+        self.sidebar_empty.set_margin_top(8)
+        self.sidebar_empty.set_margin_bottom(10)
+        self.sidebar_empty.get_style_context().add_class("muted")
+        self.sidebar_empty.set_no_show_all(True)
+        sidebar.pack_start(self.sidebar_empty, False, False, 0)
+
         paned.pack1(sidebar, False, False)
         paned.set_position(240)
 
@@ -643,8 +755,14 @@ class MessagesView(Gtk.Box):
             first_icon("mail-unread-symbolic", "dialog-information-symbolic"), Gtk.IconSize.DIALOG)
         ph_label = Gtk.Label(label="Select a conversation")
         ph_label.get_style_context().add_class("muted")
+        ph_hint = Gtk.Label(label="Add a buddy in Contacts and share your invite to start chatting.")
+        ph_hint.get_style_context().add_class("muted")
+        ph_hint.set_justify(Gtk.Justification.CENTER)
+        ph_hint.set_line_wrap(True)
+        ph_hint.set_max_width_chars(40)
         placeholder.pack_start(ph_icon, False, False, 0)
         placeholder.pack_start(ph_label, False, False, 0)
+        placeholder.pack_start(ph_hint, False, False, 0)
         self.stack.add_titled(placeholder, "placeholder", "placeholder")
 
         conversation_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -700,6 +818,16 @@ class MessagesView(Gtk.Box):
         self.conversation.set_selection_mode(Gtk.SelectionMode.NONE)
         self.conversation_scroll.add(self.conversation)
         conversation_box.pack_start(self.conversation_scroll, True, True, 0)
+
+        self.jump_btn = Gtk.Button(label="↓ New messages")
+        self.jump_btn.set_halign(Gtk.Align.CENTER)
+        self.jump_btn.set_valign(Gtk.Align.END)
+        self.jump_btn.set_margin_bottom(6)
+        self.jump_btn.set_no_show_all(True)
+        self.jump_btn.get_style_context().add_class("aimless-jump")
+        self.jump_btn.connect("clicked", lambda *_: self.jump_to_bottom())
+        conversation_box.pack_start(self.jump_btn, False, False, 0)
+        self.conversation_scroll.get_vadjustment().connect("value-changed", self._on_scrolled)
 
         composer_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         composer_box.set_border_width(8)
@@ -788,6 +916,10 @@ class MessagesView(Gtk.Box):
             row = self.selected.get("row")
             if row:
                 self.thread_list.select_row(row)
+        if self.threads:
+            self.sidebar_empty.hide()
+        else:
+            self.sidebar_empty.show()
 
     def on_new_room(self, *_):
         contacts = self.app.session.contacts()
@@ -940,6 +1072,7 @@ class MessagesView(Gtk.Box):
         elif thread["unread"] == 0 and w["badge"]:
             w["badge"].destroy()
             w["badge"] = None
+        self.app.refresh_unread_indicator()
 
     def catchup_unread(self):
         """Startup sweep: route everything the daemon journaled while no client
@@ -1016,13 +1149,8 @@ class MessagesView(Gtk.Box):
             self.conversation_header.set_markup(
                 f"<big><b>{GLib.markup_escape_text(thread['screen'])}</b></big>"
                 f"  <span size='small' foreground='#8c8c8c'>{conv[:16]}…</span>")
-        clear_children(self.conversation)
-        for m in sorted(self.app.session.cache.msgs(conv), key=lambda m: (m["ts"], min(m["seqs"].values()))):
-            self.append_bubble(m["dir"] == "out", m["text"], m["ts"],
-                               sender=None if m["dir"] == "out" else self._sender_label(thread, m),
-                               attachment=m.get("attachment"))
+        self._render_messages(conv, thread)
         self.stack.set_visible_child_name("conversation")
-        scroll_to_bottom(self.conversation_scroll)
         self.load_history_async(conv)
 
     def _sender_label(self, thread, m):
@@ -1065,13 +1193,7 @@ class MessagesView(Gtk.Box):
     def _history_loaded(self, conv):
         if self.selected is None or self.selected.get("conv") != conv:
             return False
-        thread = self.selected
-        clear_children(self.conversation)
-        for m in self.app.session.store.messages(conv):
-            self.append_bubble(m["dir"] == "out", m["text"], m["ts"],
-                               sender=None if m["dir"] == "out" else self._sender_label(thread, m),
-                               attachment=m.get("attachment"))
-        scroll_to_bottom(self.conversation_scroll)
+        self._render_messages(conv, self.selected)
         return False
 
     def refresh_conversation(self, conv):
@@ -1084,8 +1206,8 @@ class MessagesView(Gtk.Box):
         self.append_system_note(f"history unavailable: {e}")
         return False
 
-    def append_bubble(self, outgoing, text, ts, sender=None, attachment=None):
-        stamp = datetime.fromtimestamp(ts / 1000).strftime("%H:%M") if ts else ""
+    def append_bubble(self, outgoing, text, ts, sender=None, attachment=None, msg=None):
+        stamp = format_time(ts, pref(self.app.prefs, "time_format")) if ts else ""
         row = Gtk.ListBoxRow()
         row.set_selectable(False)
         row.set_activatable(False)
@@ -1114,6 +1236,13 @@ class MessagesView(Gtk.Box):
             style.add_class("aimless-bubble")
             style.add_class("aimless-bubble-out" if outgoing else "aimless-bubble-in")
             box.pack_start(bubble, False, False, 0)
+        if outgoing and msg is not None and not attachment and msg.get("delivered") is not None:
+            status = Gtk.Label()
+            status.set_xalign(1.0)
+            status.get_style_context().add_class("muted")
+            status.set_text("✓ delivered" if msg["delivered"] else "• sending…")
+            box.pack_start(status, False, False, 0)
+            self._bubble_status[msg["id"]] = status
         if stamp:
             time_label = Gtk.Label(label=stamp)
             time_label.set_xalign(1.0 if outgoing else 0.0)
@@ -1122,6 +1251,79 @@ class MessagesView(Gtk.Box):
         row.add(box)
         self.conversation.add(row)
         row.show_all()
+
+    # -- scrolling / date dividers ----------------------------------------
+    def _on_scrolled(self, adj):
+        self._at_bottom = self._near_bottom(adj)
+        if self._at_bottom:
+            self.jump_btn.hide()
+
+    def _near_bottom(self, adj, margin=40):
+        try:
+            return adj.get_value() >= adj.get_upper() - adj.get_page_size() - margin
+        except Exception:
+            return True
+
+    def jump_to_bottom(self):
+        self.jump_btn.hide()
+        self._at_bottom = True
+        scroll_to_bottom(self.conversation_scroll)
+
+    def _maybe_scroll(self):
+        if self._at_bottom:
+            scroll_to_bottom(self.conversation_scroll)
+        else:
+            self.jump_btn.show()
+
+    def _maybe_date_divider(self, ts):
+        day = datetime.fromtimestamp(ts / 1000).date()
+        if day == self._last_msg_date:
+            return
+        self._last_msg_date = day
+        self.append_date_divider(date_label(ts))
+
+    def append_date_divider(self, text):
+        row = Gtk.ListBoxRow()
+        row.set_selectable(False)
+        row.set_activatable(False)
+        lbl = Gtk.Label(label=text)
+        lbl.set_xalign(0.5)
+        lbl.get_style_context().add_class("muted")
+        row.add(lbl)
+        self.conversation.add(row)
+        row.show_all()
+
+    def _render_messages(self, conv, thread):
+        clear_children(self.conversation)
+        self._bubble_status = {}
+        self._last_msg_date = None
+        store = self.app.session.store
+        for m in store.messages(conv):
+            self._maybe_date_divider(m["ts"])
+            self.append_bubble(m["dir"] == "out", m["text"], m["ts"],
+                               sender=None if m["dir"] == "out" else self._sender_label(thread, m),
+                               attachment=m.get("attachment"), msg=m)
+            if m["dir"] == "out" and m.get("attachment") and m.get("delivered") is not None:
+                total, _acked = store.delivery_progress(m["id"])
+                if total:
+                    row = self._append_status_row("")
+                    rec = {"row": row, "filename": m["text"], "total": total,
+                           "keys": set(store.undelivered(m["id"]))}
+                    for k in rec["keys"]:
+                        self._pending_files[k] = rec
+                    self._set_delivery_text(rec)
+        self._at_bottom = True
+        scroll_to_bottom(self.conversation_scroll)
+
+    def _append_outgoing(self, conv, seqs, ts, text, attachment=None, delivery_keys=None):
+        store = self.app.session.store
+        store.add_sent(conv, seqs, ts, text, attachment, delivery_keys)
+        mid = store.out_id(seqs)
+        msg = {"id": mid, "dir": "out", "ts": ts, "text": text,
+               "attachment": attachment, "delivered": False}
+        self._maybe_date_divider(ts)
+        self.append_bubble(True, text, ts, attachment=attachment, msg=msg)
+        return mid
 
     def on_link_activated(self, label, uri):
         try:
@@ -1157,15 +1359,34 @@ class MessagesView(Gtk.Box):
         size_lbl.set_xalign(0.0)
         size_lbl.get_style_context().add_class("muted")
         box.pack_start(size_lbl, False, False, 0)
+        if os.path.exists(path):
+            openb = Gtk.Button(label="Open")
+            openb.set_relief(Gtk.ReliefStyle.NONE)
+            openb.get_style_context().add_class("muted")
+            openb.connect("clicked", self.on_open_attachment, path)
+            box.pack_start(openb, False, False, 0)
         save = Gtk.Button(label="Save")
         save.set_relief(Gtk.ReliefStyle.NONE)
         save.get_style_context().add_class("muted")
         save.connect("clicked", self.on_save_attachment, path, filename)
         box.pack_start(save, False, False, 0)
 
+    def on_open_attachment(self, _btn, path):
+        try:
+            Gio.AppInfo.launch_default_for_uri(GLib.filename_to_uri(path, None), None)
+        except (GLib.Error, OSError) as e:
+            self.app.activity.log(f"couldn't open file: {e}")
+
     def on_expand_image(self, _w, _ev, path, filename):
         win = Gtk.Window(title=filename)
         win.set_default_size(900, 700)
+        hb = Gtk.HeaderBar()
+        hb.set_show_close_button(True)
+        hb.set_title(filename)
+        save = Gtk.Button(label="Save")
+        save.connect("clicked", lambda *_: self.on_save_attachment(None, path, filename))
+        hb.pack_end(save)
+        win.set_titlebar(hb)
         sc = Gtk.ScrolledWindow()
         win.add(sc)
         try:
@@ -1174,6 +1395,13 @@ class MessagesView(Gtk.Box):
             sc.add(img)
         except GLib.Error:
             pass
+
+        def on_key(w, e):
+            if e.keyval == Gdk.KEY_Escape:
+                w.close()
+                return True
+            return False
+        win.connect("key-press-event", on_key)
         win.show_all()
         return False
 
@@ -1205,7 +1433,7 @@ class MessagesView(Gtk.Box):
         row.add(note)
         self.conversation.add(row)
         row.show_all()
-        scroll_to_bottom(self.conversation_scroll)
+        self._maybe_scroll()
 
     def _confirm_clear(self, title):
         dlg = Gtk.MessageDialog(transient_for=self.get_toplevel(), modal=True,
@@ -1419,7 +1647,12 @@ class MessagesView(Gtk.Box):
         return resp == Gtk.ResponseType.OK
 
     def on_composer_key(self, widget, event):
-        if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and not (event.state & Gdk.ModifierType.SHIFT_MASK):
+        if event.keyval not in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            return False
+        shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
+        ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
+        enter_sends = pref(self.app.prefs, "enter_to_send")
+        if (enter_sends and not shift) or (not enter_sends and ctrl):
             self.send_message()
             return True
         return False
@@ -1450,11 +1683,10 @@ class MessagesView(Gtk.Box):
             def done(seqs):
                 self._send_in_flight = False
                 self.send_button.set_sensitive(True)
-                self.app.session.cache.add_sent(conv, seqs, ts, text)
-                self.append_bubble(True, text, ts)
+                self._append_outgoing(conv, seqs, ts, text)
                 self.selected["preview"] = text
                 self.update_thread_row(conv)
-                scroll_to_bottom(self.conversation_scroll)
+                self._maybe_scroll()
         else:
             contact = thread["contact"]
 
@@ -1464,11 +1696,10 @@ class MessagesView(Gtk.Box):
             def done(resp):
                 self._send_in_flight = False
                 self.send_button.set_sensitive(True)
-                self.app.session.cache.add_sent(conv, {contact["node"]: resp.get("seq", 0)}, ts, text)
-                self.append_bubble(True, text, ts)
+                self._append_outgoing(conv, {contact["node"]: resp.get("seq", 0)}, ts, text)
                 self.selected["preview"] = text
                 self.update_thread_row(conv)
-                scroll_to_bottom(self.conversation_scroll)
+                self._maybe_scroll()
 
         def fail(e):
             self._send_in_flight = False
@@ -1566,8 +1797,8 @@ class MessagesView(Gtk.Box):
             if row is not None:
                 row.destroy()
             ts = int(time.time() * 1000)
-            self.append_bubble(True, filename, ts, attachment=attachment)
-            session.cache.add_sent(conv, seqs, ts, filename, attachment=attachment)
+            self._append_outgoing(conv, seqs, ts, filename, attachment=attachment,
+                                  delivery_keys=expected)
             if thread is self.selected:
                 thread["preview"] = filename
                 self.update_thread_row(conv)
@@ -1576,7 +1807,7 @@ class MessagesView(Gtk.Box):
             # progress instead of the file silently vanishing into the queue.
             deliver_row = self._append_status_row("")
             self.register_file_delivery(deliver_row, filename, expected)
-            scroll_to_bottom(self.conversation_scroll)
+            self._maybe_scroll()
 
         def fail(e):
             if row is not None:
@@ -1606,12 +1837,19 @@ class MessagesView(Gtk.Box):
         self._acked_seen.add(key)
         if len(self._acked_seen) > 4096:
             self._acked_seen.clear()
+        store = self.app.session.store
+        mid = store.mark_delivered(node, seq)
+        hit_file = False
         rec = self._pending_files.pop(key, None)
-        if rec is None:
-            return False
-        rec["keys"].discard(key)
-        self._set_delivery_text(rec)
-        return True
+        if rec is not None:
+            rec["keys"].discard(key)
+            self._set_delivery_text(rec)
+            hit_file = True
+        if mid is not None:
+            lbl = self._bubble_status.get(mid)
+            if lbl is not None:
+                lbl.set_text("✓ delivered" if store.is_delivered(mid) else "• sending…")
+        return hit_file
 
     def _set_delivery_text(self, rec):
         total = rec["total"]
@@ -1648,7 +1886,7 @@ class MessagesView(Gtk.Box):
             if self.selected is thread and thread is not None:
                 self.append_bubble(False, opened["text"], opened["ts"],
                                    sender=self._sender_label(thread, {"sender": node}))
-                scroll_to_bottom(self.conversation_scroll)
+                self._maybe_scroll()
             return
         contact_nodes = {info["node"] for info in session.contacts().values()}
         if node not in contact_nodes:
@@ -1673,10 +1911,16 @@ class MessagesView(Gtk.Box):
         if self.selected is thread:
             self.append_bubble(False, opened["text"], opened["ts"],
                                sender=self._sender_label(thread, {"sender": node}))
-            scroll_to_bottom(self.conversation_scroll)
+            self._maybe_scroll()
         else:
             thread["unread"] += 1
         self.update_thread_row(conv)
+        visible = (self.app.is_active()
+                   and self.app.stack.get_visible_child_name() == "messages"
+                   and self.selected is thread)
+        if should_notify(visible, session.cache.is_conversation_muted(conv),
+                         session.cache.is_muted(node), self.app.prefs):
+            notify_new_message(opened.get("screen") or node[:8], opened["text"])
 
     def _incoming_file(self, ev):
         node = ev.get("from")
@@ -1704,7 +1948,7 @@ class MessagesView(Gtk.Box):
         have = len(buf["chunks"])
         if buf["row"] is not None:
             self._update_status_row(buf["row"], f"Receiving {chunk.get('filename') or 'file'} — {have}/{chunk['total']}")
-            scroll_to_bottom(self.conversation_scroll)
+            self._maybe_scroll()
         if have == buf["total"]:
             if not self._finalize_attachment(conv, node, buf, ev.get("seq", 0), ev.get("ts", 0)):
                 self._mark_file_failed(buf)
@@ -1764,7 +2008,7 @@ class MessagesView(Gtk.Box):
                 self.append_bubble(False, filename, ts,
                                    sender=self._sender_label(thread, {"sender": node}),
                                    attachment=attachment)
-                scroll_to_bottom(self.conversation_scroll)
+                self._maybe_scroll()
             else:
                 thread["unread"] += 1
             self.update_thread_row(conv)
@@ -2038,7 +2282,22 @@ class ContactsView(Gtk.Box):
         self.refresh()
         self.app.messages.sync_sidebar()
 
+    def _confirm_remove(self, petname):
+        dlg = Gtk.MessageDialog(transient_for=self.get_toplevel(), modal=True,
+                                message_type=Gtk.MessageType.WARNING,
+                                text=f"Remove {petname}?",
+                                buttons=Gtk.ButtonsType.OK_CANCEL)
+        dlg.format_secondary_text(
+            "This removes them from your list on this device. They can still send to you "
+            "and will prompt you again if they do.")
+        dlg.set_default_response(Gtk.ResponseType.CANCEL)
+        resp = dlg.run()
+        dlg.destroy()
+        return resp == Gtk.ResponseType.OK
+
     def on_remove(self, btn, petname):
+        if not self._confirm_remove(petname):
+            return
         allc = protocol.load_contacts(contacts_path())
         allc.pop(petname, None)
         protocol.save_contacts(contacts_path(), allc)
@@ -2174,6 +2433,24 @@ class AimlessWindow(Gtk.Window):
         self.away_banner.hide()
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        if not pref(self.prefs, "seen_onboarding") and not session.contacts():
+            info = Gtk.InfoBar()
+            info.set_message_type(Gtk.MessageType.INFO)
+            info.get_content_area().add(Gtk.Label(
+                label="New to AIMless? Open Contacts to copy your invite and add a buddy."))
+
+            def on_info(bar, resp):
+                bar.hide()
+                self.prefs["seen_onboarding"] = True
+                save_prefs(self.prefs)
+                if resp == Gtk.ResponseType.OK:
+                    self.stack.set_visible_child_name("contacts")
+            info.add_button("Go to Contacts", Gtk.ResponseType.OK)
+            info.add_button("Dismiss", Gtk.ResponseType.CLOSE)
+            info.connect("response", on_info)
+            root.pack_start(info, False, False, 0)
+
         root.pack_start(self.away_banner, False, False, 0)
         root.pack_start(self.stack, True, True, 0)
 
@@ -2203,6 +2480,10 @@ class AimlessWindow(Gtk.Window):
         avail_item.connect("activate", lambda *_: self.set_away(None))
         options_menu.append(avail_item)
         options_menu.append(Gtk.SeparatorMenuItem())
+        prefs_item = Gtk.MenuItem(label="Preferences …")
+        prefs_item.connect("activate", self.on_preferences)
+        options_menu.append(prefs_item)
+        options_menu.append(Gtk.SeparatorMenuItem())
         quit_item = Gtk.MenuItem(label="Close window")
         quit_item.connect("activate", lambda *_: self.close())
         options_menu.append(quit_item)
@@ -2210,6 +2491,9 @@ class AimlessWindow(Gtk.Window):
         menu_button.set_popup(options_menu)
 
         self.connect("destroy", self.on_destroy)
+        self._geometry_restoring = False
+        self._geometry_timer = 0
+        self.connect("configure-event", self.on_configure)
         self._presence_busy = False
         self._status_busy = False
         self._request_open = False
@@ -2474,11 +2758,147 @@ class AimlessWindow(Gtk.Window):
         else:
             Gtk.main_quit()
 
+    def on_configure(self, *_):
+        # Debounced: configure-event fires continuously while dragging/resizing.
+        if self._geometry_restoring:
+            return False
+        if not self._geometry_timer:
+            self._geometry_timer = GLib.timeout_add(1000, self._save_geometry_now)
+        return False
+
+    def _save_geometry_now(self):
+        self._geometry_timer = 0
+        self.save_geometry()
+        return False
+
+    def _workareas(self):
+        areas = []
+        try:
+            display = Gdk.Display.get_default()
+            if display is not None:
+                for i in range(display.get_n_monitors()):
+                    geo = display.get_monitor(i).get_workarea()
+                    areas.append((geo.x, geo.y, geo.width, geo.height))
+        except Exception:
+            pass
+        if not areas:
+            try:
+                screen = Gdk.Screen.get_default()
+                if screen is not None:
+                    areas.append((0, 0, screen.get_width(), screen.get_height()))
+            except Exception:
+                pass
+        return areas
+
     def save_geometry(self):
-        w, h = self.get_size()
-        self.prefs["window_width"] = w
-        self.prefs["window_height"] = h
+        self.prefs["window_width"], self.prefs["window_height"] = self.get_size()
+        if pref(self.prefs, "remember_position"):
+            try:
+                gw = self.get_window()
+                x, y = self.get_position()
+                if (x, y) != (0, 0):  # (0,0) == "unknown" (Wayland)
+                    self.prefs["window_x"], self.prefs["window_y"] = x, y
+                if gw is not None:
+                    self.prefs["window_maximized"] = bool(
+                        gw.get_state() & Gdk.WindowState.MAXIMIZED)
+            except Exception:
+                pass
         save_prefs(self.prefs)
+
+    def restore_geometry(self):
+        if not pref(self.prefs, "remember_position"):
+            return
+        x, y = self.prefs.get("window_x"), self.prefs.get("window_y")
+        w, h = self.get_size()
+        self._geometry_restoring = True
+        try:
+            if isinstance(x, int) and isinstance(y, int) and (x, y) != (0, 0):
+                cx, cy = clamp_to_workarea(x, y, w, h, self._workareas())
+                self.move(cx, cy)
+            if self.prefs.get("window_maximized"):
+                self.maximize()
+        except Exception:
+            pass
+        finally:
+            self._geometry_restoring = False
+
+    def reset_geometry(self):
+        for k in ("window_x", "window_y", "window_maximized"):
+            self.prefs.pop(k, None)
+        save_prefs(self.prefs)
+
+    def refresh_unread_indicator(self):
+        messages = getattr(self, "messages", None)
+        if messages is None:
+            return
+        n = sum(t.get("unread", 0) for t in messages.threads.values())
+        self.set_title(f"{APP_NAME} ({n})" if n else APP_NAME)
+        tray = getattr(self.app_ref, "tray", None) if self.app_ref else None
+        if tray is not None and getattr(tray, "have_tray", False):
+            try:
+                tray.icon.set_tooltip_text(
+                    f"{APP_NAME} — {n} unread\nLeft-click to open Messages" if n
+                    else f"{APP_NAME} — running\nLeft-click to open Messages")
+            except Exception:
+                pass
+
+    def on_preferences(self, *_):
+        dlg = Gtk.Dialog(title="Preferences", transient_for=self, modal=True)
+        dlg.add_button("Close", Gtk.ResponseType.CLOSE)
+        dlg.set_default_size(440, -1)
+        box = dlg.get_content_area()
+        box.set_spacing(10)
+        box.set_border_width(14)
+
+        def row(label, widget):
+            r = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            lbl = Gtk.Label(label=label)
+            lbl.set_xalign(0.0)
+            lbl.set_line_wrap(True)
+            r.pack_start(lbl, True, True, 0)
+            r.pack_end(widget, False, False, 0)
+            box.pack_start(r, False, False, 0)
+            return r
+
+        def switch(key):
+            sw = Gtk.Switch()
+            sw.set_active(bool(pref(self.prefs, key)))
+            sw.set_valign(Gtk.Align.CENTER)
+
+            def on_toggle(w, _p, k=key):
+                self.prefs[k] = w.get_active()
+                if k == "remember_position" and not w.get_active():
+                    self.reset_geometry()
+                save_prefs(self.prefs)
+            sw.connect("notify::active", on_toggle)
+            return sw
+
+        row("Remember window position and size", switch("remember_position"))
+        reset_btn = Gtk.Button(label="Reset window position")
+        reset_btn.set_halign(Gtk.Align.START)
+        reset_btn.get_style_context().add_class("muted")
+        reset_btn.connect("clicked", lambda *_: (self.reset_geometry(), self.unmaximize(),
+                                                 self.activity.log("window position reset")))
+        box.pack_start(reset_btn, False, False, 0)
+        row("Desktop notifications for new messages", switch("notifications"))
+        row("Press Enter to send (Shift+Enter for a new line)", switch("enter_to_send"))
+
+        fmt = Gtk.ComboBoxText()
+        fmt.append("24h", "24-hour")
+        fmt.append("12h", "12-hour")
+        fmt.set_active_id(pref(self.prefs, "time_format"))
+
+        def on_fmt(w):
+            self.prefs["time_format"] = w.get_active_id() or "24h"
+            save_prefs(self.prefs)
+            if self.messages.selected is not None:
+                self.messages._history_loaded(self.messages.selected["conv"])
+        fmt.connect("changed", on_fmt)
+        row("Timestamp format", fmt)
+
+        box.show_all()
+        dlg.run()
+        dlg.destroy()
 
 
 def ask_passphrase(parent):
@@ -2811,6 +3231,7 @@ class AimlessApp:
         self.session = session
         self.window = AimlessWindow(session, self.supervisor, app_ref=self)
         self.window.show_all()
+        self.window.restore_geometry()
 
     def _cancel_or_quit(self):
         """User cancelled and there is no usable tray: log it so the caller (a

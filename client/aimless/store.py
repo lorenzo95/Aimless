@@ -71,6 +71,18 @@ CREATE TABLE IF NOT EXISTS blocked_screens (
 CREATE TABLE IF NOT EXISTS muted_nodes (
     node TEXT PRIMARY KEY
 );
+-- Per outgoing message: one row per (recipient, seq). A message is "delivered"
+-- when every row has been acked by that peer's daemon; rows with acked=0 are
+-- still in flight. Legacy outgoing messages have no rows and render with no
+-- tick.
+CREATE TABLE IF NOT EXISTS deliveries (
+    node   TEXT    NOT NULL,
+    seq    INTEGER NOT NULL,
+    msg_id TEXT    NOT NULL,
+    acked  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (node, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_msg ON deliveries(msg_id);
 """
 
 
@@ -191,9 +203,18 @@ class Store:
             return cur.rowcount > 0
 
     def add_sent(self, conv: str, seqs: dict, ts: int, text: str,
-                 attachment: dict = None) -> bool:
-        """Record an outbound message; deterministic id makes retries no-ops."""
-        mid = "out:" + ",".join(f"{n}={s}" for n, s in sorted(seqs.items()))
+                 attachment: dict = None, delivery_keys=None) -> bool:
+        """Record an outbound message; deterministic id makes retries no-ops.
+
+        ``delivery_keys`` is the full set of (node, seq) acks to track. It
+        defaults to ``seqs`` but files pass every chunk key (the daemon acks
+        each chunk), so delivery reflects the whole transfer, not just its last
+        chunk."""
+        mid = self.out_id(seqs)
+        if delivery_keys is None:
+            keys = {(n, int(s)) for n, s in seqs.items()}
+        else:
+            keys = {(n, int(s)) for n, s in delivery_keys if int(s)}
         with self._lock:
             self._ensure_conv(conv, dm=True)
             cur = self.conn.execute(
@@ -201,22 +222,83 @@ class Store:
                 "VALUES(?, ?, 'self', 'out', ?, ?, ?, ?)",
                 (mid, conv, ts, json.dumps(seqs), self._enc(text),
                  self._enc(json.dumps(attachment)) if attachment else None))
+            for node, seq in keys:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO deliveries(node, seq, msg_id, acked) VALUES(?, ?, ?, 0)",
+                    (node, seq, mid))
             self.conn.commit()
             return cur.rowcount > 0
 
-    def _row_to_msg(self, row) -> dict:
+    @staticmethod
+    def out_id(seqs: dict) -> str:
+        return "out:" + ",".join(f"{n}={s}" for n, s in sorted(seqs.items()))
+
+    def is_delivered(self, mid: str):
+        row = self.conn.execute(
+            "SELECT COUNT(*), SUM(acked) FROM deliveries WHERE msg_id=?", (mid,)).fetchone()
+        if not row or not row[0]:
+            return None
+        total, acked = row[0], row[1] or 0
+        return acked == total
+
+    def delivery_progress(self, mid: str):
+        """(total, acked) tracked chunks for a message; (0, 0) if untracked."""
+        row = self.conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(acked), 0) FROM deliveries WHERE msg_id=?",
+            (mid,)).fetchone()
+        return row[0], row[1]
+
+    def undelivered(self, mid: str):
+        return [(n, s) for n, s in self.conn.execute(
+            "SELECT node, seq FROM deliveries WHERE msg_id=? AND acked=0", (mid,))]
+
+    def mark_delivered(self, node: str, seq: int):
+        """Mark one chunk acked. Returns the message id it belongs to, or None."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT msg_id, acked FROM deliveries WHERE node=? AND seq=?",
+                (node, int(seq))).fetchone()
+            if row is None:
+                return None
+            mid, acked = row
+            if not acked:
+                self.conn.execute(
+                    "UPDATE deliveries SET acked=1 WHERE node=? AND seq=?", (node, int(seq)))
+                self.conn.commit()
+            return mid
+
+    def _delivery_summary(self, mids):
+        summary = {}
+        ids = list({m for m in mids if m})
+        if not ids:
+            return summary
+        marks = ",".join("?" for _ in ids)
+        for mid, total, acked in self.conn.execute(
+                f"SELECT msg_id, COUNT(*), SUM(acked) FROM deliveries "
+                f"WHERE msg_id IN ({marks}) GROUP BY msg_id", ids):
+            summary[mid] = (total, acked)
+        return summary
+
+    def _row_to_msg(self, row, summary=None) -> dict:
         mid, conv, sender, direction, ts, seqs, text, att = row
-        return {
-            "dir": direction, "seqs": json.loads(seqs), "ts": ts, "sender": sender,
+        msg = {
+            "id": mid, "dir": direction, "seqs": json.loads(seqs), "ts": ts, "sender": sender,
             "text": self._dec(text),
             "attachment": json.loads(self._dec(att)) if att is not None else None,
         }
+        if direction == "out":
+            s = (summary or {}).get(mid)
+            # None = untracked (legacy message): render no tick; False = in
+            # flight; True = every recipient chunk acked.
+            msg["delivered"] = None if s is None else (s[0] == s[1])
+        return msg
 
     def messages(self, conv: str) -> list:
         rows = self.conn.execute(
             "SELECT id, conv, sender, dir, ts, seqs, text, attachment FROM messages "
             "WHERE conv=? ORDER BY ts, id", (conv,)).fetchall()
-        return [self._row_to_msg(r) for r in rows]
+        summary = self._delivery_summary([r[0] for r in rows])
+        return [self._row_to_msg(r, summary) for r in rows]
 
     # Compatibility aliases: the GTK layer historically spoke the cache's
     # per-conversation cursor vocabulary. Progress is now a single per-peer
