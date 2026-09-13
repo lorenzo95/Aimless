@@ -3,32 +3,30 @@ import os
 import sys
 import time
 
-from . import crypto, protocol
+from . import crypto, protocol, paths
 from .daemon import DaemonClient, Client, DaemonError
 from .service import Sync
 from .store import Store
 
 
 def client_dir() -> str:
-    base = os.environ.get("AIMLESS_HOME") or os.path.expanduser("~/.local/share/aimless")
-    os.makedirs(base, exist_ok=True)
-    return base
+    return paths.client_dir()
 
 
 def socket_path() -> str:
-    return os.environ.get("AIMLESS_SOCK") or os.path.join(client_dir(), "api.sock")
+    return paths.sock_path()
 
 
 def identity_path() -> str:
-    return os.path.join(client_dir(), "identity.json")
+    return paths.identity_path()
 
 
 def contacts_path() -> str:
-    return os.path.join(client_dir(), "client-contacts.json")
+    return paths.contacts_path()
 
 
 def cache_path() -> str:
-    return os.path.join(client_dir(), "state.db")
+    return paths.cache_path()
 
 
 def prompt_passphrase(confirm: bool) -> str:
@@ -339,11 +337,10 @@ def cmd_gui(args):
         msg = (f"GUI unavailable: {e}\n{hint}\n"
                f"(also needs a display — check `echo $DISPLAY`; over ssh use ssh -X)")
         print(msg, file=sys.stderr)
-        config_dir = os.environ.get("AIMLESS_CONFIG") or os.path.expanduser("~/.config/aimless")
         try:
-            with open(os.path.join(config_dir, "app.log"), "a") as f:
-                f.write(msg + "\n")
-        except OSError:
+            from . import logging as aimless_logging
+            aimless_logging.append_line(paths.app_log_path(), msg)
+        except Exception:
             pass
         sys.exit(1)
     sys.exit(gtkui.run_app(open_window=True))
@@ -362,9 +359,14 @@ def cmd_autostart(args):
     try:
         from . import gtkui
     except ImportError as e:
-        print(f"GUI unavailable ({e}) — install the GTK stack: sudo apt install python3-gi", file=sys.stderr)
+        print(f"GUI unavailable ({e}) — install the GTK stack: python3-gi", file=sys.stderr)
         sys.exit(1)
     print(gtkui.install_autostart())
+
+
+def cmd_paths(args):
+    for key, val in paths.all_paths().items():
+        print(f"{key:<12} {val}")
 
 
 def cmd_stop(args):
@@ -420,6 +422,7 @@ def main():
     sub.add_parser("gui", help="open the messages window (same as running aimless with no arguments)")
     sub.add_parser("tray", help="start hidden in the notification area — window opens on first tray click (autostart)")
     sub.add_parser("autostart", help="install login autostart for the full `aimless` stack")
+    sub.add_parser("paths", help="print where aimless keeps its files")
     sub.add_parser("stop", help="shut down the app, tray icon and daemon")
 
     args = parser.parse_args()
@@ -440,8 +443,10 @@ def main():
         "gui": cmd_gui,
         "tray": cmd_tray,
         "autostart": cmd_autostart,
+        "paths": cmd_paths,
         "stop": cmd_stop,
     }
+    paths.ensure_dirs()
     cmds[args.command](args)
 
 

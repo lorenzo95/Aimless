@@ -103,14 +103,25 @@ docker exec -it aimless-webtop /opt/aimless/aimless.pyz send <buddy> "hi"
 
 ## Persistence
 
-Everything lives in `./aimless-data/` (mounted at `/data`):
-`state/` holds the identity, contacts, cache, node key and the daemon socket;
-`config/` holds the daemon pid file and a `state/config.json` if you ever want
-custom peers:
+Everything lives in `./aimless-data/` (mounted at `/data`, `AIMLESS_HOME=/data`),
+split by owner:
+
+```
+client/   identity, contacts, cache, prefs, attachments
+daemon/   node key, aimless.db, blocklist, the API socket, and config.json
+logs/     app.log
+bin/      fetched aimless.pyz + aimlessd
+```
+
+Custom peers go in `daemon/config.json`:
 
 ```json
 {"peers": ["tcp://nodea:9001"], "listen": []}
 ```
+
+> **Upgrading from an older image?** The volume layout changed; old
+> `state/`/`config/` directories are ignored. Recreate the volume and restore
+> from an encrypted backup via **Import backup…** on the first-run screen.
 
 ## Stop / remove
 

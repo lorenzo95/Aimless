@@ -67,7 +67,7 @@ func main() {
 	log.SetFlags(log.LstdFlags)
 
 	home, _ := os.UserHomeDir()
-	defaultDatadir := filepath.Join(home, ".local", "share", "aimless")
+	defaultDatadir := filepath.Join(home, ".local", "share", "aimless", "daemon")
 
 	datadir := flag.String("datadir", defaultDatadir, "data directory for node key and config")
 	apiPath := flag.String("api", "", "unix socket path (default: <datadir>/api.sock)")

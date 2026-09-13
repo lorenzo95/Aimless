@@ -80,14 +80,14 @@ def test_corrupt_cache_session_recovery(tmp_path, monkeypatch):
 
 
 def test_app_lock_single_instance(tmp_path, monkeypatch):
-    config = tmp_path / "config"
-    config.mkdir()
-    monkeypatch.setattr(gtkui, "CONFIG_DIR", str(config))
-    monkeypatch.setattr(gtkui, "APP_PID_FILE", str(config / "app.pid"))
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("AIMLESS_HOME", str(home))
+    gtkui.paths.ensure_dirs()
 
     fh, holder = gtkui.acquire_app_lock()
     assert fh is not None and holder is None
-    assert open(gtkui.APP_PID_FILE).read() == str(os.getpid())
+    assert open(gtkui.paths.app_pid_path()).read() == str(os.getpid())
 
     fh2, holder2 = gtkui.acquire_app_lock()
     assert fh2 is None and holder2 == os.getpid()
@@ -104,11 +104,8 @@ def test_app_restarts_dead_daemon(tmp_path, monkeypatch):
 
     home = tmp_path / "home"
     home.mkdir()
-    config = tmp_path / "config"
-    config.mkdir()
     monkeypatch.setenv("AIMLESS_HOME", str(home))
     monkeypatch.setenv("AIMLESS_SOCK", str(home / "api.sock"))
-    monkeypatch.setattr(gtkui, "CONFIG_DIR", str(config))
 
     app = gtkui.AimlessApp()
     app.supervisor.ensure()

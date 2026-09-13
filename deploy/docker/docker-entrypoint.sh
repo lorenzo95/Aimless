@@ -4,7 +4,7 @@
 # user and run the whole supervised stack as uid 1000.
 set -e
 
-mkdir -p /data/state /data/config /data/logs /data/bin
+mkdir -p /data/logs /data/bin
 
 VERSION="${AIMLESS_VERSION:-main}"
 BASE="https://raw.githubusercontent.com/lorenzo95/Aimless/$VERSION/dist"

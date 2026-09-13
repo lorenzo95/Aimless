@@ -69,7 +69,7 @@ aimless — quick install on a new machine
 
   ./install.sh
   aimlessd &            (joins the public Yggdrasil network)
-  aimless init          (or copy your old ~/.local/share/aimless to keep your identity)
+  aimless init          (or Import backup on the first-run screen to restore an identity)
   aimless gui
 
 Requires: python3 (3.10+) with internet access for pynacl on first install.

@@ -54,16 +54,32 @@ Requires Linux, `python3` with `pynacl`, and the GTK stack (`python3-gi`, `gir1.
 **From source:**
 
 ```sh
-cd daemon && go build -o aimlessd . && ./aimlessd -datadir ~/.local/share/aimless
+cd daemon && go build -o aimlessd . && ./aimlessd -datadir ~/.local/share/aimless/daemon
 cd ../client && pip install . && aimless
 ```
+
+## Files and layout
+
+Everything lives under one root — `~/.local/share/aimless` by default, or `$AIMLESS_HOME` — split by owner. `aimless paths` prints the resolved locations.
+
+```
+~/.local/share/aimless/
+├── client/    identity.json · contacts.json · state.db · prefs.json · attachments/
+├── daemon/    node.key · config.json · aimless.db · contacts.json · blocked.json · lock · api.sock
+├── logs/      app.log · daemon.log
+└── run/       app.pid · aimlessd.pid
+```
+
+The only thing outside the root is the login autostart entry (`~/.config/autostart/aimless-tray.desktop`), which the desktop spec pins there.
+
+> **Upgrading from an older version?** This release changed the on-disk layout; old files are not migrated. To keep your identity, **export a backup first** (Keys & Identity → *Export encrypted backup*) or copy `identity.json`/`node.key`/`client-contacts.json` by hand, then use **Import backup…** on the first-run screen. Message history and attachments are not preserved by the backup.
 
 ## Using it
 
 The tray owns the daemon: closing the window just hides it (tray click reopens; tray *Quit* shuts everything down).
 
 ### Preferences
-Header menu → **Preferences …** (stored in `~/.config/aimless/gtk.json`):
+Header menu → **Preferences …** (stored as `client/prefs.json` under the data root, below):
 
 - **Remember window position and size** (off-screen-safe; best-effort on Wayland) with a *Reset* button.
 - **Desktop notifications** (libnotify / `notify-send`) and **notification sound** — Off, single, double, triple, or long synthesised beep (no audio files, with a *Test* button; `AIMLESS_SOUND` overrides).
@@ -111,7 +127,7 @@ The **client** owns identity, encryption, and display. The **daemon** is a dumb,
 - **E2E encryption** — per-recipient NaCl sealed boxes made by the client; every message is Ed25519-signed, verified against the claimed sender independently of the transport.
 - **The daemon can't read messages, names, filenames, or status.** It sees only routing metadata (above).
 - **No forward secrecy** — long-term keys, no ratchet. Anyone with your private key can decrypt past traffic; treat it like email, not Signal.
-- **Encrypted at rest** — history is an encrypted SQLite DB (`state.db`, scrypt key); the identity file likewise. The **one exception is attachment bytes**, written to `~/.local/share/aimless/attachments/<conv>/` in plaintext so images can render/save locally.
+- **Encrypted at rest** — history is an encrypted SQLite DB (`state.db`, scrypt key); the identity file likewise. The **one exception is attachment bytes**, written to `client/attachments/<conv>/` (under the data root) in plaintext so images can render/save locally.
 - Experimental alpha — don't use for security-critical purposes.
 
 ## Under the hood

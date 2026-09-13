@@ -4,8 +4,7 @@
 # closing the window quits the app — close-to-tray is just a desktop behaviour).
 export DISPLAY=:1
 export HOME=/home/aimless
-export AIMLESS_HOME=/data/state
-export AIMLESS_CONFIG=/data/config
+export AIMLESS_HOME=/data
 
 for i in $(seq 1 60); do
     [ -S /tmp/.X11-unix/X1 ] && break

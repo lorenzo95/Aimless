@@ -40,24 +40,20 @@ def gtk_app(tmp_path, monkeypatch, two_nodes):
     sock_a, sock_b = two_nodes
     home = tmp_path / "home"
     home.mkdir()
-    config = tmp_path / "config"
-    config.mkdir()
     monkeypatch.setenv("AIMLESS_HOME", str(home))
     monkeypatch.setenv("AIMLESS_SOCK", sock_a)
-    monkeypatch.setattr(gtkui, "CONFIG_DIR", str(config))
-    monkeypatch.setattr(gtkui, "APP_PID_FILE", str(config / "app.pid"))
-    monkeypatch.setattr(gtkui, "AIMLESSD_PID_FILE", str(config / "aimlessd.pid"))
+    gtkui.paths.ensure_dirs()
 
     alice_identity = crypto.new_identity()
-    crypto.save_identity(str(home / "identity.json"), alice_identity, "testpass")
-    Store(str(home / "state.db"), "testpass")
+    crypto.save_identity(gtkui.paths.identity_path(), alice_identity, "testpass")
+    Store(gtkui.paths.cache_path(), "testpass")
 
     bob_identity = crypto.new_identity()
     bob = Client(DaemonClient(sock_b), bob_identity, "Bob")
     b_node = bob.node_key()
     a_node = DaemonClient(sock_a).request("whoami")["key"]
     bob.add_contact(a_node)
-    protocol.save_contacts(str(home / "client-contacts.json"), {
+    protocol.save_contacts(gtkui.paths.contacts_path(), {
         "_self": {"screen": "Alice", "pubkey": bytes(alice_identity.verify_key).hex()},
         "bob": {"pubkey": bytes(bob_identity.verify_key).hex(), "node": b_node, "screen": "Bob"},
     })
@@ -194,7 +190,7 @@ def test_gui_unread_badge_and_activity_log(gtk_app):
 def test_gui_contacts_add_remove_and_self_guard(gtk_app, monkeypatch):
     app = gtk_app
     win = app["win"]
-    contacts_path = str(app["home"] / "client-contacts.json")
+    contacts_path = str(app["home"] / "client/contacts.json")
 
     contacts_view = win.contacts
     contacts_view.refresh()
@@ -489,12 +485,13 @@ def test_create_identity_writes_files(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("AIMLESS_HOME", str(home))
-    identity_file = home / "identity.json"
+    g.paths.ensure_dirs()
+    identity_file = home / "client" / "identity.json"
     assert not identity_file.exists()
     pw = g.create_identity("secret", "Gerry")
     assert pw == "secret"
     identity = crypto.load_identity(str(identity_file), "secret")
-    contacts = protocol.load_contacts(str(home / "client-contacts.json"))
+    contacts = protocol.load_contacts(str(home / "client/contacts.json"))
     assert contacts["_self"]["screen"] == "Gerry"
     assert contacts["_self"]["pubkey"] == bytes(identity.verify_key).hex()
 
@@ -616,7 +613,7 @@ def test_gui_room_create_send_receive(gtk_app):
 def test_gui_request_accept_and_deny(gtk_app, tmp_path, monkeypatch):
     app = gtk_app
     win = app["win"]
-    contacts_path = str(app["home"] / "client-contacts.json")
+    contacts_path = str(app["home"] / "client/contacts.json")
 
     stranger_node = "ab" * 32
     req = {"node": stranger_node, "pubkey": "ff" * 32, "screen": "Mallory",
@@ -881,7 +878,7 @@ def test_gui_1to1_block_removes_contact(gtk_app, monkeypatch):
     app = gtk_app
     win = app["win"]
     b_node = app["b_node"]
-    contacts_path = str(app["home"] / "client-contacts.json")
+    contacts_path = str(app["home"] / "client/contacts.json")
 
     monkeypatch.setattr(win.messages, "_confirm_block", lambda screen: True)
     win.messages.thread_list.select_row(win.messages.threads[b_node]["row"])
@@ -1191,7 +1188,7 @@ def test_gui_incoming_from_unknown_sender_queues_request(gtk_app, monkeypatch):
     win.messages.incoming(ev)
 
     # the synchronous stub accepted the request, so pending is consumed and applied
-    contacts = protocol.load_contacts(str(app["home"] / "client-contacts.json"))
+    contacts = protocol.load_contacts(str(app["home"] / "client/contacts.json"))
     assert "Newbie" in contacts
     # accepted → message delivered into the new thread
     texts = [m["text"] for m in win.session.cache.msgs(stranger)]
@@ -1504,7 +1501,7 @@ def test_member_chips_add_and_jump(gtk_app, monkeypatch):
     monkeypatch.setattr(win.messages, "_confirm_add_member", lambda s: True)
     win.messages.on_member_chip(None, carol_node, "Carol", known=False)
 
-    contacts = protocol.load_contacts(str(app["home"] / "client-contacts.json"))
+    contacts = protocol.load_contacts(str(app["home"] / "client/contacts.json"))
     assert "Carol" in contacts and contacts["Carol"]["node"] == carol_node
     assert carol_node in win.messages.threads, "added member should get a DM thread"
     assert win.messages.selected is win.messages.threads[carol_node], "should jump to the new DM"
@@ -2013,3 +2010,56 @@ def test_backup_export_and_restore_round_trip(gtk_app, tmp_path):
     win.restore_backup_from(path, "backup-pw", "testpass")
     restored = crypto.load_identity(gtkui.identity_path(), "testpass")
     assert bytes(restored) == bytes(session.identity)
+
+
+# --- single-root path layout -------------------------------------------------
+
+
+def test_paths_are_under_one_root(tmp_path, monkeypatch):
+    from aimless import paths
+    root = tmp_path / "home"
+    monkeypatch.setenv("AIMLESS_HOME", str(root))
+    assert paths.identity_path().startswith(paths.client_dir())
+    assert paths.contacts_path().startswith(paths.client_dir())
+    assert paths.cache_path().startswith(paths.client_dir())
+    assert paths.prefs_path().startswith(paths.client_dir())
+    assert paths.attachments_dir().startswith(paths.client_dir())
+    assert paths.sock_path().startswith(paths.daemon_dir())
+    assert paths.sock_path().endswith("/api.sock")
+    assert paths.app_log_path().startswith(paths.logs_dir())
+    assert paths.daemon_pid_path().startswith(paths.run_dir())
+    # Everything is under the root except the freedesktop autostart entry.
+    for key, val in paths.all_paths().items():
+        if key == "autostart":
+            continue
+        assert val.startswith(str(root)), (key, val)
+    paths.ensure_dirs()
+    for d in (paths.client_dir(), paths.daemon_dir(), paths.logs_dir(), paths.run_dir()):
+        assert os.path.isdir(d)
+        assert (os.stat(d).st_mode & 0o777) == 0o700
+
+
+def test_restore_bundle_writes_new_layout(tmp_path, monkeypatch):
+    from aimless import keys, paths
+    monkeypatch.setenv("AIMLESS_HOME", str(tmp_path / "home"))
+    paths.ensure_dirs()
+    identity = crypto.new_identity()
+    seed = os.urandom(32)
+    bundle = str(tmp_path / "b.json")
+    keys.save_bundle(bundle, "bpw", {
+        "identitySeed": bytes(identity).hex(),
+        "nodeSeed": seed.hex(),
+        "screen": "Alice",
+        "contacts": {"_self": {"screen": "Alice"}},
+    })
+    gtkui.restore_bundle(bundle, "bpw", "apppw")
+    assert bytes(crypto.load_identity(paths.identity_path(), "apppw")) == bytes(identity)
+    assert open(os.path.join(paths.daemon_dir(), "node.key")).read().strip() == seed.hex()
+    contacts = protocol.load_contacts(paths.contacts_path())
+    assert contacts["_self"]["screen"] == "Alice"
+
+
+def test_first_run_screen_offers_import(monkeypatch):
+    from gi.repository import Gtk
+    monkeypatch.setattr(Gtk.Dialog, "run", lambda self: Gtk.ResponseType.APPLY)
+    assert gtkui.ask_create_identity(None) == ("__import__",)

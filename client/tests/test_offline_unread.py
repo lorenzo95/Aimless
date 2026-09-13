@@ -57,16 +57,12 @@ def daemon_up_client_later(tmp_path, monkeypatch):
 
     home = tmp_path / "home"
     home.mkdir()
-    config = tmp_path / "config"
-    config.mkdir()
     monkeypatch.setenv("AIMLESS_HOME", str(home))
     monkeypatch.setenv("AIMLESS_SOCK", sock_a)
-    monkeypatch.setattr(gtkui, "CONFIG_DIR", str(config))
-    monkeypatch.setattr(gtkui, "APP_PID_FILE", str(config / "app.pid"))
-    monkeypatch.setattr(gtkui, "AIMLESSD_PID_FILE", str(config / "aimlessd.pid"))
-    crypto.save_identity(str(home / "identity.json"), a_ident, "testpass")
-    Store(str(home / "state.db"), "testpass")
-    protocol.save_contacts(str(home / "client-contacts.json"), {
+    gtkui.paths.ensure_dirs()
+    crypto.save_identity(gtkui.paths.identity_path(), a_ident, "testpass")
+    Store(gtkui.paths.cache_path(), "testpass")
+    protocol.save_contacts(gtkui.paths.contacts_path(), {
         "_self": {"screen": "Alice", "pubkey": a_pub},
         "bob": {"pubkey": bytes(b_ident.verify_key).hex(), "node": b_node, "screen": "Bob"},
     })

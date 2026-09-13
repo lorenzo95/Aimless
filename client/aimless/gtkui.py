@@ -31,7 +31,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GLib, Gdk, Pango, GdkPixbuf, Gio
 
-from . import crypto, protocol, logging
+from . import crypto, protocol, logging, paths
 from . import keys as keysmod
 from .daemon import DaemonClient, Client, DaemonError
 from .service import Sync
@@ -40,20 +40,15 @@ from . import __version__ as client_version
 from . import MIN_DAEMON_BUILD
 
 APP_NAME = "AIMless"
-CONFIG_DIR = os.environ.get("AIMLESS_CONFIG") or os.path.expanduser("~/.config/aimless")
-APP_PID_FILE = os.path.join(CONFIG_DIR, "app.pid")
-AIMLESSD_PID_FILE = os.path.join(CONFIG_DIR, "aimlessd.pid")
 STATUS_REASSERT_SECONDS = 60
+
+
 def prefs_file():
-    return os.path.join(CONFIG_DIR, "gtk.json")
-
-
-def data_dir():
-    return os.environ.get("AIMLESS_HOME") or os.path.expanduser("~/.local/share/aimless")
+    return paths.prefs_path()
 
 
 def attachments_dir():
-    return os.path.join(data_dir(), "attachments")
+    return paths.attachments_dir()
 
 
 def sanitize_filename(name):
@@ -101,19 +96,19 @@ def linkify(text: str) -> str:
 
 
 def sock_path():
-    return os.environ.get("AIMLESS_SOCK") or os.path.join(data_dir(), "api.sock")
+    return paths.sock_path()
 
 
 def contacts_path():
-    return os.path.join(data_dir(), "client-contacts.json")
+    return paths.contacts_path()
 
 
 def identity_path():
-    return os.path.join(data_dir(), "identity.json")
+    return paths.identity_path()
 
 
 def cache_path():
-    return os.path.join(data_dir(), "state.db")
+    return paths.cache_path()
 
 # --- theme palettes ---------------------------------------------------------
 # Every colour the UI uses lives here (CSS *and* the Pango markup strings), so
@@ -453,7 +448,7 @@ def load_prefs():
 
 
 def save_prefs(prefs):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
+    os.makedirs(paths.client_dir(), exist_ok=True)
     with open(prefs_file(), "w") as f:
         json.dump(prefs, f, indent=2)
 
@@ -666,18 +661,6 @@ def clear_children(container):
     container.foreach(lambda w: w.destroy())
 
 
-def contacts_path():
-    return os.path.join(data_dir(), "client-contacts.json")
-
-
-def identity_path():
-    return os.path.join(data_dir(), "identity.json")
-
-
-def cache_path():
-    return os.path.join(data_dir(), "state.db")
-
-
 def daemon_binary():
     names = ("aimlessd", "aimlessd-linux-amd64")
     dirs = [
@@ -700,7 +683,7 @@ def daemon_binary():
 
 class DaemonSupervisor:
     def __init__(self):
-        self.datadir = data_dir()
+        self.datadir = paths.daemon_dir()
         self.sock = sock_path()
         self.child = None
 
@@ -743,11 +726,12 @@ class DaemonSupervisor:
                 "aimless.pyz, or add it to PATH")
         try:
             os.makedirs(self.datadir, exist_ok=True)
-            daemon_log = open(os.path.join(self.datadir, "daemon.log"), "ab")
+            os.makedirs(paths.logs_dir(), exist_ok=True)
+            daemon_log = open(paths.daemon_log_path(), "ab")
         except OSError:
             daemon_log = subprocess.DEVNULL
         self.child = subprocess.Popen(
-            [binary, "-datadir", self.datadir],
+            [binary, "-datadir", self.datadir, "-api", self.sock],
             start_new_session=True,
             stdout=daemon_log,
             stderr=daemon_log,
@@ -755,8 +739,8 @@ class DaemonSupervisor:
         if daemon_log is not subprocess.DEVNULL:
             daemon_log.close()  # the child inherited its own copy
         try:
-            os.makedirs(CONFIG_DIR, exist_ok=True)
-            with open(AIMLESSD_PID_FILE, "w") as f:
+            os.makedirs(paths.run_dir(), exist_ok=True)
+            with open(paths.daemon_pid_path(), "w") as f:
                 f.write(str(self.child.pid))
         except Exception:
             pass
@@ -775,14 +759,14 @@ class DaemonSupervisor:
                     log("daemon running")
                 return True
             if self.child and self.child.poll() is not None:
-                raise RuntimeError("aimlessd exited immediately (check ~/.local/share/aimless)")
+                raise RuntimeError("aimlessd exited immediately (check " + paths.root() + ")")
             time.sleep(0.2)
         raise RuntimeError("daemon did not come up within 20s")
 
     def stop(self):
         pid = daemon_pid_from_socket()
         if pid is None:
-            pid = read_pid(AIMLESSD_PID_FILE)
+            pid = read_pid(paths.daemon_pid_path())
         if pid is None and self.child:
             pid = self.child.pid
         if pid is None:
@@ -806,7 +790,7 @@ class DaemonSupervisor:
                 pass
             time.sleep(0.5)
         try:
-            os.remove(AIMLESSD_PID_FILE)
+            os.remove(paths.daemon_pid_path())
         except OSError:
             pass
 
@@ -3070,7 +3054,7 @@ class AimlessWindow(Gtk.Window):
     def _backup_payload(self):
         node_seed = None
         try:
-            with open(os.path.join(data_dir(), "node.key")) as f:
+            with open(os.path.join(paths.daemon_dir(), "node.key")) as f:
                 node_seed = f.read().strip()
         except OSError:
             pass
@@ -3089,38 +3073,13 @@ class AimlessWindow(Gtk.Window):
     def restore_backup_from(self, path, passphrase, app_passphrase):
         """Restore a bundle onto disk (no daemon restart). Returns the bundle.
         Raises ValueError on a bad passphrase/missing fields."""
-        data = keysmod.load_bundle(path, passphrase)
-        seed = bytes.fromhex(data.get("identitySeed", ""))
-        if len(seed) != 32:
-            raise ValueError("backup is missing the identity seed")
-        crypto.save_identity(identity_path(), keysmod.signing_key(seed), app_passphrase)
-        if data.get("nodeSeed"):
-            keysmod.write_node_key(data_dir(), bytes.fromhex(data["nodeSeed"]))
-        if data.get("contacts"):
-            protocol.save_contacts(contacts_path(), data["contacts"])
-        return data
+        return restore_bundle(path, passphrase, app_passphrase)
 
     def _daemon_restart(self):
-        sup = self.supervisor
-        try:
-            sup.stop()
-        except Exception:
-            pass
-        for _ in range(50):
-            if not sup.is_running():
-                break
-            time.sleep(0.1)
-        try:
-            sup.ensure(log=(self.app_ref.log if self.app_ref else None))
-        except Exception:
-            pass
-        for _ in range(150):
-            if sup.is_running():
-                break
-            time.sleep(0.1)
+        restart_daemon(self.supervisor, self.app_ref.log if self.app_ref else None)
 
     def _apply_node_seed(self, seed):
-        keysmod.write_node_key(data_dir(), seed)
+        keysmod.write_node_key(paths.daemon_dir(), seed)
         self._daemon_restart()
         try:
             self.session.refresh_node()
@@ -3199,7 +3158,7 @@ class AimlessWindow(Gtk.Window):
                                  "old invites stop working. The daemon restarts now.",
                                  parent=dlg):
                 return
-            keysmod.remove_node_key(data_dir())
+            keysmod.remove_node_key(paths.daemon_dir())
             self._daemon_restart()
             try:
                 self.session.refresh_node()
@@ -3663,16 +3622,20 @@ def ask_passphrase(parent):
 
 
 def ask_create_identity(parent):
-    """Ask for passphrase + confirm + screen name to create a brand-new identity.
-    Returns None (cancelled / empty), ("__mismatch__",) or (passphrase, screen)."""
+    """Ask for passphrase + confirm + screen name, or offer to import a backup.
+
+    Returns None (cancelled / empty), ("__mismatch__",), ("__import__",) or
+    (passphrase, screen)."""
     dlg = Gtk.Dialog(title=f"{APP_NAME} — create your identity", transient_for=parent, modal=True)
-    dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Create identity", Gtk.ResponseType.OK)
+    dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                    "Import backup…", Gtk.ResponseType.APPLY,
+                    "Create identity", Gtk.ResponseType.OK)
     dlg.set_default_response(Gtk.ResponseType.OK)
     dlg.set_default_size(380, 120)
     box = dlg.get_content_area()
     box.set_spacing(8)
     box.set_border_width(10)
-    box.add(Gtk.Label(label="No identity on this machine yet — set one up here."))
+    box.add(Gtk.Label(label="No identity on this machine yet — create one, or restore a backup."))
     box.add(Gtk.Label(label="Passphrase (protects your keys; re-enter it later to unlock)"))
     pw = Gtk.Entry(visibility=False, activates_default=True)
     box.add(pw)
@@ -3686,6 +3649,8 @@ def ask_create_identity(parent):
     resp = dlg.run()
     p1, p2, sn = pw.get_text(), pw2.get_text(), screen.get_text()
     dlg.destroy()
+    if resp == Gtk.ResponseType.APPLY:
+        return ("__import__",)
     if resp != Gtk.ResponseType.OK or not p1:
         return None
     if p1 != p2:
@@ -3702,6 +3667,44 @@ def create_identity(passphrase, screen):
                          "pubkey": bytes(identity.verify_key).hex()}
     protocol.save_contacts(contacts_path(), contacts)
     return passphrase
+
+
+def restore_bundle(path, bundle_passphrase, app_passphrase):
+    """Write an encrypted backup bundle onto disk. Returns the bundle dict.
+
+    Session-independent so the init screen can import before a window exists.
+    Raises ValueError on a bad passphrase / missing identity seed.
+    """
+    data = keysmod.load_bundle(path, bundle_passphrase)
+    seed = bytes.fromhex(data.get("identitySeed", ""))
+    if len(seed) != 32:
+        raise ValueError("backup is missing the identity seed")
+    crypto.save_identity(identity_path(), keysmod.signing_key(seed), app_passphrase)
+    if data.get("nodeSeed"):
+        keysmod.write_node_key(paths.daemon_dir(), bytes.fromhex(data["nodeSeed"]))
+    if data.get("contacts"):
+        protocol.save_contacts(contacts_path(), data["contacts"])
+    return data
+
+
+def restart_daemon(supervisor, log=None):
+    """Stop and start the daemon so it reloads an on-disk node key."""
+    try:
+        supervisor.stop()
+    except Exception:
+        pass
+    for _ in range(50):
+        if not supervisor.is_running():
+            break
+        time.sleep(0.1)
+    try:
+        supervisor.ensure(log=log)
+    except Exception:
+        pass
+    for _ in range(150):
+        if supervisor.is_running():
+            break
+        time.sleep(0.1)
 
 
 def ask_text(parent, title, label):
@@ -3745,7 +3748,7 @@ def _make_thread_hook(gui_log):
 
 
 def app_log_path():
-    return os.path.join(CONFIG_DIR, "app.log")
+    return paths.app_log_path()
 
 
 def pid_alive(pid):
@@ -3761,15 +3764,15 @@ def acquire_app_lock():
     handle for the process lifetime — or (None, holder_pid) when another instance runs."""
     import fcntl
     try:
-        os.makedirs(CONFIG_DIR, exist_ok=True)
-        fh = open(APP_PID_FILE, "a+")
+        os.makedirs(paths.run_dir(), exist_ok=True)
+        fh = open(paths.app_pid_path(), "a+")
     except OSError:
         return None, -1
     try:
         fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         fh.close()
-        return None, read_pid(APP_PID_FILE) or -1
+        return None, read_pid(paths.app_pid_path()) or -1
     fh.seek(0)
     fh.truncate()
     fh.write(str(os.getpid()))
@@ -3852,6 +3855,7 @@ class AimlessApp:
         sys.excepthook = _make_excepthook(self.log)
         threading.excepthook = _make_thread_hook(self.log)
 
+        paths.ensure_dirs()
         install_css_provider()
 
         self.lock_fh, holder = acquire_app_lock()
@@ -3916,6 +3920,16 @@ class AimlessApp:
                 if created is None:
                     self._cancel_or_quit()
                     return
+                if created[0] == "__import__":
+                    imported = self._import_backup_on_init()
+                    if imported:
+                        passphrase = imported
+                        try:
+                            session = Session(passphrase)
+                            break
+                        except (ValueError, OSError) as e:
+                            _error_dialog(None, f"imported identity could not be opened: {e}")
+                    continue
                 if created[0] == "__mismatch__":
                     err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.OK,
                                             text="passphrases do not match — try again")
@@ -3984,6 +3998,46 @@ class AimlessApp:
             return
         self.log("cancel — no usable tray (headless/container) — nothing to show")
 
+    def _import_backup_on_init(self):
+        """First-run import: pick a bundle, restore it, reload the daemon.
+
+        Returns the new app passphrase on success, else None."""
+        chooser = Gtk.FileChooserDialog(title="Import an aimless backup",
+                                        action=Gtk.FileChooserAction.OPEN)
+        chooser.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                            "Open", Gtk.ResponseType.OK)
+        chooser.set_default_response(Gtk.ResponseType.OK)
+        filt = Gtk.FileFilter()
+        filt.set_name("aimless backup (*.json)")
+        filt.add_pattern("*.json")
+        chooser.add_filter(filt)
+        if chooser.run() != Gtk.ResponseType.OK:
+            chooser.destroy()
+            return None
+        path = chooser.get_filename()
+        chooser.destroy()
+        if not path:
+            return None
+        bundle_pw = ask_secret(None, "Backup passphrase")
+        if not bundle_pw:
+            return None
+        app_pw = ask_secret(None, "Choose a passphrase for this machine", confirm=True)
+        if not app_pw:
+            return None
+        try:
+            restore_bundle(path, bundle_pw, app_pw)
+        except (ValueError, OSError, KeyError) as e:
+            _error_dialog(None, f"Import failed: {e}")
+            return None
+        # The daemon booted with a fresh node key; reload the imported one.
+        restart_daemon(self.supervisor, self.log)
+        if not self.supervisor.is_running():
+            _error_dialog(None, "Imported, but the daemon did not restart. "
+                          "Quit aimless and reopen.")
+            return None
+        self.log("imported identity from backup on the init screen")
+        return app_pw
+
     def _no_window_headless(self):
         """True right after setup when there is no window and no usable tray —
         the app has nothing to show and (in a container) must exit so the
@@ -4035,7 +4089,7 @@ class AimlessApp:
             except Exception:
                 pass
         try:
-            os.remove(APP_PID_FILE)
+            os.remove(paths.app_pid_path())
         except OSError:
             pass
         Gtk.main_quit()
@@ -4062,7 +4116,7 @@ def daemon_pid_from_socket():
 def daemon_pid_from_procs():
     """Last-resort stop() fallback: an aimlessd process using our datadir
     (covers daemons still booting, whose API socket is not up yet)."""
-    target = data_dir()
+    target = paths.daemon_dir()
     try:
         for entry in os.listdir("/proc"):
             if not entry.isdigit():
@@ -4078,7 +4132,7 @@ def daemon_pid_from_procs():
             if "-datadir" in cmdline:
                 if target in cmdline:
                     return int(entry)
-            elif target == os.path.expanduser("~/.local/share/aimless"):
+            elif target == os.path.expanduser("~/.local/share/aimless/daemon"):
                 return int(entry)
     except Exception:
         pass
@@ -4096,8 +4150,8 @@ def read_pid(path):
 
 
 def install_autostart():
-    autostart_dir = os.path.join(os.path.dirname(CONFIG_DIR), "autostart")
-    desktop_path = os.path.join(autostart_dir, "aimless-tray.desktop")
+    desktop_path = paths.autostart_path()
+    autostart_dir = os.path.dirname(desktop_path)
 
     exec_line = None
     aimless_bin = shutil.which("aimless") or os.path.expanduser("~/.local/bin/aimless")
@@ -4133,7 +4187,7 @@ def install_autostart():
 
 def stop_all():
     stopped = []
-    pid = read_pid(APP_PID_FILE)
+    pid = read_pid(paths.app_pid_path())
     if pid and pid != os.getpid() and pid_alive(pid):
         try:
             os.kill(pid, signal.SIGTERM)
@@ -4143,7 +4197,7 @@ def stop_all():
         deadline = time.time() + 10
         while time.time() < deadline and pid_alive(pid):
             time.sleep(0.1)
-    legacy_sup = read_pid(os.path.join(CONFIG_DIR, "tray.pid"))
+    legacy_sup = read_pid(os.path.join(paths.run_dir(), "tray.pid"))
     if legacy_sup and legacy_sup != pid and pid_alive(legacy_sup):
         try:
             os.kill(legacy_sup, signal.SIGTERM)
@@ -4152,7 +4206,7 @@ def stop_all():
             pass
     for legacy in ("tray.pid", "gui.pid", "session.json"):
         try:
-            os.remove(os.path.join(CONFIG_DIR, legacy))
+            os.remove(os.path.join(paths.run_dir(), legacy))
         except OSError:
             pass
     supervisor = DaemonSupervisor()

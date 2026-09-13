@@ -11,4 +11,4 @@ COPY --from=build /aimlessd /usr/local/bin/aimlessd
 USER aimless
 WORKDIR /data
 VOLUME /data
-ENTRYPOINT ["/usr/local/bin/aimlessd", "-datadir", "/data"]
+ENTRYPOINT ["/usr/local/bin/aimlessd", "-datadir", "/data/daemon"]
