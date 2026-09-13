@@ -32,6 +32,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GLib, Gdk, Pango, GdkPixbuf, Gio
 
 from . import crypto, protocol, logging, paths
+from . import tunnel
 from . import keys as keysmod
 from .daemon import DaemonClient, Client, DaemonError
 from .service import Sync
@@ -96,7 +97,7 @@ def linkify(text: str) -> str:
 
 
 def sock_path():
-    return paths.sock_path()
+    return tunnel.client_socket()
 
 
 def contacts_path():
@@ -683,7 +684,10 @@ def daemon_binary():
 
 class DaemonSupervisor:
     def __init__(self):
-        self.datadir = paths.daemon_dir()
+        self.remote = tunnel.remote_config()
+        self.external = bool(self.remote)
+        self.tunnel = tunnel.TunnelSupervisor(self.remote) if self.external else None
+        self.datadir = None if self.external else paths.daemon_dir()
         self.sock = sock_path()
         self.child = None
 
@@ -696,6 +700,37 @@ class DaemonSupervisor:
             return True
         except Exception:
             return False
+
+    def _reachable(self):
+        """A full handshake through the client socket (is_running only opens it)."""
+        d = None
+        try:
+            d = DaemonClient(self.sock)
+            d.request("whoami", timeout=3)
+            return True
+        except Exception:
+            return False
+        finally:
+            if d is not None:
+                try:
+                    d.close()
+                except Exception:
+                    pass
+
+    def _local_daemon_running(self):
+        """True when a *local* daemon occupies <root>/daemon/api.sock, which would
+        conflict with a remote daemon sharing our node key."""
+        local = os.path.join(paths.daemon_dir(), "api.sock")
+        if os.path.abspath(local) == os.path.abspath(self.sock):
+            return False
+        try:
+            DaemonClient(local).close()
+            return True
+        except Exception:
+            return False
+
+    def tunnel_state(self):
+        return self.tunnel.state() if self.tunnel is not None else None
 
     def status(self):
         d = None
@@ -719,6 +754,8 @@ class DaemonSupervisor:
                 d.close()
 
     def spawn(self):
+        if self.external:
+            raise RuntimeError("external daemon mode — not spawning a local aimlessd")
         binary = self.binary()
         if not binary:
             raise RuntimeError(
@@ -747,6 +784,25 @@ class DaemonSupervisor:
         return self.child.pid
 
     def ensure(self, log=None):
+        if self.external:
+            if self._local_daemon_running():
+                raise RuntimeError(
+                    "a local aimlessd is running at "
+                    + os.path.join(paths.daemon_dir(), "api.sock")
+                    + " — run `aimless stop` before using the remote daemon")
+            if not self.tunnel.ensure(log=log):
+                raise RuntimeError(
+                    f"could not start the SSH tunnel to {self.tunnel.host}"
+                    + (f" ({self.tunnel.last_error})" if self.tunnel.last_error else ""))
+            deadline = time.time() + 25
+            while time.time() < deadline:
+                if self._reachable():
+                    if log:
+                        log(f"remote daemon ready ({self.tunnel.host})")
+                    return True
+                time.sleep(0.2)
+            raise RuntimeError(
+                f"remote daemon not reachable through the tunnel ({self.tunnel.host})")
         if self.is_running():
             return True
         if log:
@@ -764,6 +820,10 @@ class DaemonSupervisor:
         raise RuntimeError("daemon did not come up within 20s")
 
     def stop(self):
+        if self.external:
+            if self.tunnel is not None:
+                self.tunnel.stop()
+            return
         pid = daemon_pid_from_socket()
         if pid is None:
             pid = read_pid(paths.daemon_pid_path())
@@ -2614,9 +2674,25 @@ class ActivityView(Gtk.Box):
         self.info_label.set_markup(f"<span foreground='{C['muted']}'>○  checking daemon …</span>")
 
     def refresh_info(self, st):
+        tunnel = None
+        try:
+            tunnel = self.app.supervisor.tunnel_state()
+        except Exception:
+            tunnel = None
+        tnote = ""
+        if tunnel is not None:
+            esc = GLib.markup_escape_text
+            tn = f"ssh tunnel: {esc(tunnel['host'])} — {'up' if tunnel['up'] else 'down'}"
+            if tunnel["restarts"]:
+                tn += f" · restarts {tunnel['restarts']}"
+            if not tunnel["up"] and tunnel.get("last_error"):
+                tn += f" · {esc(tunnel['last_error'])}"
+            tnote = (f"\n{tn}"
+                     f"\n  remote {esc(tunnel['remote_socket'])}"
+                     f"\n  local  {esc(tunnel['local_socket'])}")
         if not st:
             self.info_label.set_markup(
-                f"<span foreground='{C['danger']}'>●  offline — daemon not reachable</span>")
+                f"<span foreground='{C['danger']}'>●  offline — daemon not reachable</span>{tnote}")
             return
         build = st.get("build", "")
         version_note = ""
@@ -2642,7 +2718,7 @@ class ActivityView(Gtk.Box):
                  else f"<span foreground='{C['away']}'>●  connecting — no Yggdrasil peers yet</span>")
         self.info_label.set_markup(
             f"{state}  —  address <b>{st['address']}</b>  ·  peers {st['peers_up']}/{st['peers_total']}\n"
-            f"daemon: {build}  ·  client: aimless/{client_version}{version_note}")
+            f"daemon: {build}  ·  client: aimless/{client_version}{version_note}{tnote}")
 
     def log(self, line):
         stamp = datetime.now().strftime("%H:%M:%S")
@@ -2730,12 +2806,16 @@ class AimlessWindow(Gtk.Window):
         route_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
         route_bar.set_border_width(6)
         route_bar.get_style_context().add_class("aimless-route-bar")
+        self.route_icon = Gtk.Image.new_from_icon_name(
+            first_icon("network-wireless-signal-excellent-symbolic", "applications-internet"), Gtk.IconSize.MENU)
+        route_bar.pack_start(self.route_icon, False, False, 0)
         self.route_label = Gtk.Label(label="daemon: starting …")
-        route_bar.pack_start(Gtk.Image.new_from_icon_name(
-            first_icon("network-wireless-signal-excellent-symbolic", "applications-internet"), Gtk.IconSize.MENU),
-            False, False, 0)
         route_bar.pack_start(self.route_label, False, False, 0)
+        self.self_id_label = Gtk.Label()
+        self.self_id_label.set_ellipsize(Pango.EllipsizeMode.END)
+        route_bar.pack_end(self.self_id_label, False, False, 0)
         root.pack_start(route_bar, False, False, 0)
+        self._self_id = None
 
         self.add(root)
 
@@ -3019,17 +3099,89 @@ class AimlessWindow(Gtk.Window):
         run_async(worker, on_done=done, on_error=fail)
         return True
 
+    def _set_route_icon(self, name):
+        try:
+            self.route_icon.set_from_icon_name(name, Gtk.IconSize.MENU)
+        except Exception:
+            pass
+
+    def _tunnel_tooltip(self, t):
+        lines = [
+            f"SSH tunnel: {'up' if t['up'] else 'down'}",
+            f"remote: {t['host']} {t['remote_socket']}",
+            f"local:  {t['local_socket']}",
+            f"restarts: {t['restarts']}",
+        ]
+        if t.get("last_error"):
+            lines.append(f"last error: {t['last_error']}")
+        return "\n".join(lines)
+
+    def refresh_self_id(self):
+        if not self.session:
+            return
+        screen = self.session.self_screen or "anonymous"
+        node = self.session.self_node or ""
+        if self._self_id == (screen, node):
+            return
+        self._self_id = (screen, node)
+        short = f"{node[:16]}…" if node else "—"
+        self.self_id_label.set_markup(
+            f"<span foreground='{C['muted2']}'>you: {GLib.markup_escape_text(screen)}</span>"
+            f"  ·  <span foreground='{C['subtitle']}'>{short}</span>")
+        tip = f"node key: {node}"
+        if self.session.pubkey_hex:
+            tip += f"\nclient pubkey: {self.session.pubkey_hex}"
+        self.self_id_label.set_tooltip_text(tip)
+
     def refresh_route(self, st):
-        if not st:
+        tunnel = self.supervisor.tunnel_state() if self.supervisor else None
+        if tunnel is not None and not tunnel["up"]:
+            host = GLib.markup_escape_text(tunnel["host"])
             self.route_label.set_markup(
-                f"<span foreground='{C['danger']}'>●  offline — daemon not reachable</span>")
+                f"<span foreground='{C['danger']}'>●  tunnel down</span>  —  {host} · reconnecting…")
+            self.route_label.set_tooltip_text(self._tunnel_tooltip(tunnel))
+            self._set_route_icon(first_icon(
+                "network-wireless-signal-none-symbolic", "network-offline-symbolic",
+                "network-error-symbolic"))
+        elif not st:
+            if tunnel is not None:
+                host = GLib.markup_escape_text(tunnel["host"])
+                self.route_label.set_markup(
+                    f"<span foreground='{C['away']}'>●  remote daemon unreachable</span>"
+                    f"  —  tunnel {host}")
+                self.route_label.set_tooltip_text(self._tunnel_tooltip(tunnel))
+            else:
+                self.route_label.set_markup(
+                    f"<span foreground='{C['danger']}'>●  offline — daemon not reachable</span>")
+                self.route_label.set_tooltip_text(None)
+            self._set_route_icon(first_icon(
+                "network-wireless-signal-none-symbolic", "network-offline-symbolic",
+                "network-error-symbolic"))
         elif st["peers_up"] == 0:
+            tail = ""
+            if tunnel is not None:
+                tail = f"  ·  ↗ {GLib.markup_escape_text(tunnel['host'])}"
+                self.route_label.set_tooltip_text(self._tunnel_tooltip(tunnel))
+            else:
+                self.route_label.set_tooltip_text(None)
             self.route_label.set_markup(
-                f"<span foreground='{C['away']}'>●  connecting — no Yggdrasil peers yet</span>")
+                f"<span foreground='{C['away']}'>●  connecting — no Yggdrasil peers yet</span>{tail}")
+            self._set_route_icon(first_icon(
+                "network-wireless-signal-weak-symbolic", "network-wireless-signal-ok-symbolic",
+                "network-idle-symbolic"))
         else:
+            tail = ""
+            if tunnel is not None:
+                tail = f"  ·  ↗ {GLib.markup_escape_text(tunnel['host'])}"
+                self.route_label.set_tooltip_text(self._tunnel_tooltip(tunnel))
+            else:
+                self.route_label.set_tooltip_text(None)
             self.route_label.set_markup(
                 f"<span foreground='{C['online']}'>●  online</span>  —  {st['address']}  ·  "
-                f"peers {st['peers_up']}/{st['peers_total']}")
+                f"peers {st['peers_up']}/{st['peers_total']}{tail}")
+            self._set_route_icon(first_icon(
+                "network-wireless-signal-excellent-symbolic", "applications-internet"))
+        self.refresh_self_id()
 
     # -- Keys & Identity --------------------------------------------------
     def _info_dialog(self, title, text, secondary=None, parent=None):
@@ -3843,6 +3995,8 @@ class AimlessApp:
         self.lock_fh = None
         self.quitting = False
         self._unlocking = False
+        self._tunnel_fail = 0
+        self._tunnel_restarting = False
 
     def start(self, open_window):
         rc = self._setup(open_window)
@@ -3887,8 +4041,69 @@ class AimlessApp:
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, self.quit)
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, self.quit)
         GLib.timeout_add_seconds(5, self.poll)
+        if self.supervisor.external:
+            self.log(f"external daemon mode — tunnel to {self.supervisor.tunnel.host}")
+            GLib.timeout_add_seconds(20, self.probe_tunnel)
         self.log(f"app started (pid {os.getpid()}, tray={self.tray.have_tray})")
         return None
+
+    # -- SSH tunnel monitoring -------------------------------------------
+    def probe_tunnel(self):
+        """20s liveness probe; restart on two consecutive failures."""
+        if self.quitting or not self.supervisor.external:
+            return False
+        if self._tunnel_restarting:
+            return True
+        t = self.supervisor.tunnel
+        if t.is_running() and t.probe():
+            if self._tunnel_fail:
+                self.log("tunnel: healthy again")
+            self._tunnel_fail = 0
+            return True
+        self._tunnel_fail += 1
+        if self._tunnel_fail == 1:
+            self.log("tunnel: probe failed (1/2) — confirming")
+            GLib.timeout_add(1000, self._confirm_tunnel)
+        else:
+            self._tunnel_fail = 0
+            self._schedule_tunnel_restart()
+        return True
+
+    def _confirm_tunnel(self):
+        if self.quitting or self._tunnel_restarting:
+            return False
+        t = self.supervisor.tunnel
+        if t.is_running() and t.probe():
+            self._tunnel_fail = 0
+            self.log("tunnel: recovered")
+            return False
+        self._tunnel_fail = 0
+        self._schedule_tunnel_restart()
+        return False
+
+    def _schedule_tunnel_restart(self):
+        if self._tunnel_restarting or self.quitting:
+            return
+        self._tunnel_restarting = True
+        delay = self.supervisor.tunnel.next_backoff()
+        self.log(f"tunnel: restarting in {delay}s ({self.supervisor.tunnel.host})")
+        GLib.timeout_add_seconds(delay, self._do_tunnel_restart)
+
+    def _do_tunnel_restart(self):
+        if self.quitting:
+            self._tunnel_restarting = False
+            return False
+        t = self.supervisor.tunnel
+        ok = t.restart(log=self.log)
+        self._tunnel_restarting = False
+        if ok:
+            t.reset_backoff()
+            self.rewatch()
+        else:
+            self._schedule_tunnel_restart()
+        self.poll_status()
+        return False
+
 
     def on_open_signal(self, *_):
         self.open_window()
@@ -4045,7 +4260,15 @@ class AimlessApp:
         return self.window is None and not (self.tray is not None and self.tray.is_embedded())
 
     def poll(self):
-        if not self.quitting and not self.supervisor.is_running():
+        if self.quitting:
+            return GLib.SOURCE_REMOVE
+        if self.supervisor.external:
+            t = self.supervisor.tunnel
+            if t is not None and not self._tunnel_restarting and not t.is_running():
+                self.log("tunnel: ssh process gone — restarting")
+                self._schedule_tunnel_restart()
+            return GLib.SOURCE_CONTINUE
+        if not self.supervisor.is_running():
             self.log("aimlessd died — restarting")
             try:
                 self.supervisor.ensure(log=self.log)
@@ -4210,10 +4433,14 @@ def stop_all():
         except OSError:
             pass
     supervisor = DaemonSupervisor()
-    if supervisor.is_running():
+    if supervisor.external:
         supervisor.stop()
-        stopped.append("aimlessd")
-    subprocess.run(["pkill", "-x", "aimlessd"], capture_output=True)
+        stopped.append("remote tunnel")
+    else:
+        if supervisor.is_running():
+            supervisor.stop()
+            stopped.append("aimlessd")
+        subprocess.run(["pkill", "-x", "aimlessd"], capture_output=True)
     subprocess.run(["pkill", "-f", "aimless.cli gui"], capture_output=True)
     subprocess.run(["pkill", "-f", "aimless.cli tray"], capture_output=True)
     return stopped

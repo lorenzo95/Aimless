@@ -1,0 +1,25 @@
+# Daemon-only aimless: no web desktop, no ports. The client reaches this
+# daemon's Unix API socket over SSH by bind-mounting ./aimless-data to the host.
+#
+#   docker compose -f docker-compose.daemon.yml up -d
+#
+# Set AIMLESS_UID/AIMLESS_GID to your host user so daemon/api.sock is owned by
+# you (the SSH-forwarded socket must be readable by your SSH login).
+services:
+  aimless-daemon:
+    image: ${AIMLESS_IMAGE:-ghcr.io/lorenzo95/aimless/aimless-webtop:latest}
+    container_name: aimless-daemon
+    environment:
+      - AIMLESS_MODE=daemon
+      - AIMLESS_VERSION=${AIMLESS_VERSION:-main}   # git ref to fetch dist artifacts from
+      - AIMLESS_FETCH=${AIMLESS_FETCH:-missing}    # 'always' to force a re-fetch
+      - AIMLESS_UID=${AIMLESS_UID:-1000}
+      - AIMLESS_GID=${AIMLESS_GID:-1000}
+    restart: unless-stopped
+    volumes:
+      - ./aimless-data:/data             # daemon/, logs/, bin/ live here
+    healthcheck:
+      test: ["CMD", "test", "-S", "/data/daemon/api.sock"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

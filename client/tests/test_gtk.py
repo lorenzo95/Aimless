@@ -2063,3 +2063,34 @@ def test_first_run_screen_offers_import(monkeypatch):
     from gi.repository import Gtk
     monkeypatch.setattr(Gtk.Dialog, "run", lambda self: Gtk.ResponseType.APPLY)
     assert gtkui.ask_create_identity(None) == ("__import__",)
+
+
+# --- bottom bar: tunnel + own id --------------------------------------------
+
+
+def test_route_bar_external_up(gtk_app, monkeypatch):
+    win = gtk_app["win"]
+    state = {"up": True, "host": "u@k3s-1", "remote_socket": "/srv/api.sock",
+             "local_socket": "/run/r.sock", "restarts": 0, "last_error": "", "last_ok": 0}
+    monkeypatch.setattr(win.supervisor, "tunnel_state", lambda: state)
+    win.refresh_route({"address": "200::1", "peers_up": 1, "peers_total": 1, "build": "x", "mtu": 0})
+    assert "u@k3s-1" in win.route_label.get_text()
+    assert win.session.self_node[:8] in win.self_id_label.get_text()
+
+
+def test_route_bar_tunnel_down(gtk_app, monkeypatch):
+    win = gtk_app["win"]
+    state = {"up": False, "host": "u@k3s-1", "remote_socket": "/srv/api.sock",
+             "local_socket": "/run/r.sock", "restarts": 2, "last_error": "timeout", "last_ok": 0}
+    monkeypatch.setattr(win.supervisor, "tunnel_state", lambda: state)
+    win.refresh_route(None)
+    assert "tunnel down" in win.route_label.get_text()
+
+
+def test_route_bar_local_unchanged(gtk_app, monkeypatch):
+    win = gtk_app["win"]
+    monkeypatch.setattr(win.supervisor, "tunnel_state", lambda: None)
+    win.refresh_route({"address": "200::1", "peers_up": 1, "peers_total": 1, "build": "x", "mtu": 0})
+    text = win.route_label.get_text()
+    assert "online" in text
+    assert "tunnel" not in text

@@ -4,6 +4,7 @@ import sys
 import time
 
 from . import crypto, protocol, paths
+from . import tunnel
 from .daemon import DaemonClient, Client, DaemonError
 from .service import Sync
 from .store import Store
@@ -14,7 +15,7 @@ def client_dir() -> str:
 
 
 def socket_path() -> str:
-    return paths.sock_path()
+    return tunnel.client_socket()
 
 
 def identity_path() -> str:
@@ -157,7 +158,21 @@ def resolve_buddy(name: str) -> dict:
     return contacts[name]
 
 
+def ensure_tunnel():
+    """In external-daemon mode, make sure the SSH tunnel is up (detached)."""
+    remote = tunnel.remote_config()
+    if not remote:
+        return
+    sup = tunnel.TunnelSupervisor(remote)
+    if sup.is_running() and sup.probe():
+        return
+    if not sup.ensure(log=lambda line: print(line, file=sys.stderr)):
+        print(f"cannot start the SSH tunnel to {remote['host']}", file=sys.stderr)
+        sys.exit(1)
+
+
 def connect_daemon() -> DaemonClient:
+    ensure_tunnel()
     try:
         return DaemonClient(socket_path())
     except (OSError, FileNotFoundError) as e:
@@ -235,6 +250,7 @@ def cmd_unblock(args):
     store.clear_blocked_screen(node)
     print(f"cleared local suppression for {node[:16]}…")
     try:
+        ensure_tunnel()
         daemon = DaemonClient(socket_path())
     except (OSError, FileNotFoundError) as e:
         print(f"daemon not reachable ({e}) — the client mute is cleared; start the app to fully apply",

@@ -1,6 +1,6 @@
 # Plan: always-on daemon (Docker) + a client over an app-managed SSH socket tunnel
 
-Status: **not started** — stored for later. Branch: `always-on-daemon`.
+Status: **implemented on this branch (0.9.0)**. Kept as the design record.
 
 ## Problem
 

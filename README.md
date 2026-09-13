@@ -98,7 +98,24 @@ Header menu → **Keys & Identity …**:
 Keys are written `0600` and atomically; seeds are never logged.
 
 ### CLI
-`aimless init`, `invite`, `add <invite> [petname]`, `list`, `send`, `chat`, `away`, `gui`, `tray`, `stop` — see `aimless --help`.
+`aimless init`, `invite`, `add <invite> [petname]`, `list`, `send`, `chat`, `away`, `gui`, `tray`, `paths`, `stop` — see `aimless --help`.
+
+## Always-on daemon (optional)
+
+By default the client owns a local daemon; if your machine is off, a message sent to you waits on the sender until you're back. To never miss one, run the daemon on an always-on host (small server, Pi, VPS) and let the client reach it over SSH.
+
+1. On the always-on host, run the daemon-only container (see `deploy/docker/README.md`), seeding your existing `node.key` so your address is unchanged.
+2. On the client, add a `remote` block to `client/prefs.json` (`aimless paths` shows where it lives):
+   ```json
+   "remote": {
+     "host": "user@always-on-host",
+     "socket": "/abs/path/aimless-data/daemon/api.sock"
+   }
+   ```
+   Your SSH key must be authorized on the host. The client opens the tunnel itself; you don't run ssh by hand.
+3. Start aimless as usual. The bottom bar shows the tunnel host (and your node id); the tunnel is monitored and restarted automatically if it drops (e.g. after the laptop wakes).
+
+The daemon holds ciphertext and the node key only — your identity stays on the client. **One client per daemon.**
 
 ---
 

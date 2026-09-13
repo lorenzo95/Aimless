@@ -1,10 +1,11 @@
 #!/bin/sh
 # Fix up the bind-mounted /data volume (host dirs are initially root-owned),
 # fetch the per-release aimless artifacts if needed, then drop to the non-root
-# user and run the whole supervised stack as uid 1000.
+# user and either run the webtop stack (default) or a headless daemon-only
+# container (AIMLESS_MODE=daemon).
 set -e
 
-mkdir -p /data/logs /data/bin
+mkdir -p /data/logs /data/daemon /data/bin
 
 VERSION="${AIMLESS_VERSION:-main}"
 BASE="https://raw.githubusercontent.com/lorenzo95/Aimless/$VERSION/dist"
@@ -29,6 +30,15 @@ fetch() {
 fetch /data/bin/aimless.pyz          "$BASE/aimless.pyz"
 fetch /data/bin/aimlessd-linux-amd64 "$BASE/aimlessd-linux-amd64"
 
-chown -R aimless:aimless /data
+UID_RUN="${AIMLESS_UID:-1000}"
+GID_RUN="${AIMLESS_GID:-1000}"
+chown -R "$UID_RUN:$GID_RUN" /data
 
-exec su-exec aimless:aimless /usr/bin/supervisord -n -c /etc/supervisord.conf
+if [ "$AIMLESS_MODE" = "daemon" ]; then
+    # Daemon-only: no X/VNC/supervisord, no ports. The client reaches this
+    # daemon's API socket over SSH by bind-mounting /data to the host.
+    echo "starting aimlessd (daemon-only) as $UID_RUN:$GID_RUN"
+    exec su-exec "$UID_RUN:$GID_RUN" /data/bin/aimlessd-linux-amd64 -datadir /data/daemon
+fi
+
+exec su-exec "$UID_RUN:$GID_RUN" /usr/bin/supervisord -n -c /etc/supervisord.conf

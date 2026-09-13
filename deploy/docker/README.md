@@ -123,6 +123,39 @@ Custom peers go in `daemon/config.json`:
 > `state/`/`config/` directories are ignored. Recreate the volume and restore
 > from an encrypted backup via **Import backup…** on the first-run screen.
 
+## Daemon-only mode (always-on)
+
+Run the same image headless — no VNC, no ports — as an always-on daemon your
+client reaches over SSH:
+
+```bash
+AIMLESS_UID=$(id -u) AIMLESS_GID=$(id -g) \
+  docker compose -f docker-compose.daemon.yml up -d
+```
+
+- Just `aimlessd -datadir /data/daemon`.
+- **Seed your node key** so your address is unchanged: copy your existing
+  `daemon/node.key` into `./aimless-data/daemon/` (and optionally `aimless.db`
+  for queued/inbox continuity). Optional peers live in
+  `./aimless-data/daemon/config.json` → `{"peers": [...]}`.
+- The daemon's API socket appears on the host at
+  `./aimless-data/daemon/api.sock` (container `/data/daemon/api.sock`). On the
+  client, add to `client/prefs.json`:
+
+  ```json
+  "remote": {
+    "host": "user@this-host",
+    "socket": "/abs/path/aimless-data/daemon/api.sock"
+  }
+  ```
+
+  The client forwards that socket over SSH (streamlocal); the socket's `0600`
+  permissions are the only auth — no TCP.
+- **Set `AIMLESS_UID`/`AIMLESS_GID` to your host uid/gid** so the socket is owned
+  by the user whose SSH key connects. Unix sockets in bind mounts work on native
+  Linux Docker, not Docker Desktop.
+- One client per daemon.
+
 ## Stop / remove
 
 ```bash
