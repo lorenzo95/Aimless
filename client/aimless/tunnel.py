@@ -78,12 +78,21 @@ def client_socket() -> str:
     return paths.sock_path()
 
 
+def _pid_zombie(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            fields = f.read().split()
+        return len(fields) > 2 and fields[2] == "Z"
+    except OSError:
+        return False
+
+
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-        return True
     except OSError:
         return False
+    return not _pid_zombie(pid)
 
 
 def _cmdline(pid: int):
@@ -153,6 +162,11 @@ class TunnelSupervisor:
         return bool(pid and _pid_alive(pid) and os.path.exists(self.local_socket))
 
     def spawn(self):
+        if self.child is not None:
+            try:
+                self.child.wait(timeout=0.2)   # reap a replaced child
+            except Exception:
+                pass
         os.makedirs(os.path.dirname(self.local_socket) or ".", mode=0o700, exist_ok=True)
         try:
             os.makedirs(paths.logs_dir(), exist_ok=True)
@@ -215,26 +229,49 @@ class TunnelSupervisor:
 
     def stop(self):
         pid = self.child.pid if self.child is not None else self._pid_from_file()
-        if pid and _is_our_ssh(pid, self.local_socket):
+        if self.child is not None:
+            ours = True                # it's our own child
+        else:
+            ours = bool(pid and _is_our_ssh(pid, self.local_socket))
+        if pid and ours:
             try:
                 os.kill(pid, signal.SIGTERM)
             except OSError:
                 pass
-            deadline = time.time() + 5
-            while time.time() < deadline and _pid_alive(pid):
-                time.sleep(0.1)
-            if _pid_alive(pid):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                time.sleep(0.3)
+            self._reap(pid)
         self.child = None
         self._remove_pid()
         try:
             os.remove(self.local_socket)
         except OSError:
             pass
+
+    def _reap(self, pid, timeout=2):
+        """Wait for the ssh process to die and reap it (a zombie would otherwise
+        make ``_pid_alive`` true for the whole grace period)."""
+        if self.child is not None:
+            try:
+                self.child.wait(timeout=timeout)
+                return
+            except Exception:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                try:
+                    self.child.wait(timeout=1)
+                except Exception:
+                    pass
+            return
+        deadline = time.time() + timeout
+        while time.time() < deadline and _pid_alive(pid):
+            time.sleep(0.1)
+        if _pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            time.sleep(0.3)
 
     # -- backoff ----------------------------------------------------------
     def next_backoff(self) -> int:

@@ -2094,3 +2094,59 @@ def test_route_bar_local_unchanged(gtk_app, monkeypatch):
     text = win.route_label.get_text()
     assert "online" in text
     assert "tunnel" not in text
+
+
+# --- client-offline indicator (stale status) --------------------------------
+
+
+def test_status_stale_helper():
+    now = 1_000_000_000_000
+    assert gtkui._status_stale({"ts": now - 1000}, now) is False
+    assert gtkui._status_stale({"ts": now - gtkui.STATUS_STALE_MS - 1}, now) is True
+    assert gtkui._status_stale({}, now) is False
+    assert gtkui._status_stale({"ts": "x"}, now) is False
+    assert gtkui._status_stale({"ts": 0}, now) is False
+
+
+def test_presence_state_marks_stale_client_offline():
+    stale = int(time.time() * 1000) - gtkui.STATUS_STALE_MS - 1
+
+    class C:
+        def decrypt_status(self, payload):
+            return {"away": None, "ts": stale}
+
+    online, away, off = gtkui._presence_state({"online": True, "status_payload": "x"}, C())
+    assert off is True and online is False and away == "client offline"
+
+
+def test_presence_state_fresh_keeps_away():
+    class C:
+        def decrypt_status(self, payload):
+            return {"away": "brb", "ts": int(time.time() * 1000)}
+
+    online, away, off = gtkui._presence_state({"online": True, "status_payload": "x"}, C())
+    assert off is False and online is True and away == "brb"
+
+
+def test_refresh_presence_client_offline(gtk_app, monkeypatch):
+    win = gtk_app["win"]
+    node = gtk_app["b_node"]
+    stale = int(time.time() * 1000) - gtkui.STATUS_STALE_MS - 1
+    monkeypatch.setattr(win.session.client, "decrypt_status",
+                        lambda payload: {"away": None, "ts": stale})
+    win.messages.refresh_presence({node: {"online": True, "status_payload": "x"}})
+    thread = win.messages.threads[node]
+    assert thread["online"] is False
+    assert thread["away"] == "client offline"
+    assert thread["widgets"]["subtitle"].get_text() == "client offline"
+
+
+def test_contacts_show_client_offline(gtk_app, monkeypatch):
+    win = gtk_app["win"]
+    node = gtk_app["b_node"]
+    stale = int(time.time() * 1000) - gtkui.STATUS_STALE_MS - 1
+    monkeypatch.setattr(win.session.client, "decrypt_status",
+                        lambda payload: {"away": None, "ts": stale})
+    win.contacts.refresh_presence({node: {"online": True, "status_payload": "x"}})
+    title = win.contacts._buddy_rows["bob"]
+    assert "client offline" in title.get_text()

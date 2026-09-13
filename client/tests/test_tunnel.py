@@ -141,3 +141,42 @@ def test_restart_success_resets_backoff(home, monkeypatch):
     assert t.restart() is True
     assert t._backoff_index == 0
     assert t.restarts == 1
+
+
+def test_pid_alive_false_for_zombie(monkeypatch):
+    monkeypatch.setattr(tunnel.os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(tunnel, "_pid_zombie", lambda pid: True)
+    assert tunnel._pid_alive(123) is False
+    monkeypatch.setattr(tunnel, "_pid_zombie", lambda pid: False)
+    assert tunnel._pid_alive(123) is True
+
+
+class _DeadChild:
+    pid = 99
+
+    def __init__(self):
+        self.waited = False
+
+    def poll(self):
+        return 0
+
+    def wait(self, timeout=None):
+        self.waited = True
+        return 0
+
+
+def test_stop_reaps_child_and_is_quick(home, monkeypatch):
+    import time as _time
+    local = str(home / "run" / "r.sock")
+    open(local, "w").close()
+    t = tunnel.TunnelSupervisor({"host": "u@h", "socket": "/s", "local_socket": local})
+    child = _DeadChild()
+    t.child = child
+    t._write_pid(child.pid)
+    monkeypatch.setattr(tunnel.os, "kill", lambda pid, sig: None)
+    start = _time.time()
+    t.stop()
+    took = _time.time() - start
+    assert child.waited is True, "child must be reaped"
+    assert took < 1.0, f"stop took {took:.2f}s"
+    assert not os.path.exists(paths.tunnel_pid_path())

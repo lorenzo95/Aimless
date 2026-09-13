@@ -900,6 +900,42 @@ class Session:
         return self.self_node
 
 
+STATUS_STALE_MS = 180_000
+
+
+def _status_stale(st, now_ms=None):
+    """True when a buddy's status stopped refreshing (their client is gone),
+    even though their always-on daemon is still reachable."""
+    ts = st.get("ts")
+    if not isinstance(ts, int) or ts <= 0:
+        return False
+    return (now_ms or int(time.time() * 1000)) - ts > STATUS_STALE_MS
+
+
+def _presence_state(p, client):
+    """(online, away, client_offline) for a daemon presence entry.
+
+    A stale status means the daemon is up but the client isn't — messages are
+    still delivered, so it's shown as away ("client offline"), not offline."""
+    online = bool(p.get("online"))
+    away = None
+    client_offline = False
+    payload = p.get("status_payload")
+    if payload:
+        try:
+            st = client.decrypt_status(payload)
+        except Exception:
+            st = None
+        if st is not None:
+            if st.get("away"):
+                away = st["away"]
+            if _status_stale(st):
+                client_offline = True
+                online = False
+                away = "client offline"
+    return online, away, client_offline
+
+
 def _room_dots_markup(members, presence_by_node, exclude):
     """One presence dot per room member (sorted like the title), excluding self."""
     parts = []
@@ -1263,36 +1299,21 @@ class MessagesView(Gtk.Box):
             self.thread_list.select_row(thread["row"])
 
     def refresh_presence(self, presence):
+        client = self.app.session.client
         for conv, thread in self.threads.items():
             if thread.get("is_room"):
                 pb = {}
                 for n in thread["members"]:
                     if n == self.app.session.self_node:
                         continue
-                    p = presence.get(n, {})
-                    away = None
-                    if p.get("status_payload"):
-                        try:
-                            st = self.app.session.client.decrypt_status(p["status_payload"])
-                            if st.get("away"):
-                                away = st["away"]
-                        except (ValueError, KeyError):
-                            pass
-                    pb[n] = {"online": p.get("online", False), "away": away}
+                    online, away, off = _presence_state(presence.get(n, {}), client)
+                    pb[n] = {"online": online, "away": away, "client_offline": off}
                 thread["presence_by_node"] = pb
                 thread["online"] = any(v["online"] for v in pb.values())
                 thread["away"] = None
             else:
-                p = presence.get(conv, {})
-                thread["online"] = p.get("online", False)
-                away = None
-                if p.get("status_payload"):
-                    try:
-                        st = self.app.session.client.decrypt_status(p["status_payload"])
-                        if st.get("away"):
-                            away = st["away"]
-                    except (ValueError, KeyError):
-                        pass
+                online, away, _off = _presence_state(presence.get(conv, {}), client)
+                thread["online"] = online
                 thread["away"] = away
             self.update_thread_row(conv)
         sel = self.selected
@@ -1872,8 +1893,10 @@ class MessagesView(Gtk.Box):
             lbl.set_xalign(0.0)
             btn.add(lbl)
             btn.get_style_context().add_class("aimless-chip")
-            btn.set_tooltip_text("Open conversation — your buddy" if known
-                                 else "Add as buddy (not your buddy yet)")
+            tip = "Open conversation — your buddy" if known else "Add as buddy (not your buddy yet)"
+            if p.get("client_offline"):
+                tip += " · client offline (messages will be delivered)"
+            btn.set_tooltip_text(tip)
             btn.connect("clicked", self.on_member_chip, n, screen, known)
             chips.add(btn)
             btn.show_all()
@@ -2558,6 +2581,7 @@ class ContactsView(Gtk.Box):
 
     def refresh_presence(self, presence):
         contacts = self.app.session.contacts()
+        client = self.app.session.client
         for petname, title in getattr(self, "_buddy_rows", {}).items():
             info = contacts.get(petname, {})
             node = info.get("node")
@@ -2566,9 +2590,12 @@ class ContactsView(Gtk.Box):
                 # synthetic blocked-stranger row: prefer the stored screen name
                 node = petname
                 label = self.app.session.cache.blocked_screen(petname) or label
-            p = presence.get(node, {})
-            color = C["online"] if p.get("online") else C["muted"]
-            state = "online" if p.get("online") else "offline"
+            online, _away, client_offline = _presence_state(presence.get(node, {}), client)
+            if client_offline:
+                color, state = C["away"], "client offline"
+            else:
+                color = C["online"] if online else C["muted"]
+                state = "online" if online else "offline"
             title.set_markup(
                 f"<b>{GLib.markup_escape_text(label)}</b> "
                 f"<span foreground='{color}' size='small'>{state}</span>")
