@@ -19,7 +19,7 @@ services:
     volumes:
       - ./aimless-data:/data             # daemon/, logs/, bin/ live here
     healthcheck:
-      test: ["CMD", "test", "-S", "/data/daemon/api.sock"]
+      test: ["CMD-SHELL", "test -S /data/daemon/api.sock"]
       interval: 30s
       timeout: 5s
       retries: 3

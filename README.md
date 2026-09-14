@@ -66,8 +66,8 @@ Everything lives under one root — `~/.local/share/aimless` by default, or `$AI
 ~/.local/share/aimless/
 ├── client/    identity.json · contacts.json · state.db · prefs.json · attachments/
 ├── daemon/    node.key · config.json · aimless.db · contacts.json · blocked.json · lock · api.sock
-├── logs/      app.log · daemon.log
-└── run/       app.pid · aimlessd.pid
+├── logs/      app.log · daemon.log · tunnel.log
+└── run/       app.pid · aimlessd.pid · tunnel.pid
 ```
 
 The only thing outside the root is the login autostart entry (`~/.config/autostart/aimless-tray.desktop`), which the desktop spec pins there.
@@ -116,6 +116,8 @@ By default the client owns a local daemon; if your machine is off, a message sen
 3. Start aimless as usual. The bottom bar shows the tunnel host (and your node id); the tunnel is monitored and restarted automatically if it drops (e.g. after the laptop wakes).
 
 The daemon holds ciphertext and the node key only — your identity stays on the client. **One client per daemon.**
+
+While your client is closed, buddies still see your daemon reachable and messages are delivered and queued for you; after ~3 minutes without a status refresh they see you as **away — "client offline"** so nobody waits on a reply. It clears automatically when you reopen aimless.
 
 ---
 
