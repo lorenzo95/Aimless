@@ -2166,3 +2166,15 @@ def test_no_em_dashes_in_client_source():
         text = open(path, encoding="utf-8").read()
         assert "\u2014" not in text, f"em dash in {path}"
 
+
+
+def test_sidebar_away_tooltip(gtk_app):
+    win = gtk_app["win"]
+    node = gtk_app["b_node"]
+    # client offline -> long line, ellipsized, full text on hover
+    win.messages.refresh_presence({node: {"online": True, "client_attached": False}})
+    row = win.messages.threads[node]["row"]
+    assert "client offline" in (row.get_tooltip_text() or "")
+    # no away -> no tooltip
+    win.messages.refresh_presence({node: {"online": True, "client_attached": True}})
+    assert win.messages.threads[node]["row"].get_tooltip_text() is None

@@ -1359,10 +1359,16 @@ class MessagesView(Gtk.Box):
         w = thread["widgets"]
         w["title"].set_markup(_sidebar_title_markup(thread, self.app.session.self_node))
         muted = self.app.session.cache.is_conversation_muted(node)
+        away_text = thread["away"]
         if muted:
             w["subtitle"].set_text("muted")
+            tip = None
         else:
-            w["subtitle"].set_text(thread["away"] if thread["away"] else thread["preview"])
+            w["subtitle"].set_text(away_text if away_text else thread["preview"])
+            # Away/offline lines can be long and get ellipsized: reveal the full
+            # text on hover.
+            tip = away_text if away_text else None
+        thread["row"].set_tooltip_text(tip)
         row_style = thread["row"].get_style_context()
         if muted:
             row_style.add_class("aimless-muted")
