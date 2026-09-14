@@ -253,3 +253,17 @@ def test_heartbeat_stops_when_quitting(home):
     app = gtkui.AimlessApp()
     app.quitting = True
     assert app.heartbeat() == gtkui.GLib.SOURCE_REMOVE
+
+
+def test_probe_daemon_down_refreshes_window(home, monkeypatch):
+    """Regression: probe_tunnel called self.poll_status() (window method) on the
+    app when the remote daemon was unreachable."""
+    _remote(home)
+    app = gtkui.AimlessApp()
+    t = app.supervisor.tunnel
+    monkeypatch.setattr(t, "is_running", lambda: True)
+    monkeypatch.setattr(t, "probe", lambda timeout=2.0: False)
+    win = _FakeWindow()
+    app.window = win
+    assert app.probe_tunnel() is True
+    assert win.polled == 1

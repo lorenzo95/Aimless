@@ -4260,7 +4260,7 @@ class AimlessApp:
             self._daemon_down_logged = True
             self.log(f"tunnel: up, but remote daemon unreachable ({t.host})")
         if self.window is not None:
-            self.poll_status()
+            self.window.poll_status()
         return True
 
     def _confirm_tunnel(self):
