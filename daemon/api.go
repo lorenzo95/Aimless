@@ -13,7 +13,7 @@ import (
 	"sync"
 )
 
-const buildVersion = "aimlessd/0.8.0"
+const buildVersion = "aimlessd/0.9.5"
 
 // protocolVersion identifies the wire format spoken to other daemons. Peers on a
 // different version are ignored rather than misparsed; there is no compat layer.
@@ -133,6 +133,11 @@ func (s *APIServer) handleConn(conn net.Conn) {
 }
 
 func (s *APIServer) dispatch(conn net.Conn, req apiMessage) {
+	// Any client request counts as a heartbeat: presence only advertises a
+	// client while one has been seen recently.
+	if s.presence != nil {
+		s.presence.TouchClient()
+	}
 	switch req.Op {
 	case "whoami":
 		s.replyReq(conn, req, apiMessage{Op: "whoami", Address: s.node.Address.String(), Key: hex.EncodeToString(s.node.Pub), Pid: os.Getpid()})

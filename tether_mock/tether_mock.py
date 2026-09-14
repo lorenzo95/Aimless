@@ -397,7 +397,7 @@ def run_daemon():
     pid_fh.truncate()
     pid_fh.write(str(os.getpid()))
     pid_fh.flush()
-    print(f"[Tether daemon] PID {os.getpid()} — tray supervision active")
+    print(f"[Tether daemon] PID {os.getpid()} - tray supervision active")
 
     tray_proc = spawn_tray()
     loop = GLib.MainLoop()
@@ -817,7 +817,7 @@ class TetherWindow(Gtk.Window):
             self.daemon_stop.set_sensitive(True)
         else:
             self.daemon_status_label.set_markup(
-                "<span foreground='#9aa0ad'>○  No daemon — launching one now…</span>")
+                "<span foreground='#9aa0ad'>○  No daemon - launching one now…</span>")
             self.daemon_stop.set_sensitive(False)
             try:
                 subprocess.Popen(

@@ -111,7 +111,7 @@ def test_gui_buddy_list_and_im_roundtrip(gtk_app):
 
 def test_gui_scroll_reaches_actual_bottom():
     """A row appended just before scroll_to_bottom is laid out by the frame clock,
-    which fires after the first scroll attempt — so the pre-fix single idle pass
+    which fires after the first scroll attempt - so the pre-fix single idle pass
     always ended up one row short. The scroll must re-settle on a tick boundary
     until it truly sits at the bottom."""
     from aimless import gtkui as g
@@ -124,7 +124,7 @@ def test_gui_scroll_reaches_actual_bottom():
     sw.add(lb)
     for i in range(40):
         r = Gtk.ListBoxRow()
-        lbl = Gtk.Label(label=f"message line {i} — some wrapping text to give height")
+        lbl = Gtk.Label(label=f"message line {i} - some wrapping text to give height")
         lbl.set_line_wrap(True)
         lbl.set_max_width_chars(48)
         r.add(lbl)
@@ -252,9 +252,9 @@ def test_gui_old_daemon_warns(gtk_app):
                                "address": "x", "mtu": 65535})
     label = win.activity.info_label.get_text()
     assert "too old" in label, "an old daemon build must warn in the status line"
-    assert "0.8.0" in label, "warning must name the minimum build"
+    assert "0.9.5" in label, "warning must name the minimum build"
 
-    win.activity.refresh_info({"build": "aimlessd/0.8.0", "peers_up": 1, "peers_total": 2,
+    win.activity.refresh_info({"build": "aimlessd/0.9.5", "peers_up": 1, "peers_total": 2,
                                "address": "x", "mtu": 65535})
     label = win.activity.info_label.get_text()
     assert "too old" not in label, "a current daemon must not warn"
@@ -308,13 +308,13 @@ def test_gui_away_status_propagates(gtk_app):
     bob = app["bob"]
     a_node = app["a_node"]
 
-    win.set_away("brb — lunch")
+    win.set_away("brb - lunch")
 
     def away_visible():
         for p in bob.presence():
             if p["key"] == a_node and p.get("status_payload"):
                 st = protocol.open_status(app["bob_identity"], p["status_payload"])
-                return st.get("away") == "brb — lunch"
+                return st.get("away") == "brb - lunch"
         return False
     assert _pump(win, away_visible, timeout=30), "away never reached bob"
 
@@ -464,7 +464,7 @@ def test_cancel_without_tray_logs_exit_and_no_window_exit_signal(gtk_app):
 
     app.tray = _Embedded()
     g.AimlessApp._cancel_or_quit(app)
-    assert app.logged[-1].startswith("cancel — keeping app in the system tray")
+    assert app.logged[-1].startswith("cancel - keeping app in the system tray")
 
     class _EmbeddedNoWindow(_Embedded):
         pass
@@ -517,8 +517,8 @@ def test_reassert_pushes_away_and_available(gtk_app):
     app = gtk_app
     win = app["win"]
 
-    win.set_away("brb — lunch")
-    assert _pump(win, lambda: _bob_sees_away(app, "brb — lunch"), timeout=30)
+    win.set_away("brb - lunch")
+    assert _pump(win, lambda: _bob_sees_away(app, "brb - lunch"), timeout=30)
 
     win.prefs["away"] = ""
     win._reassert_status()
@@ -694,7 +694,7 @@ def test_gui_deny_accept_block_responses(gtk_app, monkeypatch):
                                        "conv": None, "members": [], "seq": 5, "ts": 1000, "text": "hi"})
         win.surface_pending_requests()
 
-    # Deny: one-time soft decline — no persistent state, no daemon interaction;
+    # Deny: one-time soft decline - no persistent state, no daemon interaction;
     # the sender's next message re-prompts.
     stranger = "cd" * 32
     monkeypatch.setattr(win, "_ask_request", lambda r: Gtk.ResponseType.REJECT)
@@ -1122,7 +1122,7 @@ def test_gui_file_send_delivery_indicator(gtk_app):
 def test_gui_file_send_to_room(gtk_app, tmp_path):
     """Regression: sending an attachment into a 3+ member room used to pass the
     raw members dict (node-hex -> info) into send_file_room, whose per-member
-    loop does m["node"] — iterating a dict yields string keys, so it raised
+    loop does m["node"] - iterating a dict yields string keys, so it raised
     TypeError: string indices must be integers inside the async worker. The
     call site must convert to member-info dicts first (mirroring text-send),
     and every non-self member must actually receive the chunks."""
@@ -1178,7 +1178,7 @@ def test_gui_incoming_from_unknown_sender_queues_request(gtk_app, monkeypatch):
     win = app["win"]
     b_node = app["b_node"]
 
-    # simulate a v0.5 room invite arriving from bob... no — from a node NOT in contacts:
+    # simulate a v0.5 room invite arriving from bob... no - from a node NOT in contacts:
     stranger = "99" * 32
     alice_ident = win.session.identity
     payload = protocol.seal_message(alice_ident, alice_ident and _self_pub(app), "let me in", 500,
@@ -1331,15 +1331,12 @@ def test_room_header_markup_and_live_update(gtk_app):
     win.messages.thread_list.select_row(win.messages.threads[conv]["row"])
 
     # live update path: presence poll re-renders the header without a reselect.
-    # carol's away arrives as a sealed status payload (what the daemon actually carries)
-    carol_identity = crypto.new_identity()
-    carol_away = protocol.seal_status(carol_identity, app["session"].client.pubkey_hex,
-                                      "Carol", "gone", int(time.time() * 1000))
+    # carol's daemon is up but has no client attached -> amber "client offline".
     win.messages.refresh_presence({b_node: {"online": True},
-                                   "cd" * 32: {"online": False, "status_payload": carol_away}})
+                                   "cd" * 32: {"online": True, "client_attached": False}})
     header = win.messages.conversation_header.get_label()
     assert header.count("●") == 2, "header shows one dot per member"
-    assert "#a6e3a1" in header and "#fab387" in header, "away member is orange"
+    assert "#a6e3a1" in header and "#fab387" in header, "client-offline member is orange"
     assert "1/2 online" in header
 
     win.messages.refresh_presence({b_node: {"online": False}, "cd" * 32: {"online": False}})
@@ -1589,7 +1586,7 @@ def test_member_chips_render_visible_labels(gtk_app):
 
 
 def test_unread_badge_increments(gtk_app):
-    """Regression: the badge froze at 1 — it was only written when first created."""
+    """Regression: the badge froze at 1 - it was only written when first created."""
     app = gtk_app
     win = app["win"]
     bob = app["bob"]
@@ -1672,12 +1669,12 @@ def test_linkify_injection_safety():
     assert "<a href=" not in out2
     assert "&lt;/&amp;" in out2
 
-    # with a real URL alongside literal markup, exactly one anchor — the real one
+    # with a real URL alongside literal markup, exactly one anchor - the real one
     mixed = gtkui.linkify('<a href="evil">x</a> https://real.example')
     assert mixed.count("<a href=") == 1, mixed
     assert '<a href="https://real.example">' in mixed
 
-    # a URL can't hide a quote to break the attribute — the regex stops at the
+    # a URL can't hide a quote to break the attribute - the regex stops at the
     # quote, so the href is clean and the rest is escaped text
     q = gtkui.linkify('https://example.com" onclick="bad')
     assert q.count("<a href=") == 1
@@ -2107,57 +2104,65 @@ def test_route_bar_local_unchanged(gtk_app, monkeypatch):
     assert "tunnel" not in text
 
 
-# --- client-offline indicator (stale status) --------------------------------
+# --- presence: client attached vs client offline ---------------------------
 
 
-def test_status_stale_helper():
-    now = 1_000_000_000_000
-    assert gtkui._status_stale({"ts": now - 1000}, now) is False
-    assert gtkui._status_stale({"ts": now - gtkui.STATUS_STALE_MS - 1}, now) is True
-    assert gtkui._status_stale({}, now) is False
-    assert gtkui._status_stale({"ts": "x"}, now) is False
-    assert gtkui._status_stale({"ts": 0}, now) is False
+class _FakeClient:
+    def __init__(self, st=None):
+        self._st = st or {}
+
+    def decrypt_status(self, payload):
+        return self._st
 
 
-def test_presence_state_marks_stale_client_offline():
-    stale = int(time.time() * 1000) - gtkui.STATUS_STALE_MS - 1
-
-    class C:
-        def decrypt_status(self, payload):
-            return {"away": None, "ts": stale}
-
-    online, away, off = gtkui._presence_state({"online": True, "status_payload": "x"}, C())
-    assert off is True and online is False and away == "client offline"
+def test_presence_state_offline_when_daemon_offline():
+    # daemon unreachable -> plain offline, never "client offline"
+    online, away, off = gtkui._presence_state(
+        {"online": False, "status_payload": "x"}, _FakeClient({"away": "brb"}))
+    assert online is False and away is None and off is False
 
 
-def test_presence_state_fresh_keeps_away():
-    class C:
-        def decrypt_status(self, payload):
-            return {"away": "brb", "ts": int(time.time() * 1000)}
-
-    online, away, off = gtkui._presence_state({"online": True, "status_payload": "x"}, C())
-    assert off is False and online is True and away == "brb"
+def test_presence_state_client_attached_keeps_away():
+    online, away, off = gtkui._presence_state(
+        {"online": True, "client_attached": True, "status_payload": "x"},
+        _FakeClient({"away": "brb"}))
+    assert online is True and away == "brb" and off is False
 
 
-def test_refresh_presence_client_offline(gtk_app, monkeypatch):
+def test_presence_state_client_detached_is_offline():
+    online, away, off = gtkui._presence_state(
+        {"online": True, "client_attached": False}, _FakeClient())
+    assert off is True and online is False
+    assert "client offline" in away
+
+
+def test_presence_state_missing_flag_defaults_attached():
+    online, away, off = gtkui._presence_state({"online": True}, _FakeClient())
+    assert online is True and away is None and off is False
+
+
+def test_refresh_presence_client_offline(gtk_app):
     win = gtk_app["win"]
     node = gtk_app["b_node"]
-    stale = int(time.time() * 1000) - gtkui.STATUS_STALE_MS - 1
-    monkeypatch.setattr(win.session.client, "decrypt_status",
-                        lambda payload: {"away": None, "ts": stale})
-    win.messages.refresh_presence({node: {"online": True, "status_payload": "x"}})
+    win.messages.refresh_presence({node: {"online": True, "client_attached": False}})
     thread = win.messages.threads[node]
     assert thread["online"] is False
-    assert thread["away"] == "client offline"
-    assert thread["widgets"]["subtitle"].get_text() == "client offline"
+    assert "client offline" in thread["away"]
+    assert "client offline" in thread["widgets"]["subtitle"].get_text()
 
 
-def test_contacts_show_client_offline(gtk_app, monkeypatch):
+def test_contacts_show_client_offline(gtk_app):
     win = gtk_app["win"]
     node = gtk_app["b_node"]
-    stale = int(time.time() * 1000) - gtkui.STATUS_STALE_MS - 1
-    monkeypatch.setattr(win.session.client, "decrypt_status",
-                        lambda payload: {"away": None, "ts": stale})
-    win.contacts.refresh_presence({node: {"online": True, "status_payload": "x"}})
+    win.contacts.refresh_presence({node: {"online": True, "client_attached": False}})
     title = win.contacts._buddy_rows["bob"]
     assert "client offline" in title.get_text()
+
+
+def test_no_em_dashes_in_client_source():
+    import glob
+    pkg = os.path.dirname(gtkui.__file__)
+    for path in glob.glob(os.path.join(pkg, "*.py")):
+        text = open(path, encoding="utf-8").read()
+        assert "\u2014" not in text, f"em dash in {path}"
+

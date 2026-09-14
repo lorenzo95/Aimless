@@ -9,8 +9,8 @@ import (
 
 // TypeFile chunk wire payload layout: a 20-byte unencrypted routing header
 // (transfer id + chunk index/total) followed by the E2E-sealed chunk body. The
-// daemon reads only the header — enough to key the store and judge
-// completeness — while filename/hash/data stay encrypted end to end.
+// daemon reads only the header - enough to key the store and judge
+// completeness - while filename/hash/data stay encrypted end to end.
 const attachHeaderSize = 20
 
 func parseFileHeader(payload []byte) (tid string, index, total uint16, ok bool) {

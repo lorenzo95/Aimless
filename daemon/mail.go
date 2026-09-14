@@ -345,9 +345,9 @@ func (m *Mail) HandlePacket(from ed25519.PublicKey, payload []byte) {
 	if err != nil {
 		return
 	}
-	if m.Presence != nil {
-		m.Presence.Touch(from)
-	}
+	// Liveness comes only from presence packets (probe/status), not from
+	// message/ACK traffic: a clientless always-on daemon must be able to age
+	// out of buddies' presence even while it is relaying and ACKing messages.
 	peerHex := hex.EncodeToString(from)
 	box, err := m.boxFor(peerHex)
 	if err != nil {
@@ -474,7 +474,7 @@ func (m *Mail) flushPeer(peerHex string) {
 	staleMs := m.retryInterval.Milliseconds()
 	for _, entry := range box.journal.Pending() {
 		// Windowed retry: never re-send a chunk still in flight from a recent
-		// attempt — a full-journal re-flood every tick saturates the link and
+		// attempt - a full-journal re-flood every tick saturates the link and
 		// starves ACKs, probes and status sends sharing the same wire.
 		if entry.SentAt > 0 && now-entry.SentAt < staleMs {
 			continue
@@ -494,7 +494,7 @@ func (m *Mail) flushPeer(peerHex string) {
 		} else {
 			_, sendErr = m.node.Send(pub, data)
 		}
-		// SentAt means "last successfully enqueued" — a chunk that bounced off a
+		// SentAt means "last successfully enqueued" - a chunk that bounced off a
 		// full queue must stay eligible for the very next tick instead of being
 		// falsely parked for a whole retry window it never used.
 		if sendErr == nil {

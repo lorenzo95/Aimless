@@ -124,7 +124,7 @@ def run_scenario(sock_a, sock_b, stop_b, start_b, wait_b_sock):
     hist = bob2.history(a_node, 1)
     texts = [protocol_open(bob2, m["payload"])["text"] for m in hist["msgs"]]
     assert texts == ["while you were out #1", "while you were out #2"], texts
-    print("offline delivery: OK —", texts)
+    print("offline delivery: OK -", texts)
 
     def full_history():
         hist = bob2.history(a_node, 0)
@@ -227,7 +227,7 @@ def main():
     if docker_available():
         compose_mode()
     else:
-        print("docker unavailable — host-mode fallback (same scenario, local daemons)")
+        print("docker unavailable - host-mode fallback (same scenario, local daemons)")
         host_mode()
     print("done")
 

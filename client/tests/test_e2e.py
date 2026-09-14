@@ -148,9 +148,9 @@ def test_end_to_end_presence_and_status(two_nodes):
     _wait_for(lambda: any(p["key"] == b_node and p["online"] for p in alice.presence()))
     _wait_for(lambda: any(p["key"] == a_node and p["online"] for p in bob.presence()))
 
-    alice.set_status(b_hex, b_node, "brb — lunch")
+    alice.set_status(b_hex, b_node, "brb - lunch")
     _wait_for(lambda: any(
-        (lambda p: p.get("status_payload") and _open_status(bob, p) == "brb — lunch")(p)
+        (lambda p: p.get("status_payload") and _open_status(bob, p) == "brb - lunch")(p)
         for p in bob.presence() if p["key"] == a_node
     ))
 

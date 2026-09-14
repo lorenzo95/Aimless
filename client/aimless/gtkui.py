@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""gtkui.py — aimless GTK desktop app.
+"""gtkui.py - aimless GTK desktop app.
 
 One process: messages window + tray icon + the aimlessd daemon.
 
 Modes:
   aimless            everything: tray icon, daemon, messages window
-  aimless tray       starts hidden — tray icon only, window opens on first click (autostart)
+  aimless tray       starts hidden - tray icon only, window opens on first click (autostart)
   aimless gui        same as running aimless with no arguments
   aimless autostart  install login autostart entry for `aimless tray`
 """
@@ -78,8 +78,8 @@ _TRAILING_PUNCT = ".,;:!?)']"
 
 def linkify(text: str) -> str:
     """Escape `text` into Pango markup, turning bare http(s) URLs into anchors.
-    `https://x.example.` drops the trailing period; everything else — including
-    <a href=...> the sender literally typed — is escaped to inert text."""
+    `https://x.example.` drops the trailing period; everything else - including
+    <a href=...> the sender literally typed - is escaped to inert text."""
     out = []
     pos = 0
     for m in _URL_RE.finditer(text):
@@ -90,7 +90,7 @@ def linkify(text: str) -> str:
         esc = GLib.markup_escape_text(url)
         out.append(f'<a href="{esc}">{esc}</a>')
         # advance past the SHORTENED url so stripped trailing punctuation is not
-        # silently dropped from the message — it's picked up by the next segment
+        # silently dropped from the message - it's picked up by the next segment
         pos = m.start() + len(url)
     out.append(GLib.markup_escape_text(text[pos:]))
     return "".join(out)
@@ -653,7 +653,7 @@ def scroll_to_bottom(scrolled):
             upper = adj.get_upper()
             adj.set_value(upper - adj.get_page_size())
             # A row added just before this call is allocated by the frame clock,
-            # which fires a display tick AFTER this timeout runs — so the first
+            # which fires a display tick AFTER this timeout runs - so the first
             # read of `upper` is one row behind. Re-settle on a tick boundary
             # until the size stops changing and the view sits at the true bottom.
             if upper == state["upper"]:
@@ -761,11 +761,11 @@ class DaemonSupervisor:
 
     def spawn(self):
         if self.external:
-            raise RuntimeError("external daemon mode — not spawning a local aimlessd")
+            raise RuntimeError("external daemon mode - not spawning a local aimlessd")
         binary = self.binary()
         if not binary:
             raise RuntimeError(
-                "aimlessd not found — put aimlessd-linux-amd64 (or aimlessd) next to "
+                "aimlessd not found - put aimlessd-linux-amd64 (or aimlessd) next to "
                 "aimless.pyz, or add it to PATH")
         try:
             os.makedirs(self.datadir, exist_ok=True)
@@ -795,7 +795,7 @@ class DaemonSupervisor:
                 raise RuntimeError(
                     "a local aimlessd is running at "
                     + os.path.join(paths.daemon_dir(), "api.sock")
-                    + " — run `aimless stop` before using the remote daemon")
+                    + " - run `aimless stop` before using the remote daemon")
             if not self.tunnel.ensure(log=log):
                 raise RuntimeError(
                     f"could not start the SSH tunnel to {self.tunnel.host}"
@@ -906,40 +906,26 @@ class Session:
         return self.self_node
 
 
-STATUS_STALE_MS = 180_000
-
-
-def _status_stale(st, now_ms=None):
-    """True when a buddy's status stopped refreshing (their client is gone),
-    even though their always-on daemon is still reachable."""
-    ts = st.get("ts")
-    if not isinstance(ts, int) or ts <= 0:
-        return False
-    return (now_ms or int(time.time() * 1000)) - ts > STATUS_STALE_MS
-
-
 def _presence_state(p, client):
     """(online, away, client_offline) for a daemon presence entry.
 
-    A stale status means the daemon is up but the client isn't — messages are
-    still delivered, so it's shown as away ("client offline"), not offline."""
-    online = bool(p.get("online"))
+    `client_attached` comes from the peer's daemon: it only advertises a client
+    while one is attached, so an always-on daemon with no client looks "client
+    offline" even though messages are still delivered and queued."""
+    if not bool(p.get("online")):
+        return False, None, False
+    if not p.get("client_attached", True):
+        return False, "client offline - messages will be delivered", True
     away = None
-    client_offline = False
     payload = p.get("status_payload")
     if payload:
         try:
             st = client.decrypt_status(payload)
-        except Exception:
-            st = None
-        if st is not None:
             if st.get("away"):
                 away = st["away"]
-            if _status_stale(st):
-                client_offline = True
-                online = False
-                away = "client offline"
-    return online, away, client_offline
+        except Exception:
+            pass
+    return True, away, False
 
 
 def _room_dots_markup(members, presence_by_node, exclude):
@@ -1264,7 +1250,7 @@ class MessagesView(Gtk.Box):
     def on_new_room(self, *_):
         contacts = self.app.session.contacts()
         if len(contacts) < 2:
-            self.app.activity.log("a room needs at least two buddies — add more people first")
+            self.app.activity.log("a room needs at least two buddies - add more people first")
             return
         dlg = Gtk.Dialog(title="New room", transient_for=self.get_toplevel(), modal=True)
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Create", Gtk.ResponseType.OK)
@@ -1777,7 +1763,7 @@ class MessagesView(Gtk.Box):
                                 text=f"Clear history with {title}?",
                                 buttons=Gtk.ButtonsType.OK_CANCEL)
         dlg.format_secondary_text(
-            "This conversation is emptied here and the existing history is dismissed — "
+            "This conversation is emptied here and the existing history is dismissed - "
             "only messages that arrive after this are shown.")
         dlg.set_default_response(Gtk.ResponseType.CANCEL)
         resp = dlg.run()
@@ -1790,7 +1776,7 @@ class MessagesView(Gtk.Box):
                                 text=f"Delete the room {title}?",
                                 buttons=Gtk.ButtonsType.OK_CANCEL)
         dlg.format_secondary_text(
-            "Messages are removed from this device and old history is dismissed — "
+            "Messages are removed from this device and old history is dismissed - "
             "if someone sends to the room again, it reappears with only the new messages.")
         dlg.set_default_response(Gtk.ResponseType.CANCEL)
         resp = dlg.run()
@@ -1869,7 +1855,7 @@ class MessagesView(Gtk.Box):
                                 buttons=Gtk.ButtonsType.OK_CANCEL)
         dlg.format_secondary_text(
             "You'll be able to message them directly. Their identity is as claimed by "
-            "whoever added them to this room — invites exchanged directly are stronger.")
+            "whoever added them to this room - invites exchanged directly are stronger.")
         dlg.set_default_response(Gtk.ResponseType.OK)
         resp = dlg.run()
         dlg.destroy()
@@ -1899,7 +1885,7 @@ class MessagesView(Gtk.Box):
             lbl.set_xalign(0.0)
             btn.add(lbl)
             btn.get_style_context().add_class("aimless-chip")
-            tip = "Open conversation — your buddy" if known else "Add as buddy (not your buddy yet)"
+            tip = "Open conversation - your buddy" if known else "Add as buddy (not your buddy yet)"
             if p.get("client_offline"):
                 tip += " · client offline (messages will be delivered)"
             btn.set_tooltip_text(tip)
@@ -2042,7 +2028,7 @@ class MessagesView(Gtk.Box):
         def fail(e):
             self._send_in_flight = False
             self.send_button.set_sensitive(True)
-            self.append_system_note(f"⚠ send failed: {e} — the message was not queued")
+            self.append_system_note(f"⚠ send failed: {e} - the message was not queued")
             self.app.activity.log(f"send failed: {e}")
 
         run_async(worker, on_done=done, on_error=fail)
@@ -2078,7 +2064,7 @@ class MessagesView(Gtk.Box):
                                 text=f"Send {filename} ({_human_size(size)}) to {members} members?",
                                 buttons=Gtk.ButtonsType.OK_CANCEL)
         dlg.format_secondary_text(
-            "Every member receives a full copy — a large transfer to a big room uses "
+            "Every member receives a full copy - a large transfer to a big room uses "
             "real bandwidth, just like text does, scaled per file.")
         dlg.set_default_response(Gtk.ResponseType.CANCEL)
         resp = dlg.run()
@@ -2102,7 +2088,7 @@ class MessagesView(Gtk.Box):
         total = len(pieces)
         session = self.app.session
         client = session.client
-        row = self._append_status_row(f"Sending {filename} — 0/{total}")
+        row = self._append_status_row(f"Sending {filename} - 0/{total}")
         attachment = {"path": path, "filename": filename, "mime_hint": mime_hint, "size": size}
 
         def worker():
@@ -2127,7 +2113,7 @@ class MessagesView(Gtk.Box):
             return seqs, expected
 
         def _progress(done):
-            self._update_status_row(row, f"Sending {filename} — {done}/{total}")
+            self._update_status_row(row, f"Sending {filename} - {done}/{total}")
             return False
 
         def done(result):
@@ -2149,7 +2135,7 @@ class MessagesView(Gtk.Box):
 
         def fail(e):
             if row is not None:
-                self._update_status_row(row, f"{filename} — send failed: {e}")
+                self._update_status_row(row, f"{filename} - send failed: {e}")
             self.app.activity.log(f"send failed: {e}")
 
         run_async(worker, on_done=done, on_error=fail)
@@ -2204,7 +2190,7 @@ class MessagesView(Gtk.Box):
         elif total == 1:
             text = f"Sending {rec['filename']}…"
         else:
-            text = f"Sending {rec['filename']} — {done}/{total} delivered"
+            text = f"Sending {rec['filename']} - {done}/{total} delivered"
         self._update_status_row(rec["row"], text)
 
     def incoming(self, ev):
@@ -2294,13 +2280,13 @@ class MessagesView(Gtk.Box):
             self._file_bufs[key] = buf
             if self.selected is not None and self.selected.get("conv") == conv:
                 buf["row"] = self._append_status_row(
-                    f"Receiving {chunk.get('filename') or 'file'} — 1/{chunk['total']}")
+                    f"Receiving {chunk.get('filename') or 'file'} - 1/{chunk['total']}")
         if buf.get("failed"):
             return
         buf["chunks"][chunk["index"]] = base64.b64decode(chunk["data"])
         have = len(buf["chunks"])
         if buf["row"] is not None:
-            self._update_status_row(buf["row"], f"Receiving {chunk.get('filename') or 'file'} — {have}/{chunk['total']}")
+            self._update_status_row(buf["row"], f"Receiving {chunk.get('filename') or 'file'} - {have}/{chunk['total']}")
             self._maybe_scroll()
         if have == buf["total"]:
             if not self._finalize_attachment(conv, node, buf, ev.get("seq", 0), ev.get("ts", 0),
@@ -2329,7 +2315,7 @@ class MessagesView(Gtk.Box):
         buf["failed"] = True
         meta = buf.get("meta") or {}
         if buf["row"] is not None:
-            self._update_status_row(buf["row"], f"{meta.get('filename') or 'file'} — failed to receive")
+            self._update_status_row(buf["row"], f"{meta.get('filename') or 'file'} - failed to receive")
 
     def _store_attachment(self, conv, tid, filename, data):
         d = os.path.join(attachments_dir(), conv)
@@ -2452,7 +2438,7 @@ class ContactsView(Gtk.Box):
         self.set_border_width(14)
         self.get_style_context().add_class("aimless-contacts")
 
-        invite_frame = Gtk.Frame(label="Your invite — send this to a friend")
+        invite_frame = Gtk.Frame(label="Your invite - send this to a friend")
         invite_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         invite_box.set_border_width(10)
         self.invite_entry = Gtk.Entry(editable=False)
@@ -2463,7 +2449,7 @@ class ContactsView(Gtk.Box):
         invite_frame.add(invite_box)
         self.pack_start(invite_frame, False, False, 0)
 
-        add_frame = Gtk.Frame(label="Add a buddy — paste their invite")
+        add_frame = Gtk.Frame(label="Add a buddy - paste their invite")
         add_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         add_box.set_border_width(10)
         self.add_invite_entry = Gtk.Entry(placeholder_text="aimless1:<client-pk>:<node-pk>:<screen>")
@@ -2615,7 +2601,7 @@ class ContactsView(Gtk.Box):
             self.add_status.set_text(f"error: {e}")
             return
         if client_hex == self.app.session.pubkey_hex:
-            self.add_status.set_text("error: that's your own invite — send it to a friend")
+            self.add_status.set_text("error: that's your own invite - send it to a friend")
             return
         contacts = self.app.session.contacts()
         for k, c in contacts.items():
@@ -2715,7 +2701,7 @@ class ActivityView(Gtk.Box):
         tnote = ""
         if tunnel is not None:
             esc = GLib.markup_escape_text
-            tn = f"ssh tunnel: {esc(tunnel['host'])} — {'up' if tunnel['up'] else 'down'}"
+            tn = f"ssh tunnel: {esc(tunnel['host'])} - {'up' if tunnel['up'] else 'down'}"
             if tunnel["restarts"]:
                 tn += f" · restarts {tunnel['restarts']}"
             if not tunnel["up"] and tunnel.get("last_error"):
@@ -2725,12 +2711,12 @@ class ActivityView(Gtk.Box):
                      f"\n  local  {esc(tunnel['local_socket'])}")
         if not st:
             self.info_label.set_markup(
-                f"<span foreground='{C['danger']}'>●  offline — daemon not reachable</span>{tnote}")
+                f"<span foreground='{C['danger']}'>●  offline - daemon not reachable</span>{tnote}")
             return
         build = st.get("build", "")
         version_note = ""
         if not build:
-            version_note = (f"\n<span foreground='{C['danger']}'>this daemon is an old build — "
+            version_note = (f"\n<span foreground='{C['danger']}'>this daemon is an old build - "
                             "run `aimless stop`, then reopen aimless to update</span>")
             build = "unknown"
         else:
@@ -2741,16 +2727,16 @@ class ActivityView(Gtk.Box):
             if dv is not None and dv < MIN_DAEMON_BUILD:
                 need = ".".join(str(x) for x in MIN_DAEMON_BUILD)
                 version_note = (f"\n<span foreground='{C['danger']}'>daemon {build} is too old for this client "
-                                f"(needs ≥ {need}) — update aimlessd-linux-amd64, then `aimless stop` and "
+                                f"(needs ≥ {need}) - update aimlessd-linux-amd64, then `aimless stop` and "
                                 "reopen</span>")
                 if not getattr(self, "_version_warned", False):
                     self._version_warned = True
                     self.log(f"⚠ daemon {build} is too old for this client (needs ≥ {need}) "
-                             f"— update aimlessd-linux-amd64, then `aimless stop` and reopen")
+                             f"- update aimlessd-linux-amd64, then `aimless stop` and reopen")
         state = (f"<span foreground='{C['online']}'>●  you are online</span>" if st["peers_up"] > 0
-                 else f"<span foreground='{C['away']}'>●  connecting — no Yggdrasil peers yet</span>")
+                 else f"<span foreground='{C['away']}'>●  connecting - no Yggdrasil peers yet</span>")
         self.info_label.set_markup(
-            f"{state}  —  address <b>{st['address']}</b>  ·  peers {st['peers_up']}/{st['peers_total']}\n"
+            f"{state}  -  address <b>{st['address']}</b>  ·  peers {st['peers_up']}/{st['peers_total']}\n"
             f"daemon: {build}  ·  client: aimless/{client_version}{version_note}{tnote}")
 
     def log(self, line):
@@ -2963,7 +2949,7 @@ class AimlessWindow(Gtk.Window):
                 return self.session.client.unblock(node)
 
         def fail(e):
-            self.activity.log(f"daemon {'block' if blocked else 'unblock'} failed: {e} — client-side only")
+            self.activity.log(f"daemon {'block' if blocked else 'unblock'} failed: {e} - client-side only")
 
         def done(_r):
             if on_done is not None:
@@ -3049,7 +3035,7 @@ class AimlessWindow(Gtk.Window):
         run_async(worker, on_done=done)
 
     def _reassert_status(self):
-        """Status is ephemeral daemon RAM on both ends — re-announce the current
+        """Status is ephemeral daemon RAM on both ends - re-announce the current
         status so buddies converge after any restart (ours or theirs)."""
         self._push_status(self.prefs.get("away") or None)
         return GLib.SOURCE_CONTINUE
@@ -3058,7 +3044,7 @@ class AimlessWindow(Gtk.Window):
         if away:
             self.away_icon.set_from_icon_name("weather-clear-night-symbolic", Gtk.IconSize.MENU)
             self.away_label.set_markup(
-                f"<b>Away</b> — {GLib.markup_escape_text(away)}  "
+                f"<b>Away</b> - {GLib.markup_escape_text(away)}  "
                 f"<span size='small'>(buddies see this as your away message)</span>")
             for child in self.away_banner.get_children():
                 child.show()
@@ -3164,7 +3150,7 @@ class AimlessWindow(Gtk.Window):
         if self._self_id == (screen, node):
             return
         self._self_id = (screen, node)
-        short = f"{node[:16]}…" if node else "—"
+        short = f"{node[:16]}…" if node else "-"
         self.self_id_label.set_markup(
             f"<span foreground='{C['muted2']}'>you: {GLib.markup_escape_text(screen)}</span>"
             f"  ·  <span foreground='{C['subtitle']}'>{short}</span>")
@@ -3178,7 +3164,7 @@ class AimlessWindow(Gtk.Window):
         if tunnel is not None and not tunnel["up"]:
             host = GLib.markup_escape_text(tunnel["host"])
             self.route_label.set_markup(
-                f"<span foreground='{C['danger']}'>●  tunnel down</span>  —  {host} · reconnecting…")
+                f"<span foreground='{C['danger']}'>●  tunnel down</span>  -  {host} · reconnecting…")
             self.route_label.set_tooltip_text(self._tunnel_tooltip(tunnel))
             self._set_route_icon(first_icon(
                 "network-wireless-signal-none-symbolic", "network-offline-symbolic",
@@ -3188,11 +3174,11 @@ class AimlessWindow(Gtk.Window):
                 host = GLib.markup_escape_text(tunnel["host"])
                 self.route_label.set_markup(
                     f"<span foreground='{C['away']}'>●  remote daemon unreachable</span>"
-                    f"  —  tunnel {host}")
+                    f"  -  tunnel {host}")
                 self.route_label.set_tooltip_text(self._tunnel_tooltip(tunnel))
             else:
                 self.route_label.set_markup(
-                    f"<span foreground='{C['danger']}'>●  offline — daemon not reachable</span>")
+                    f"<span foreground='{C['danger']}'>●  offline - daemon not reachable</span>")
                 self.route_label.set_tooltip_text(None)
             self._set_route_icon(first_icon(
                 "network-wireless-signal-none-symbolic", "network-offline-symbolic",
@@ -3205,7 +3191,7 @@ class AimlessWindow(Gtk.Window):
             else:
                 self.route_label.set_tooltip_text(None)
             self.route_label.set_markup(
-                f"<span foreground='{C['away']}'>●  connecting — no Yggdrasil peers yet</span>{tail}")
+                f"<span foreground='{C['away']}'>●  connecting - no Yggdrasil peers yet</span>{tail}")
             self._set_route_icon(first_icon(
                 "network-wireless-signal-weak-symbolic", "network-wireless-signal-ok-symbolic",
                 "network-idle-symbolic"))
@@ -3217,7 +3203,7 @@ class AimlessWindow(Gtk.Window):
             else:
                 self.route_label.set_tooltip_text(None)
             self.route_label.set_markup(
-                f"<span foreground='{C['online']}'>●  online</span>  —  {st['address']}  ·  "
+                f"<span foreground='{C['online']}'>●  online</span>  -  {st['address']}  ·  "
                 f"peers {st['peers_up']}/{st['peers_total']}{tail}")
             self._set_route_icon(first_icon(
                 "network-wireless-signal-excellent-symbolic", "applications-internet"))
@@ -3297,7 +3283,7 @@ class AimlessWindow(Gtk.Window):
             return inner
 
         # --- Yggdrasil node key ---
-        node = section("Yggdrasil node key — your address")
+        node = section("Yggdrasil node key - your address")
         node_status = Gtk.Label(label=f"current: {st.get('address', '?')}")
         node_status.set_xalign(0.0)
         node_status.set_line_wrap(True)
@@ -3369,7 +3355,7 @@ class AimlessWindow(Gtk.Window):
         node.pack_start(nbtn, False, False, 0)
 
         # --- client identity ---
-        ident = section("Client identity — your encryption key")
+        ident = section("Client identity - your encryption key")
         id_status = Gtk.Label(label=f"current pubkey: {self.session.client.pubkey_hex}")
         id_status.set_xalign(0.0)
         id_status.set_line_wrap(True)
@@ -3569,7 +3555,7 @@ class AimlessWindow(Gtk.Window):
         if not pref(self.prefs, "remember_position"):
             return
         # Apply now (works as the initial-position hint on X11), and again once
-        # the window is mapped — most window managers ignore pre-map move
+        # the window is mapped - most window managers ignore pre-map move
         # requests and only honour one made after the window is shown.
         self._want_geometry = True
         self._apply_saved_position()
@@ -3610,8 +3596,8 @@ class AimlessWindow(Gtk.Window):
         if tray is not None and getattr(tray, "have_tray", False):
             try:
                 tray.icon.set_tooltip_text(
-                    f"{APP_NAME} — {n} unread\nLeft-click to open Messages" if n
-                    else f"{APP_NAME} — running\nLeft-click to open Messages")
+                    f"{APP_NAME} - {n} unread\nLeft-click to open Messages" if n
+                    else f"{APP_NAME} - running\nLeft-click to open Messages")
             except Exception:
                 pass
 
@@ -3794,7 +3780,7 @@ def _error_dialog(parent, text):
 
 
 def ask_passphrase(parent):
-    dlg = Gtk.Dialog(title="AIMless — passphrase", transient_for=parent, modal=True)
+    dlg = Gtk.Dialog(title="AIMless - passphrase", transient_for=parent, modal=True)
     dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Unlock", Gtk.ResponseType.OK)
     dlg.set_default_response(Gtk.ResponseType.OK)
     dlg.set_default_size(360, 100)
@@ -3818,7 +3804,7 @@ def ask_create_identity(parent):
 
     Returns None (cancelled / empty), ("__mismatch__",), ("__import__",) or
     (passphrase, screen)."""
-    dlg = Gtk.Dialog(title=f"{APP_NAME} — create your identity", transient_for=parent, modal=True)
+    dlg = Gtk.Dialog(title=f"{APP_NAME} - create your identity", transient_for=parent, modal=True)
     dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                     "Import backup…", Gtk.ResponseType.APPLY,
                     "Create identity", Gtk.ResponseType.OK)
@@ -3827,7 +3813,7 @@ def ask_create_identity(parent):
     box = dlg.get_content_area()
     box.set_spacing(8)
     box.set_border_width(10)
-    box.add(Gtk.Label(label="No identity on this machine yet — create one, or restore a backup."))
+    box.add(Gtk.Label(label="No identity on this machine yet - create one, or restore a backup."))
     box.add(Gtk.Label(label="Passphrase (protects your keys; re-enter it later to unlock)"))
     pw = Gtk.Entry(visibility=False, activates_default=True)
     box.add(pw)
@@ -3952,8 +3938,8 @@ def pid_alive(pid):
 
 
 def acquire_app_lock():
-    """Single-instance guard. Returns (fh, None) when the lock was taken — hold the file
-    handle for the process lifetime — or (None, holder_pid) when another instance runs."""
+    """Single-instance guard. Returns (fh, None) when the lock was taken - hold the file
+    handle for the process lifetime - or (None, holder_pid) when another instance runs."""
     import fcntl
     try:
         os.makedirs(paths.run_dir(), exist_ok=True)
@@ -3981,7 +3967,7 @@ class TrayIcon:
         mi_open.connect("activate", self.on_open)
         self.menu.append(mi_open)
         self.menu.append(Gtk.SeparatorMenuItem())
-        mi_quit = Gtk.MenuItem(label="Quit — shuts down AIMless")
+        mi_quit = Gtk.MenuItem(label="Quit - shuts down AIMless")
         mi_quit.connect("activate", self.on_quit)
         self.menu.append(mi_quit)
         self.menu.show_all()
@@ -3989,13 +3975,13 @@ class TrayIcon:
             self.icon = Gtk.StatusIcon()
             self.icon.set_from_icon_name(first_icon("user-available-symbolic", "phone"))
             self.icon.set_title(APP_NAME)
-            self.icon.set_tooltip_text(f"{APP_NAME} — running\nLeft-click to open Messages")
+            self.icon.set_tooltip_text(f"{APP_NAME} - running\nLeft-click to open Messages")
             self.icon.connect("activate", self.on_open)
             self.icon.connect("popup-menu", self.on_popup)
             self.icon.set_visible(True)
             self.have_tray = True
         except Exception as e:
-            app.log(f"tray icon unavailable ({e!r}) — running as a plain window app")
+            app.log(f"tray icon unavailable ({e!r}) - running as a plain window app")
 
     def is_embedded(self):
         """True only when a real system-tray host adopted the icon.
@@ -4029,17 +4015,17 @@ class ConnectWindow(Gtk.Window):
     SSH_TEXT = {
         "connecting": ("away", "●  ssh: connecting to {host}…"),
         "connected": ("online", "●  ssh: connected ({host})"),
-        "failed": ("danger", "●  ssh: failed — retrying ({host})…"),
+        "failed": ("danger", "●  ssh: failed - retrying ({host})…"),
     }
     DAEMON_TEXT = {
         "waiting": ("muted", "●  daemon: waiting for the tunnel…"),
         "connecting": ("away", "●  daemon: connecting…"),
         "connected": ("online", "●  daemon: connected"),
-        "unreachable": ("danger", "●  daemon: unreachable — retrying…"),
+        "unreachable": ("danger", "●  daemon: unreachable - retrying…"),
     }
 
     def __init__(self, remote, on_quit):
-        super().__init__(title=f"{APP_NAME} — connecting")
+        super().__init__(title=f"{APP_NAME} - connecting")
         self.get_style_context().add_class("aimless-window")
         self.remote = remote or {}
         self._on_quit = on_quit
@@ -4124,7 +4110,7 @@ class AimlessApp:
 
         self.lock_fh, holder = acquire_app_lock()
         if self.lock_fh is None:
-            self.log(f"another instance is running (pid {holder}) — presenting its window")
+            self.log(f"another instance is running (pid {holder}) - presenting its window")
             if holder and holder > 0:
                 try:
                     os.kill(holder, signal.SIGUSR1)
@@ -4148,7 +4134,7 @@ class AimlessApp:
             if self.supervisor._local_daemon_running():
                 err = Gtk.MessageDialog(
                     message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE,
-                    text="a local aimlessd is running — run `aimless stop` before using the remote daemon")
+                    text="a local aimlessd is running - run `aimless stop` before using the remote daemon")
                 err.run()
                 err.destroy()
                 return 1
@@ -4156,15 +4142,16 @@ class AimlessApp:
         elif open_window or not self.tray.have_tray:
             self.open_window()
         if self._no_window_headless():
-            self.log("no window after setup (no usable tray) — exiting for the supervisor to restart")
+            self.log("no window after setup (no usable tray) - exiting for the supervisor to restart")
             return 0
 
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, self.on_open_signal)
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, self.quit)
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, self.quit)
         GLib.timeout_add_seconds(5, self.poll)
+        GLib.timeout_add_seconds(10, self.heartbeat)
         if self.supervisor.external:
-            self.log(f"external daemon mode — tunnel to {self.supervisor.tunnel.host}")
+            self.log(f"external daemon mode - tunnel to {self.supervisor.tunnel.host}")
             GLib.timeout_add_seconds(20, self.probe_tunnel)
         self.log(f"app started (pid {os.getpid()}, tray={self.tray.have_tray})")
         return None
@@ -4253,7 +4240,7 @@ class AimlessApp:
         if not t.is_running():
             self._tunnel_fail += 1
             if self._tunnel_fail == 1:
-                self.log("tunnel: down (1/2) — confirming")
+                self.log("tunnel: down (1/2) - confirming")
                 GLib.timeout_add(1000, self._confirm_tunnel)
             else:
                 self._tunnel_fail = 0
@@ -4359,7 +4346,7 @@ class AimlessApp:
                     continue
                 if created[0] == "__mismatch__":
                     err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.OK,
-                                            text="passphrases do not match — try again")
+                                            text="passphrases do not match - try again")
                     err.run()
                     err.destroy()
                     continue
@@ -4385,7 +4372,7 @@ class AimlessApp:
                     passphrase = None
                 except OSError as e:
                     session = None
-                    self.log(f"daemon unreachable during unlock ({e}) — retrying")
+                    self.log(f"daemon unreachable during unlock ({e}) - retrying")
             if not passphrase:
                 for _attempt in range(3):
                     passphrase = ask_passphrase(None)
@@ -4397,7 +4384,7 @@ class AimlessApp:
                         break
                     except ValueError:
                         err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.OK,
-                                                text="wrong passphrase or corrupted identity — try again")
+                                                text="wrong passphrase or corrupted identity - try again")
                         err.run()
                         err.destroy()
                     except OSError as e:
@@ -4421,9 +4408,9 @@ class AimlessApp:
         supervisor/container) is expected to restart us. With a real tray the
         desktop behaviour is preserved: keep running, hidden in the tray."""
         if self.tray is not None and self.tray.is_embedded():
-            self.log("cancel — keeping app in the system tray")
+            self.log("cancel - keeping app in the system tray")
             return
-        self.log("cancel — no usable tray (headless/container) — nothing to show")
+        self.log("cancel - no usable tray (headless/container) - nothing to show")
 
     def _import_backup_on_init(self):
         """First-run import: pick a bundle, restore it, reload the daemon.
@@ -4466,7 +4453,7 @@ class AimlessApp:
         return app_pw
 
     def _no_window_headless(self):
-        """True right after setup when there is no window and no usable tray —
+        """True right after setup when there is no window and no usable tray -
         the app has nothing to show and (in a container) must exit so the
         supervisor restarts it, instead of lingering on a black screen."""
         if getattr(self, "_awaiting_connect", False):
@@ -4481,17 +4468,41 @@ class AimlessApp:
                 return GLib.SOURCE_CONTINUE
             t = self.supervisor.tunnel
             if t is not None and not self._tunnel_restarting and not t.is_running():
-                self.log("tunnel: ssh process gone — restarting")
+                self.log("tunnel: ssh process gone - restarting")
                 self._schedule_tunnel_restart()
             return GLib.SOURCE_CONTINUE
         if not self.supervisor.is_running():
-            self.log("aimlessd died — restarting")
+            self.log("aimlessd died - restarting")
             try:
                 self.supervisor.ensure(log=self.log)
             except RuntimeError as e:
                 self.log(f"restart failed: {e}")
                 return GLib.SOURCE_CONTINUE
             self.rewatch()
+        return GLib.SOURCE_CONTINUE
+
+    def heartbeat(self):
+        """Tell our daemon a client is attached, even with no window open. The
+        daemon advertises presence to buddies only while this keeps arriving, so
+        a suspended/quit client shows as offline to them."""
+        if self.quitting:
+            return GLib.SOURCE_REMOVE
+
+        def worker():
+            d = None
+            try:
+                d = DaemonClient(sock_path())
+                d.request("whoami", timeout=3)
+            except Exception:
+                pass
+            finally:
+                if d is not None:
+                    try:
+                        d.close()
+                    except Exception:
+                        pass
+
+        run_async(worker)
         return GLib.SOURCE_CONTINUE
 
     def rewatch(self):
@@ -4513,7 +4524,7 @@ class AimlessApp:
             return GLib.SOURCE_REMOVE
         self.quitting = True
         self._awaiting_connect = False
-        self.log("shutting down — stopping aimlessd")
+        self.log("shutting down - stopping aimlessd")
         if self.window:
             try:
                 self.window.save_geometry()
@@ -4611,7 +4622,7 @@ def install_autostart():
         "[Desktop Entry]\n"
         "Type=Application\n"
         "Name=AIMless\n"
-        "Comment=AIMless tray + daemon — messages are received in the background\n"
+        "Comment=AIMless tray + daemon - messages are received in the background\n"
         f"Exec={exec_line}\n"
         "Icon=user-available\n"
         "Categories=Network;InstantMessaging;\n"

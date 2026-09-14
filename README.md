@@ -1,17 +1,17 @@
 # aimless
 
-Serverless, end-to-end-encrypted chat over the [Yggdrasil](https://yggdrasil-network.github.io/) overlay. Message 1:1 or in group rooms, send files, and keep chatting when the other side is offline — no servers, no accounts, no ports to forward, no TUN device and no root. It's AIM for the mesh era: screens names, buddy lists, away messages, and durable store-and-forward.
+Serverless, end-to-end-encrypted chat over the [Yggdrasil](https://yggdrasil-network.github.io/) overlay. Message 1:1 or in group rooms, send files, and keep chatting when the other side is offline - no servers, no accounts, no ports to forward, no TUN device and no root. It's AIM for the mesh era: screens names, buddy lists, away messages, and durable store-and-forward.
 
-- **Serverless & account-free** — identity is an Ed25519 keypair; your address is derived from it.
-- **End-to-end encrypted** — per-recipient NaCl sealed boxes made by the client; the relay never sees plaintext.
-- **Durable** — messages and files are journaled and retried until delivered, even if the recipient is offline.
-- **Linux desktop + CLI** — a GTK app with a tray, plus a headless CLI.
+- **Serverless & account-free** - identity is an Ed25519 keypair; your address is derived from it.
+- **End-to-end encrypted** - per-recipient NaCl sealed boxes made by the client; the relay never sees plaintext.
+- **Durable** - messages and files are journaled and retried until delivered, even if the recipient is offline.
+- **Linux desktop + CLI** - a GTK app with a tray, plus a headless CLI.
 
 ---
 
 ## Try it in 60 seconds (Docker)
 
-Runs the full GUI in your browser — nothing to install:
+Runs the full GUI in your browser - nothing to install:
 
 ```sh
 docker run -d --name aimless-webtop --restart unless-stopped \
@@ -23,7 +23,7 @@ docker run -d --name aimless-webtop --restart unless-stopped \
 
 Open <http://localhost:8080/vnc.html> and enter the password (`aimless`). First run asks you to create an identity (passphrase + screen name).
 
-**See two clients talk to each other** — start a second container on another port/volume, then in the first window open *Contacts → Copy* and paste the invite into the second window's *Add a buddy*:
+**See two clients talk to each other** - start a second container on another port/volume, then in the first window open *Contacts → Copy* and paste the invite into the second window's *Add a buddy*:
 
 ```sh
 docker run -d --name aimless-webtop2 --restart unless-stopped \
@@ -33,9 +33,9 @@ docker run -d --name aimless-webtop2 --restart unless-stopped \
   ghcr.io/lorenzo95/aimless/aimless-webtop:latest
 ```
 
-Open <http://localhost:8081/vnc.html>, add each other, and chat. Turn one off and send from the other — it arrives when it comes back.
+Open <http://localhost:8081/vnc.html>, add each other, and chat. Turn one off and send from the other - it arrives when it comes back.
 
-> The container has no audio and no notification daemon, so sound/notifications are silent there by design. Exposing the page publicly? Put it behind TLS + auth or an SSH tunnel, and change `VNC_PASS` — whoever reaches it gets your desktop.
+> The container has no audio and no notification daemon, so sound/notifications are silent there by design. Exposing the page publicly? Put it behind TLS + auth or an SSH tunnel, and change `VNC_PASS` - whoever reaches it gets your desktop.
 
 ## Install on Linux
 
@@ -60,7 +60,7 @@ cd ../client && pip install . && aimless
 
 ## Files and layout
 
-Everything lives under one root — `~/.local/share/aimless` by default, or `$AIMLESS_HOME` — split by owner. `aimless paths` prints the resolved locations.
+Everything lives under one root - `~/.local/share/aimless` by default, or `$AIMLESS_HOME` - split by owner. `aimless paths` prints the resolved locations.
 
 ```
 ~/.local/share/aimless/
@@ -82,23 +82,23 @@ The tray owns the daemon: closing the window just hides it (tray click reopens; 
 Header menu → **Preferences …** (stored as `client/prefs.json` under the data root, below):
 
 - **Remember window position and size** (off-screen-safe; best-effort on Wayland) with a *Reset* button.
-- **Desktop notifications** (libnotify / `notify-send`) and **notification sound** — Off, single, double, triple, or long synthesised beep (no audio files, with a *Test* button; `AIMLESS_SOUND` overrides).
+- **Desktop notifications** (libnotify / `notify-send`) and **notification sound** - Off, single, double, triple, or long synthesised beep (no audio files, with a *Test* button; `AIMLESS_SOUND` overrides).
 - **Enter to send**, **24h/12h timestamps**.
-- **Theme** — System (follows desktop light/dark live), Aimless Dark, Mocha, Nord, Tokyo Night, Latte, Dawn, plus **Matrix** and **Amber CRT** (monospace). `AIMLESS_THEME` overrides.
+- **Theme** - System (follows desktop light/dark live), Aimless Dark, Mocha, Nord, Tokyo Night, Latte, Dawn, plus **Matrix** and **Amber CRT** (monospace). `AIMLESS_THEME` overrides.
 
 The window title and tray tooltip show total unread. Sent text shows a delivered tick; files show per-recipient progress (`1/3 delivered` → `Delivered ✓`).
 
 ### Keys & identity
 Header menu → **Keys & Identity …**:
 
-- **Yggdrasil node key** — view your address and set a specific key (paste 64/128-hex from a vanity generator), generate a random one, or reset to default. The address is previewed; applying restarts the daemon. Changing it changes your address, so old invites go stale.
-- **Client identity** — replace your encryption key from a 64-hex seed. This breaks existing conversations; restart aimless afterwards.
-- **Backup & restore** — one passphrase-encrypted bundle (identity seed, node key, screen name, contacts). Restoring overwrites your keys.
+- **Yggdrasil node key** - view your address and set a specific key (paste 64/128-hex from a vanity generator), generate a random one, or reset to default. The address is previewed; applying restarts the daemon. Changing it changes your address, so old invites go stale.
+- **Client identity** - replace your encryption key from a 64-hex seed. This breaks existing conversations; restart aimless afterwards.
+- **Backup & restore** - one passphrase-encrypted bundle (identity seed, node key, screen name, contacts). Restoring overwrites your keys.
 
 Keys are written `0600` and atomically; seeds are never logged.
 
 ### CLI
-`aimless init`, `invite`, `add <invite> [petname]`, `list`, `send`, `chat`, `away`, `gui`, `tray`, `paths`, `stop` — see `aimless --help`.
+`aimless init`, `invite`, `add <invite> [petname]`, `list`, `send`, `chat`, `away`, `gui`, `tray`, `paths`, `stop` - see `aimless --help`.
 
 ## Always-on daemon (optional)
 
@@ -115,9 +115,9 @@ By default the client owns a local daemon; if your machine is off, a message sen
    Your SSH key must be authorized on the host. The client opens the tunnel itself; you don't run ssh by hand.
 3. Start aimless as usual. The bottom bar shows the tunnel host (and your node id); the tunnel is monitored and restarted automatically if it drops (e.g. after the laptop wakes).
 
-The daemon holds ciphertext and the node key only — your identity stays on the client. **One client per daemon.**
+The daemon holds ciphertext and the node key only - your identity stays on the client. **One client per daemon.**
 
-While your client is closed, buddies still see your daemon reachable and messages are delivered and queued for you; after ~3 minutes without a status refresh they see you as **away — "client offline"** so nobody waits on a reply. It clears automatically when you reopen aimless.
+While your client is closed, buddies still see your daemon reachable and messages are delivered and queued for you; once the daemon stops hearing from a client it advertises *"client offline - messages will be delivered"* (within seconds), so nobody waits on a reply. It clears automatically when you reopen aimless.
 
 ---
 
@@ -132,31 +132,31 @@ While your client is closed, buddies still see your daemon reachable and message
    in RAM only                journals on disk                  journals on disk          in RAM only
 ```
 
-The **client** owns identity, encryption, and display. The **daemon** is a dumb, durable relay: it journals ciphertext, retries until ACKed, stores file chunks, and probes presence — it **never sees plaintext**. Transport is an embedded (no TUN) Yggdrasil node; each peer is addressed by its node key.
+The **client** owns identity, encryption, and display. The **daemon** is a dumb, durable relay: it journals ciphertext, retries until ACKed, stores file chunks, and probes presence - it **never sees plaintext**. Transport is an embedded (no TUN) Yggdrasil node; each peer is addressed by its node key.
 
 | Piece | Language | Role |
 |---|---|---|
 | `daemon/` | Go | embedded Yggdrasil core, packet transport, journals/retry/ACK, attachments, blocklist, presence, local JSON API on a Unix socket |
 | `client/` | Python | identity, contacts, encrypted SQLite state, GTK app (rooms, files, themes, prefs) + CLI |
-| `deploy/` | — | webtop image, `package.sh` release builder, `check_dist.py` gate, two-node smoke test |
+| `deploy/` | - | webtop image, `package.sh` release builder, `check_dist.py` gate, two-node smoke test |
 
 ## Security model
 
 - **Identity** = a client Ed25519 keypair. Your invite (`aimless1:<client-pk>:<node-pk>:<screen>`) carries the client key (what friends encrypt to) and the node key (where to route). The Yggdrasil address is derived from the node key.
-- **E2E encryption** — per-recipient NaCl sealed boxes made by the client; every message is Ed25519-signed, verified against the claimed sender independently of the transport.
+- **E2E encryption** - per-recipient NaCl sealed boxes made by the client; every message is Ed25519-signed, verified against the claimed sender independently of the transport.
 - **The daemon can't read messages, names, filenames, or status.** It sees only routing metadata (above).
-- **No forward secrecy** — long-term keys, no ratchet. Anyone with your private key can decrypt past traffic; treat it like email, not Signal.
-- **Encrypted at rest** — history is an encrypted SQLite DB (`state.db`, scrypt key); the identity file likewise. The **one exception is attachment bytes**, written to `client/attachments/<conv>/` (under the data root) in plaintext so images can render/save locally.
-- Experimental alpha — don't use for security-critical purposes.
+- **No forward secrecy** - long-term keys, no ratchet. Anyone with your private key can decrypt past traffic; treat it like email, not Signal.
+- **Encrypted at rest** - history is an encrypted SQLite DB (`state.db`, scrypt key); the identity file likewise. The **one exception is attachment bytes**, written to `client/attachments/<conv>/` (under the data root) in plaintext so images can render/save locally.
+- Experimental alpha - don't use for security-critical purposes.
 
 ## Under the hood
 
 **Packet format.** Each datagram is an envelope over ironwood's encrypted `PacketConn`: a 20-byte header (`version=1`, `type`, `seq` uint64, `ts` ms, `payload_len`) plus payload. Types: `MSG`, `ACK`, `STATUS`, `PROBE`, `FILE`.
 
-- **MSG** — sealed box from the sender's client. ACKed; the sender retries until then.
-- **STATUS** — sealed screen/away blob, re-sent with probes, never stored by the receiver.
-- **PROBE** — presence ping; any packet back marks the peer online. Status is *announce-and-refresh*, so everyone converges after a restart and offline means offline.
-- **FILE** — 20-byte cleartext routing header (transfer id + chunk index/total) + sealed chunk body. The daemon keys/joins chunks, but filename, MIME, hash, and contents stay encrypted. Chunks persist until the client reassembles and verifies (SHA-256), ACKs consumption.
+- **MSG** - sealed box from the sender's client. ACKed; the sender retries until then.
+- **STATUS** - sealed screen/away blob. The daemon only sends the client's real status while a client has been active recently (a heartbeat); with no client attached it sends an **empty STATUS** as a "mailbox" marker, so buddies show *"client offline - messages will be delivered"* instead of available. Delivery does not depend on this.
+- **PROBE** - presence ping. Liveness comes from probe/status only (not from message/ACK traffic), so a clientless always-on daemon can age out of buddies' presence even while it relays and ACKs messages.
+- **FILE** - 20-byte cleartext routing header (transfer id + chunk index/total) + sealed chunk body. The daemon keys/joins chunks, but filename, MIME, hash, and contents stay encrypted. Chunks persist until the client reassembles and verifies (SHA-256), ACKs consumption.
 
 **Messages.** Inside a MSG payload: `{"v":1,"kind":"msg","from":<hex>,"body":<canonical JSON>,"sig":<b64>}`, where `body` is `{"text","ts"}` plus optional `screen`, and for rooms `conv` (SHA-256 of sorted member node keys) and `members`. `sig` is Ed25519 over `aimless\x01 + body`.
 
@@ -169,7 +169,6 @@ The **client** owns identity, encryption, and display. The **daemon** is a dumb,
 | MSG | destination, seq, timestamp, size | text, screen name |
 | FILE | transfer id, chunk index/total, size | filename, MIME, hash, contents |
 | STATUS/PROBE | source, timestamp | screen name, away message |
-
 **Local API** (Unix socket, newline-JSON; requests may carry an `id` echoed on the reply): `whoami`, `status`, `send`, `sendfile`, `history`, `watch`, `setstatus`, `presence`, `block`/`unblock`/`blocklist`, `pendingattachments`/`fetchattachment`/`ackfile`; events `recv` and `acked`.
 
 ## Development
@@ -184,7 +183,7 @@ python3 deploy/check_dist.py    # release gate: committed dist matches source
 
 ## Status
 
-Experimental. Both Yggdrasil and aimless are alpha — not for security-critical use.
+Experimental. Both Yggdrasil and aimless are alpha - not for security-critical use.
 
 ---
 

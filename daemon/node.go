@@ -185,7 +185,7 @@ func (n *Node) Send(pub ed25519.PublicKey, payload []byte) (int, error) {
 	return n.enqueue(pub, payload, n.control)
 }
 
-// SendBulk enqueues a TypeFile chunk on the bulk queue — file traffic yields to
+// SendBulk enqueues a TypeFile chunk on the bulk queue - file traffic yields to
 // control traffic and is paced by the link through the single writer.
 func (n *Node) SendBulk(pub ed25519.PublicKey, payload []byte) (int, error) {
 	return n.enqueue(pub, payload, n.bulk)

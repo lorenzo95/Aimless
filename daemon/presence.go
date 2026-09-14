@@ -15,9 +15,10 @@ type statusOut struct {
 }
 
 type statusIn struct {
-	seq     uint64
-	ts      int64
-	payload []byte
+	seq      uint64
+	ts       int64
+	payload  []byte
+	attached bool
 }
 
 type peerPresence struct {
@@ -31,6 +32,8 @@ type Presence struct {
 	mail          *Mail
 	probeInterval time.Duration
 	onlineWindow  time.Duration
+	clientIdle    time.Duration
+	lastClient    time.Time
 	peers         map[string]*peerPresence
 }
 
@@ -39,10 +42,26 @@ func NewPresence(mail *Mail, probeInterval time.Duration) *Presence {
 		mail:          mail,
 		probeInterval: probeInterval,
 		onlineWindow:  3 * probeInterval,
+		clientIdle:    30 * time.Second,
 		peers:         make(map[string]*peerPresence),
 	}
 	mail.Presence = p
 	return p
+}
+
+// TouchClient records client activity (any local API request). Presence only
+// advertises a client while one has been seen recently, so an always-on daemon
+// with no client attached looks offline/away to buddies instead of "available".
+func (p *Presence) TouchClient() {
+	p.mu.Lock()
+	p.lastClient = time.Now()
+	p.mu.Unlock()
+}
+
+func (p *Presence) clientPresent() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return time.Since(p.lastClient) < p.clientIdle
 }
 
 func (p *Presence) Start() {
@@ -87,9 +106,10 @@ func (p *Presence) OnStatus(pub ed25519.PublicKey, seq uint64, ts int64, payload
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	pp := p.keyFor(pub)
-	if pp.in == nil || ts > pp.in.ts {
-		pp.in = &statusIn{seq: seq, ts: ts, payload: payload}
-	}
+	pp.lastSeen = time.Now()
+	// An empty payload is the "no client attached" marker; a real status means
+	// a client is present. Always take the latest.
+	pp.in = &statusIn{seq: seq, ts: ts, payload: payload, attached: len(payload) > 0}
 }
 
 func (p *Presence) SetStatus(pub ed25519.PublicKey, payload []byte) (uint64, error) {
@@ -138,6 +158,7 @@ func (p *Presence) probeOne(pub ed25519.PublicKey) {
 		return
 	}
 	_ = p.mail.SendProbe(pub)
+	present := p.clientPresent()
 	p.mu.Lock()
 	pp := p.peers[hex.EncodeToString(pub)]
 	var st *statusOut
@@ -145,16 +166,22 @@ func (p *Presence) probeOne(pub ed25519.PublicKey) {
 		st = pp.out
 	}
 	p.mu.Unlock()
-	if st != nil {
+	switch {
+	case !present:
+		// No client attached: send an empty STATUS as a "mailbox" marker so
+		// buddies show "client offline (messages delivered)" rather than online.
+		_ = p.mail.SendStatus(pub, 0, nil)
+	case st != nil:
 		_ = p.mail.SendStatus(pub, st.seq, st.payload)
 	}
 }
 
 type presenceEntry struct {
-	Key           string `json:"key"`
-	Online        bool   `json:"online"`
-	StatusTs      int64  `json:"status_ts,omitempty"`
-	StatusPayload string `json:"status_payload,omitempty"`
+	Key            string `json:"key"`
+	Online         bool   `json:"online"`
+	ClientAttached bool   `json:"client_attached"`
+	StatusTs       int64  `json:"status_ts,omitempty"`
+	StatusPayload  string `json:"status_payload,omitempty"`
 }
 
 func (p *Presence) Snapshot() []presenceEntry {
@@ -166,7 +193,11 @@ func (p *Presence) Snapshot() []presenceEntry {
 		if p.mail.IsBlockedHex(peerHex) {
 			continue
 		}
-		e := presenceEntry{Key: peerHex, Online: now.Sub(pp.lastSeen) < p.onlineWindow}
+		e := presenceEntry{
+			Key:            peerHex,
+			Online:         now.Sub(pp.lastSeen) < p.onlineWindow,
+			ClientAttached: pp.in == nil || pp.in.attached,
+		}
 		if pp.in != nil {
 			e.StatusTs = pp.in.ts
 			e.StatusPayload = base64.StdEncoding.EncodeToString(pp.in.payload)

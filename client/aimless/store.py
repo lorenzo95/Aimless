@@ -5,7 +5,7 @@ This replaces the hand-rolled encrypted JSON cache and its three cursors
 projection of the daemon journal:
 
   * one monotonic ingest cursor per peer (``watermark``) advances to the highest
-    seq seen in that peer's stream, whether or not this client could route it —
+    seq seen in that peer's stream, whether or not this client could route it -
     so a peer's shared inbox stream is never re-scanned;
   * message identity is a primary key (``in:<sender>:<seq>`` / a deterministic
     outgoing id), so replay and double-fetch are no-ops via INSERT OR IGNORE;
@@ -250,7 +250,7 @@ class Store:
 
     def delivery_members(self, mid: str):
         """(recipients, fully-delivered recipients) for a message. A recipient
-        counts as delivered only once every chunk sent to them is acked — the
+        counts as delivered only once every chunk sent to them is acked - the
         human-meaningful progress for a group file, rather than chunk counts."""
         rows = self.conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(acked), 0) FROM deliveries "

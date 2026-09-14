@@ -58,14 +58,14 @@ export PATH="$HOME/.local/bin:$PATH"
 if python3 -c "import aimless, nacl" 2>/dev/null && command -v aimlessd >/dev/null 2>&1; then
     echo "OK: aimless + aimlessd installed (~/.local/bin)"
 else
-    echo "WARNING: verification failed — check python3/pip output above" >&2
+    echo "WARNING: verification failed - check python3/pip output above" >&2
     exit 1
 fi
 INSTALLER
 chmod +x "$STAGE/install.sh"
 
 cat > "$STAGE/README.txt" <<'README'
-aimless — quick install on a new machine
+aimless - quick install on a new machine
 
   ./install.sh
   aimlessd &            (joins the public Yggdrasil network)

@@ -181,7 +181,7 @@ class TunnelSupervisor:
         return self.child.pid
 
     def probe(self, timeout=2.0) -> bool:
-        """A real round-trip through the tunnel — a socket connect() alone is
+        """A real round-trip through the tunnel - a socket connect() alone is
         not enough (a live-but-dead ssh accepts locally then blackholes)."""
         d = None
         try:

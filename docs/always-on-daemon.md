@@ -7,7 +7,7 @@ Status: **implemented on this branch (0.9.0)**. Kept as the design record.
 Store-and-forward lives on the sending daemon. If the laptop sends a message
 while the recipient's machine is off, then the laptop suspends before that
 machine comes online, nothing bridges the gap: delivery only happens when both
-ends are online at once. There is no relay/mailbox — a message is addressed to
+ends are online at once. There is no relay/mailbox - a message is addressed to
 the recipient's Yggdrasil node key, and only that node's own daemon can accept
 it.
 
@@ -20,7 +20,7 @@ Unix socket, app-managed by the client. The laptop can suspend right after
 handing a message to the server; the server owns retries.
 
 Transport is SSH **Unix-socket (streamlocal) forwarding** straight to the
-container's bind-mounted `api.sock` — the socket's `0600` permissions are the
+container's bind-mounted `api.sock` - the socket's `0600` permissions are the
 auth, so no TCP and no extra auth layer.
 
 **Assume a single client.** One device connects to the daemon at a time; this
@@ -59,7 +59,7 @@ In `client/prefs.json`:
 - `local_socket` is deliberately distinct from `<root>/daemon/api.sock` so it
   never clashes with a local daemon's socket. Default when omitted:
   `$XDG_RUNTIME_DIR/aimless/remote.sock`, else `<root>/run/remote.sock`.
-- Read at startup (menu/autostart/terminal all work — no session env).
+- Read at startup (menu/autostart/terminal all work - no session env).
 - Optional env overrides (`AIMLESS_REMOTE`, `AIMLESS_REMOTE_SOCK`,
   `AIMLESS_SOCK`) for tests/dev only.
 
@@ -93,7 +93,7 @@ Changes:
 - `cli.py` also reads `remote` from prefs and ensures the tunnel, so headless
   commands work when the tray is not running.
 
-## C. Docker — daemon-only mode
+## C. Docker - daemon-only mode
 
 - `deploy/docker/docker-entrypoint.sh`: add `AIMLESS_MODE` (default `webtop`).
   When `daemon`: fetch artifacts + fix `/data` ownership, then
@@ -104,7 +104,7 @@ Changes:
     `daemon/api.sock` is owned by the host SSH user.
 - New `deploy/docker/docker-compose.daemon.yml`: same image + `./aimless-data:/data`,
   `AIMLESS_MODE=daemon`, no ports; optional `HEALTHCHECK` on `test -S /data/daemon/api.sock`.
-- `deploy/docker/README.md`: "Daemon-only mode" — seed `daemon/node.key` (your
+- `deploy/docker/README.md`: "Daemon-only mode" - seed `daemon/node.key` (your
   existing key, preserves the address) and `daemon/config.json`
   (`{"peers": [...]}`); socket on the host is
   `<host>/…/aimless-data/daemon/api.sock`; uid-matching note; Docker Desktop

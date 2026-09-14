@@ -26,7 +26,7 @@ fetch() {
     fi
 }
 
-# static daemon + client pyz — both fetched from the git dist artifacts
+# static daemon + client pyz - both fetched from the git dist artifacts
 fetch /data/bin/aimless.pyz          "$BASE/aimless.pyz"
 fetch /data/bin/aimlessd-linux-amd64 "$BASE/aimlessd-linux-amd64"
 
@@ -34,7 +34,7 @@ if [ "$AIMLESS_MODE" = "daemon" ]; then
     # Daemon-only: no X/VNC/supervisord, no ports. The client reaches this
     # daemon's API socket over SSH by bind-mounting /data to the host.
     # Run as the owner of the bind-mounted /data (i.e. your host user) so the
-    # socket is readable by your SSH login — no need to pass uid/gid.
+    # socket is readable by your SSH login - no need to pass uid/gid.
     UID_RUN="${AIMLESS_UID:-$(stat -c '%u' /data 2>/dev/null || echo 1000)}"
     GID_RUN="${AIMLESS_GID:-$(stat -c '%g' /data 2>/dev/null || echo 1000)}"
     case "$UID_RUN" in ""|0) UID_RUN=1000 ;; esac

@@ -238,3 +238,18 @@ def test_do_tunnel_restart_failure_refreshes_window(home, monkeypatch):
     monkeypatch.setattr(app, "_schedule_tunnel_restart", lambda: None)
     assert app._do_tunnel_restart() is False
     assert win.polled == 1
+
+
+def test_heartbeat_swallows_daemon_errors(home, monkeypatch):
+    _remote(home)
+    app = gtkui.AimlessApp()
+    app.quitting = False
+    monkeypatch.setattr(gtkui, "run_async", lambda fn, on_done=None, on_error=None: fn())
+    assert app.heartbeat() == gtkui.GLib.SOURCE_CONTINUE
+
+
+def test_heartbeat_stops_when_quitting(home):
+    _remote(home)
+    app = gtkui.AimlessApp()
+    app.quitting = True
+    assert app.heartbeat() == gtkui.GLib.SOURCE_REMOVE

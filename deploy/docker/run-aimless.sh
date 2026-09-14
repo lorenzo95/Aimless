@@ -1,7 +1,7 @@
 #!/bin/bash
 # aimless app. Waits for X, then launches the GUI in the foreground so supervisord
 # restarts it whenever the window is closed (no tray in the container, so
-# closing the window quits the app — close-to-tray is just a desktop behaviour).
+# closing the window quits the app - close-to-tray is just a desktop behaviour).
 export DISPLAY=:1
 export HOME=/home/aimless
 export AIMLESS_HOME=/data

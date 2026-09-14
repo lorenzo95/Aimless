@@ -95,6 +95,7 @@ func TestStatusRoundtrip(t *testing.T) {
 	nodeA, mailA, presenceA, nodeB, _, presenceB := presenceFixture(t)
 
 	_ = mailA
+	presenceA.TouchClient() // simulate an attached client
 	_, err := presenceA.SetStatus(nodeB.Pub, []byte("screen:alice|away:brb"))
 	if err != nil {
 		t.Fatalf("SetStatus: %v", err)
@@ -141,5 +142,61 @@ func TestUnknownBuddyNotOnline(t *testing.T) {
 	entries := presenceA.Snapshot()
 	if e := findEntry(t, entries, hexString(stranger)); e != nil && e.Online {
 		t.Fatal("stranger should not be online")
+	}
+}
+
+func TestClientPresentIdle(t *testing.T) {
+	p := &Presence{clientIdle: 50 * time.Millisecond}
+	if p.clientPresent() {
+		t.Fatal("should start clientless")
+	}
+	p.TouchClient()
+	if !p.clientPresent() {
+		t.Fatal("should be present right after a touch")
+	}
+	time.Sleep(90 * time.Millisecond)
+	if p.clientPresent() {
+		t.Fatal("should idle out to clientless")
+	}
+}
+
+// A daemon with no attached client advertises online but client_attached=false
+// (the empty-status "mailbox" marker), so buddies show "client offline".
+func TestClientlessSendsMailboxMarker(t *testing.T) {
+	nodeA, _, _, _, _, presenceB := presenceFixture(t)
+
+	deadline := time.After(15 * time.Second)
+	for {
+		e := findEntry(t, presenceB.Snapshot(), hexString(nodeA.Pub))
+		if e != nil && e.Online && !e.ClientAttached && e.StatusPayload == "" {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("A never reported clientless at B: %+v", e)
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+// Once a client attaches, the real status flows again and client_attached=true.
+func TestClientAttachedAfterTouch(t *testing.T) {
+	nodeA, _, presenceA, nodeB, _, presenceB := presenceFixture(t)
+	presenceA.TouchClient()
+	if _, err := presenceA.SetStatus(nodeB.Pub, []byte("real")); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.After(15 * time.Second)
+	for {
+		e := findEntry(t, presenceB.Snapshot(), hexString(nodeA.Pub))
+		if e != nil && e.Online && e.ClientAttached && e.StatusPayload != "" {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("A never reported client-attached at B: %+v", e)
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 }

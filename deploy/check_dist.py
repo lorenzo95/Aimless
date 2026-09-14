@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Release gate: the committed dist artifacts must match the source versions.
 
-Run after `deploy/package.sh` and after committing — verifies that what's in
+Run after `deploy/package.sh` and after committing - verifies that what's in
 git (HEAD) is what a fresh wget from raw.githubusercontent.com serves.
 """
 import io
@@ -43,10 +43,10 @@ init = z.read("aimless/__init__.py").decode()
 m = re.search(r'__version__ = "([^"]+)"', init)
 pyz_ver = m and m.group(1)
 if pyz_ver != client_ver:
-    fail(f"dist/aimless.pyz is {pyz_ver}, source is {client_ver} — rerun deploy/package.sh and commit")
+    fail(f"dist/aimless.pyz is {pyz_ver}, source is {client_ver} - rerun deploy/package.sh and commit")
 
 bin = head_blob("dist/aimlessd-linux-amd64")
 if f"aimlessd/{daemon_ver}".encode() not in bin:
-    fail(f"dist/aimlessd-linux-amd64 is not {daemon_ver} — rerun deploy/package.sh and commit")
+    fail(f"dist/aimlessd-linux-amd64 is not {daemon_ver} - rerun deploy/package.sh and commit")
 
 print(f"OK: dist artifacts match source (client {client_ver}, daemon {daemon_ver})")

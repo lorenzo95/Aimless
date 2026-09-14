@@ -31,7 +31,7 @@ func TestAttachmentStoreBudgetEvictsOldestIncompleteFirst(t *testing.T) {
 			t.Fatalf("add ab chunk %d: new=%v err=%v", i, isNew, err)
 		}
 	}
-	// "cd": complete (2 chunks) — total now fills the 4-chunk budget
+	// "cd": complete (2 chunks) - total now fills the 4-chunk budget
 	for i := 1; i <= 2; i++ {
 		if isNew, err := as.Add("cd", uint16(i), 2, uint64(10+i), int64(10+i), filePayload("cd", uint16(i), 2, chunk)); err != nil || !isNew {
 			t.Fatalf("add cd chunk %d: new=%v err=%v", i, isNew, err)
@@ -57,7 +57,7 @@ func TestAttachmentStoreEvictsOldestCompleteWhenOnlyCompleteRemain(t *testing.T)
 		t.Fatal(err)
 	}
 	chunk := make([]byte, 16)
-	// two complete transfers, 2 chunks each — fills the 4-chunk budget
+	// two complete transfers, 2 chunks each - fills the 4-chunk budget
 	for _, tid := range []string{"aa", "bb"} {
 		base := int64(0)
 		if tid == "bb" {
@@ -150,7 +150,7 @@ func TestAttachmentStoreFirstChunkUnderBudgetPressure(t *testing.T) {
 		t.Fatal(err)
 	}
 	chunk := make([]byte, 16)
-	// "gh": incomplete (total 2, only chunk 1 arrives) — the intended eviction victim
+	// "gh": incomplete (total 2, only chunk 1 arrives) - the intended eviction victim
 	if _, err := as.Add("gh", 1, 2, uint64(20), int64(20), filePayload("gh", 1, 2, chunk)); err != nil {
 		t.Fatal(err)
 	}
@@ -160,12 +160,12 @@ func TestAttachmentStoreFirstChunkUnderBudgetPressure(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// "ij": incomplete (1 chunk) — budget now full (144 bytes)
+	// "ij": incomplete (1 chunk) - budget now full (144 bytes)
 	if _, err := as.Add("ij", 1, 2, uint64(30), int64(30), filePayload("ij", 1, 2, chunk)); err != nil {
 		t.Fatal(err)
 	}
 	// "ef" chunk 1 (of 3): budget pressure while ef's fresh, empty transfer sits
-	// in byTid with firstTs=0 — pre-fix it was chosen as the eviction target,
+	// in byTid with firstTs=0 - pre-fix it was chosen as the eviction target,
 	// orphaning the chunk that this very Add() went on to store.
 	if isNew, err := as.Add("ef", 1, 3, uint64(40), int64(40), filePayload("ef", 1, 3, chunk)); err != nil || !isNew {
 		t.Fatalf("add ef chunk 1: new=%v err=%v", isNew, err)
@@ -197,7 +197,7 @@ func TestAttachmentStoreFirstChunkUnderBudgetPressure(t *testing.T) {
 func TestAttachmentStoreTightBudgetFailsCleanly(t *testing.T) {
 	dir := t.TempDir()
 	peer := "aabb"
-	// budget fits 2 chunks; the transfer needs 3 — larger than the whole budget
+	// budget fits 2 chunks; the transfer needs 3 - larger than the whole budget
 	// once it starts, so Add must fail cleanly instead of stranding chunks
 	as, err := NewAttachmentStore(testDB(t, dir), peer, 36*2)
 	if err != nil {
