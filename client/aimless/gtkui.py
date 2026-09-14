@@ -4128,7 +4128,8 @@ class AimlessApp:
             self.rewatch()
         else:
             self._schedule_tunnel_restart()
-        self.poll_status()
+        if self.window is not None:
+            self.window.poll_status()
         return False
 
 

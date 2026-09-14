@@ -115,3 +115,44 @@ def test_probe_healthy_is_noop(home, monkeypatch):
     assert app.probe_tunnel() is True
     assert app._tunnel_fail == 0
     assert app._tunnel_restarting is False
+
+
+class _FakeWindow:
+    def __init__(self):
+        self.polled = 0
+
+    def poll_status(self):
+        self.polled += 1
+
+
+def test_do_tunnel_restart_without_window_is_safe(home, monkeypatch):
+    _remote(home)
+    app = gtkui.AimlessApp()
+    app.window = None
+    monkeypatch.setattr(app.supervisor.tunnel, "restart", lambda log=None: True)
+    monkeypatch.setattr(app.supervisor.tunnel, "reset_backoff", lambda: None)
+    monkeypatch.setattr(app, "rewatch", lambda: None)
+    assert app._do_tunnel_restart() is False
+
+
+def test_do_tunnel_restart_refreshes_window(home, monkeypatch):
+    _remote(home)
+    app = gtkui.AimlessApp()
+    win = _FakeWindow()
+    app.window = win
+    monkeypatch.setattr(app.supervisor.tunnel, "restart", lambda log=None: True)
+    monkeypatch.setattr(app.supervisor.tunnel, "reset_backoff", lambda: None)
+    monkeypatch.setattr(app, "rewatch", lambda: None)
+    assert app._do_tunnel_restart() is False
+    assert win.polled == 1
+
+
+def test_do_tunnel_restart_failure_refreshes_window(home, monkeypatch):
+    _remote(home)
+    app = gtkui.AimlessApp()
+    win = _FakeWindow()
+    app.window = win
+    monkeypatch.setattr(app.supervisor.tunnel, "restart", lambda log=None: False)
+    monkeypatch.setattr(app, "_schedule_tunnel_restart", lambda: None)
+    assert app._do_tunnel_restart() is False
+    assert win.polled == 1
