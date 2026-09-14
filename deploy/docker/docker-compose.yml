@@ -1,3 +1,6 @@
+# Web desktop (browser) mode.
+# For a headless always-on daemon instead, use docker-compose.daemon.yml:
+#   docker compose -f docker-compose.daemon.yml up -d
 services:
   aimless-webtop:
     image: ${AIMLESS_IMAGE:-ghcr.io/lorenzo95/aimless/aimless-webtop:latest}
