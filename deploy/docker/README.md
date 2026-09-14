@@ -129,11 +129,13 @@ Run the same image headless — no VNC, no ports — as an always-on daemon your
 client reaches over SSH:
 
 ```bash
-AIMLESS_UID=$(id -u) AIMLESS_GID=$(id -g) \
-  docker compose -f docker-compose.daemon.yml up -d
+mkdir -p aimless-data
+docker compose -f docker-compose.daemon.yml up -d
 ```
 
-- Just `aimlessd -datadir /data/daemon`.
+- Just `aimlessd -datadir /data/daemon`. The container runs as the owner of
+  `./aimless-data` (detected at start), so the socket is owned by you — no need
+  to pass uid/gid. (`mkdir -p aimless-data` first so it's yours, not root.)
 - **Seed your node key** so your address is unchanged: copy your existing
   `daemon/node.key` into `./aimless-data/daemon/` (and optionally `aimless.db`
   for queued/inbox continuity). Optional peers live in
@@ -151,9 +153,8 @@ AIMLESS_UID=$(id -u) AIMLESS_GID=$(id -g) \
 
   The client forwards that socket over SSH (streamlocal); the socket's `0600`
   permissions are the only auth — no TCP.
-- **Set `AIMLESS_UID`/`AIMLESS_GID` to your host uid/gid** so the socket is owned
-  by the user whose SSH key connects. Unix sockets in bind mounts work on native
-  Linux Docker, not Docker Desktop.
+- Override with `AIMLESS_UID`/`AIMLESS_GID` only if the detected owner is wrong.
+  Unix sockets in bind mounts work on native Linux Docker, not Docker Desktop.
 - One client per daemon.
 
 ## Stop / remove
