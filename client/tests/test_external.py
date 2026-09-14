@@ -91,18 +91,30 @@ def test_stop_all_external_skips_pkill_daemon(home, monkeypatch):
     assert ["pkill", "-x", "aimlessd"] not in runs
 
 
-def test_probe_failure_confirms_then_restarts(home, monkeypatch):
+def test_probe_tunnel_down_confirms_then_restarts(home, monkeypatch):
+    _remote(home)
+    app = gtkui.AimlessApp()
+    t = app.supervisor.tunnel
+    monkeypatch.setattr(t, "is_running", lambda: False)
+
+    assert app.probe_tunnel() is True          # first miss -> confirm scheduled
+    assert app._tunnel_fail == 1
+    assert app._tunnel_restarting is False
+    app._confirm_tunnel()                       # still down -> restart
+    assert app._tunnel_fail == 0
+    assert app._tunnel_restarting is True
+
+
+def test_probe_daemon_down_does_not_restart_ssh(home, monkeypatch):
     _remote(home)
     app = gtkui.AimlessApp()
     t = app.supervisor.tunnel
     monkeypatch.setattr(t, "is_running", lambda: True)
     monkeypatch.setattr(t, "probe", lambda timeout=2.0: False)
-
-    assert app.probe_tunnel() is True          # first failure -> confirm scheduled
-    assert app._tunnel_fail == 1
-    app._confirm_tunnel()                       # confirm also failed -> restart
+    assert app.probe_tunnel() is True
+    assert app._tunnel_restarting is False, "must not restart ssh when only the daemon is down"
     assert app._tunnel_fail == 0
-    assert app._tunnel_restarting is True
+    assert app._daemon_down_logged is True
 
 
 def test_probe_healthy_is_noop(home, monkeypatch):
@@ -112,9 +124,79 @@ def test_probe_healthy_is_noop(home, monkeypatch):
     monkeypatch.setattr(t, "is_running", lambda: True)
     monkeypatch.setattr(t, "probe", lambda timeout=2.0: True)
     app._tunnel_fail = 1
+    app._daemon_down_logged = True
     assert app.probe_tunnel() is True
     assert app._tunnel_fail == 0
     assert app._tunnel_restarting is False
+    assert app._daemon_down_logged is False
+
+
+def test_ensure_daemon_down_message(home, monkeypatch):
+    _remote(home)
+    sup = gtkui.DaemonSupervisor()
+    monkeypatch.setattr(sup, "_local_daemon_running", lambda: False)
+    monkeypatch.setattr(sup.tunnel, "ensure", lambda log=None: True)
+    monkeypatch.setattr(sup, "_reachable", lambda: False)
+    monkeypatch.setattr(gtkui.time, "time", lambda: float("inf"))  # skip the wait
+    with pytest.raises(RuntimeError) as e:
+        sup.ensure()
+    assert "remote daemon" in str(e.value)
+
+
+def test_ensure_tunnel_down_message(home, monkeypatch):
+    _remote(home)
+    sup = gtkui.DaemonSupervisor()
+    monkeypatch.setattr(sup, "_local_daemon_running", lambda: False)
+    monkeypatch.setattr(sup.tunnel, "ensure", lambda log=None: False)
+    with pytest.raises(RuntimeError) as e:
+        sup.ensure()
+    assert "SSH tunnel" in str(e.value)
+
+
+def test_connect_window_status_text():
+    win = gtkui.ConnectWindow(
+        {"host": "u@h", "socket": "/r.sock", "local_socket": "/l.sock"}, lambda: None)
+    win.update("failed", "unreachable")
+    assert "ssh: failed" in win.ssh_label.get_text()
+    assert "daemon: unreachable" in win.daemon_label.get_text()
+    win.update("connected", "connected")
+    assert "connected" in win.ssh_label.get_text()
+    assert "u@h" in win.ssh_label.get_text()
+    win.destroy()
+
+
+def test_try_connect_classifies_daemon_down(home, monkeypatch):
+    _remote(home)
+    app = gtkui.AimlessApp()
+    app._awaiting_connect = True
+
+    def fake_run_async(fn, on_done=None, on_error=None):
+        on_done(fn())
+
+    monkeypatch.setattr(gtkui, "run_async", fake_run_async)
+    monkeypatch.setattr(gtkui.GLib, "timeout_add_seconds", lambda *a, **k: 0)
+
+    def boom(log=None):
+        raise RuntimeError("remote daemon not reachable through the tunnel (u@h)")
+
+    monkeypatch.setattr(app.supervisor, "ensure", boom)
+    monkeypatch.setattr(app.supervisor.tunnel, "is_running", lambda: True)
+    app._try_connect()
+    assert app._connect_state == {"ssh": "connected", "daemon": "unreachable"}
+
+
+def test_on_connected_opens_window(home, monkeypatch):
+    _remote(home)
+    app = gtkui.AimlessApp()
+    app._awaiting_connect = True
+    app._connect_show = True
+    app.tray = type("T", (), {"have_tray": True})()
+    opened = []
+    monkeypatch.setattr(app, "open_window", lambda: opened.append(1))
+    monkeypatch.setattr(app, "log", lambda *a, **k: None)
+    app._on_connected()
+    assert app._awaiting_connect is False
+    assert opened == [1]
 
 
 class _FakeWindow:

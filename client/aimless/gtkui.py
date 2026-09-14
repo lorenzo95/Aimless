@@ -800,7 +800,7 @@ class DaemonSupervisor:
                 raise RuntimeError(
                     f"could not start the SSH tunnel to {self.tunnel.host}"
                     + (f" ({self.tunnel.last_error})" if self.tunnel.last_error else ""))
-            deadline = time.time() + 25
+            deadline = time.time() + 10
             while time.time() < deadline:
                 if self._reachable():
                     if log:
@@ -4022,6 +4022,70 @@ class TrayIcon:
         self.menu.popup(None, None, Gtk.StatusIcon.position_menu, icon, button, t)
 
 
+class ConnectWindow(Gtk.Window):
+    """Small 'connecting…' window shown when the always-on daemon isn't reachable
+    at startup, so the user can see whether ssh or the daemon is the problem."""
+
+    SSH_TEXT = {
+        "connecting": ("away", "●  ssh: connecting to {host}…"),
+        "connected": ("online", "●  ssh: connected ({host})"),
+        "failed": ("danger", "●  ssh: failed — retrying ({host})…"),
+    }
+    DAEMON_TEXT = {
+        "waiting": ("muted", "●  daemon: waiting for the tunnel…"),
+        "connecting": ("away", "●  daemon: connecting…"),
+        "connected": ("online", "●  daemon: connected"),
+        "unreachable": ("danger", "●  daemon: unreachable — retrying…"),
+    }
+
+    def __init__(self, remote, on_quit):
+        super().__init__(title=f"{APP_NAME} — connecting")
+        self.get_style_context().add_class("aimless-window")
+        self.remote = remote or {}
+        self._on_quit = on_quit
+        self.set_default_size(460, -1)
+        self.connect("delete-event", self._on_delete)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_border_width(14)
+        self.ssh_label = Gtk.Label(xalign=0.0)
+        self.daemon_label = Gtk.Label(xalign=0.0)
+        box.pack_start(self.ssh_label, False, False, 0)
+        box.pack_start(self.daemon_label, False, False, 0)
+        box.pack_start(Gtk.Separator(), False, False, 0)
+        cfg = Gtk.Label(xalign=0.0)
+        cfg.set_line_wrap(True)
+        cfg.set_selectable(True)  # read-only, copyable
+        cfg.get_style_context().add_class("muted")
+        cfg.set_text(
+            "ssh            {host}\n"
+            "remote socket  {remote}\n"
+            "local socket   {local}".format(
+                host=self.remote.get("host", ""),
+                remote=self.remote.get("socket", ""),
+                local=self.remote.get("local_socket", "")))
+        box.pack_start(cfg, False, False, 0)
+        quit_btn = Gtk.Button(label="Quit")
+        quit_btn.set_halign(Gtk.Align.END)
+        quit_btn.connect("clicked", lambda *_: self._on_quit())
+        box.pack_start(quit_btn, False, False, 0)
+        self.add(box)
+        self.update("connecting", "waiting")
+
+    def _on_delete(self, *_):
+        self._on_quit()
+        return False
+
+    def update(self, ssh, daemon):
+        color, text = self.SSH_TEXT.get(ssh, self.SSH_TEXT["connecting"])
+        text = text.format(host=self.remote.get("host", ""))
+        self.ssh_label.set_markup(
+            f"<span foreground='{C[color]}'>{GLib.markup_escape_text(text)}</span>")
+        color, text = self.DAEMON_TEXT.get(daemon, self.DAEMON_TEXT["waiting"])
+        self.daemon_label.set_markup(
+            f"<span foreground='{C[color]}'>{GLib.markup_escape_text(text)}</span>")
+
+
 class AimlessApp:
     """One process: messages window + tray icon + the aimlessd daemon."""
 
@@ -4037,6 +4101,12 @@ class AimlessApp:
         self._unlocking = False
         self._tunnel_fail = 0
         self._tunnel_restarting = False
+        self._daemon_down_logged = False
+        self._awaiting_connect = False
+        self._connect_busy = False
+        self._connect_show = False
+        self._connect_state = {"ssh": "connecting", "daemon": "waiting"}
+        self.connect_window = None
 
     def start(self, open_window):
         rc = self._setup(open_window)
@@ -4062,16 +4132,28 @@ class AimlessApp:
                     pass
             return 0
 
-        try:
-            self.supervisor.ensure(log=self.log)
-        except RuntimeError as e:
-            err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE, text=str(e))
-            err.run()
-            err.destroy()
-            return 1
+        if not self.supervisor.external:
+            try:
+                self.supervisor.ensure(log=self.log)
+            except RuntimeError as e:
+                err = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE, text=str(e))
+                err.run()
+                err.destroy()
+                return 1
 
         self.tray = TrayIcon(self)
-        if open_window or not self.tray.have_tray:
+        if self.supervisor.external:
+            # Never block startup on the remote daemon: connect in the
+            # background and show a status window if it doesn't come up promptly.
+            if self.supervisor._local_daemon_running():
+                err = Gtk.MessageDialog(
+                    message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE,
+                    text="a local aimlessd is running — run `aimless stop` before using the remote daemon")
+                err.run()
+                err.destroy()
+                return 1
+            self._begin_connect(open_window or not self.tray.have_tray)
+        elif open_window or not self.tray.have_tray:
             self.open_window()
         if self._no_window_headless():
             self.log("no window after setup (no usable tray) — exiting for the supervisor to restart")
@@ -4087,33 +4169,118 @@ class AimlessApp:
         self.log(f"app started (pid {os.getpid()}, tray={self.tray.have_tray})")
         return None
 
+    # -- first connection (external mode) --------------------------------
+    def _begin_connect(self, show_window=True):
+        self._awaiting_connect = True
+        self._connect_show = show_window
+        self._connect_busy = False
+        self._try_connect()
+        if show_window:
+            GLib.timeout_add(1000, self._maybe_show_connect)
+
+    def _maybe_show_connect(self):
+        if self._awaiting_connect and self.connect_window is None:
+            self._show_connect_window()
+        return False
+
+    def _show_connect_window(self):
+        self.connect_window = ConnectWindow(self.supervisor.remote, self.quit)
+        self.connect_window.show_all()
+        self._update_connect_window()
+
+    def _update_connect_window(self):
+        if self.connect_window is not None:
+            self.connect_window.update(self._connect_state["ssh"], self._connect_state["daemon"])
+
+    def _set_connect_state(self, ssh, daemon):
+        self._connect_state = {"ssh": ssh, "daemon": daemon}
+        self._update_connect_window()
+
+    def _try_connect(self):
+        if not self._awaiting_connect or self._connect_busy:
+            return
+        self._connect_busy = True
+        self._set_connect_state("connecting", "waiting")
+
+        def worker():
+            try:
+                self.supervisor.ensure(log=self.log)
+                return None
+            except RuntimeError as e:
+                return str(e)
+
+        def done(err):
+            self._connect_busy = False
+            if not self._awaiting_connect:
+                return
+            if err is None and self.supervisor._reachable():
+                self._on_connected()
+                return
+            # classify: ssh down vs daemon unreachable
+            ssh_ok = self.supervisor.tunnel.is_running()
+            self._set_connect_state(
+                "connected" if ssh_ok else "failed",
+                "unreachable" if ssh_ok else "waiting")
+            GLib.timeout_add_seconds(3, self._retry_connect)
+
+        run_async(worker, on_done=done, on_error=lambda _e: done("error"))
+
+    def _retry_connect(self):
+        if self._awaiting_connect:
+            self._try_connect()
+        return False
+
+    def _on_connected(self):
+        self._awaiting_connect = False
+        self._set_connect_state("connected", "connected")
+        if self.connect_window is not None:
+            win, self.connect_window = self.connect_window, None
+            win.destroy()
+        self.log(f"connected to remote daemon ({self.supervisor.tunnel.host})")
+        if self._connect_show or not self.tray.have_tray:
+            self.open_window()
+
     # -- SSH tunnel monitoring -------------------------------------------
     def probe_tunnel(self):
-        """20s liveness probe; restart on two consecutive failures."""
-        if self.quitting or not self.supervisor.external:
+        """20s liveness probe. Only a *tunnel* failure (ssh/socket gone) triggers
+        a restart; a reachable tunnel with an unreachable daemon is just reported
+        (restarting ssh wouldn't help)."""
+        if self.quitting or not self.supervisor.external or getattr(self, "_awaiting_connect", False):
             return False
         if self._tunnel_restarting:
             return True
         t = self.supervisor.tunnel
-        if t.is_running() and t.probe():
+        if not t.is_running():
+            self._tunnel_fail += 1
+            if self._tunnel_fail == 1:
+                self.log("tunnel: down (1/2) — confirming")
+                GLib.timeout_add(1000, self._confirm_tunnel)
+            else:
+                self._tunnel_fail = 0
+                self._schedule_tunnel_restart()
+            return True
+        if t.probe():
             if self._tunnel_fail:
                 self.log("tunnel: healthy again")
             self._tunnel_fail = 0
+            if self._daemon_down_logged:
+                self._daemon_down_logged = False
+                self.log("remote daemon reachable again")
             return True
-        self._tunnel_fail += 1
-        if self._tunnel_fail == 1:
-            self.log("tunnel: probe failed (1/2) — confirming")
-            GLib.timeout_add(1000, self._confirm_tunnel)
-        else:
-            self._tunnel_fail = 0
-            self._schedule_tunnel_restart()
+        # tunnel is up, remote daemon isn't answering
+        self._tunnel_fail = 0
+        if not self._daemon_down_logged:
+            self._daemon_down_logged = True
+            self.log(f"tunnel: up, but remote daemon unreachable ({t.host})")
+        if self.window is not None:
+            self.poll_status()
         return True
 
     def _confirm_tunnel(self):
         if self.quitting or self._tunnel_restarting:
             return False
         t = self.supervisor.tunnel
-        if t.is_running() and t.probe():
+        if t.is_running():
             self._tunnel_fail = 0
             self.log("tunnel: recovered")
             return False
@@ -4151,6 +4318,10 @@ class AimlessApp:
         return GLib.SOURCE_REMOVE
 
     def open_window(self):
+        if getattr(self, "_awaiting_connect", False):
+            if self.connect_window is not None:
+                self.connect_window.present()
+            return
         if self.window:
             self.window.deiconify()
             self.window.present()
@@ -4298,12 +4469,16 @@ class AimlessApp:
         """True right after setup when there is no window and no usable tray —
         the app has nothing to show and (in a container) must exit so the
         supervisor restarts it, instead of lingering on a black screen."""
+        if getattr(self, "_awaiting_connect", False):
+            return False
         return self.window is None and not (self.tray is not None and self.tray.is_embedded())
 
     def poll(self):
         if self.quitting:
             return GLib.SOURCE_REMOVE
         if self.supervisor.external:
+            if getattr(self, "_awaiting_connect", False):
+                return GLib.SOURCE_CONTINUE
             t = self.supervisor.tunnel
             if t is not None and not self._tunnel_restarting and not t.is_running():
                 self.log("tunnel: ssh process gone — restarting")
@@ -4337,6 +4512,7 @@ class AimlessApp:
         if self.quitting:
             return GLib.SOURCE_REMOVE
         self.quitting = True
+        self._awaiting_connect = False
         self.log("shutting down — stopping aimlessd")
         if self.window:
             try:

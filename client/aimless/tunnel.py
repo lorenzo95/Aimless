@@ -201,30 +201,35 @@ class TunnelSupervisor:
                     pass
 
     def ensure(self, log=None) -> bool:
-        if self.is_running() and self.probe():
+        if self.is_running():
             return True
         return self.restart(log=log)
+
+    def wait_for_socket(self, timeout=20) -> bool:
+        """Wait until the forward is established (local socket present). This is
+        independent of whether the *remote daemon* answers."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.child is not None and self.child.poll() is not None:
+                self.last_error = "ssh exited immediately"
+                return False
+            if os.path.exists(self.local_socket):
+                return True
+            time.sleep(0.2)
+        self.last_error = "tunnel socket did not appear"
+        return False
 
     def restart(self, log=None) -> bool:
         self.stop()
         self.restarts += 1
         self.spawn()
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            if self.child is not None and self.child.poll() is not None:
-                self.last_error = "ssh exited immediately"
-                if log:
-                    log(f"tunnel: ssh exited immediately ({self.host})")
-                return False
-            if os.path.exists(self.local_socket) and self.probe():
-                self._backoff_index = 0
-                if log:
-                    log(f"tunnel: up ({self.host})")
-                return True
-            time.sleep(0.2)
-        self.last_error = "tunnel did not come up within 20s"
+        if self.wait_for_socket():
+            self._backoff_index = 0
+            if log:
+                log(f"tunnel: up ({self.host})")
+            return True
         if log:
-            log(f"tunnel: not up after 20s ({self.host})")
+            log(f"tunnel: not up ({self.host}): {self.last_error}")
         return False
 
     def stop(self):
