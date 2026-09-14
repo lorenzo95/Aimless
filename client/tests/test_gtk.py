@@ -1919,6 +1919,17 @@ def test_contacts_list_follows_theme():
         assert pal["surface"] in row, name
 
 
+def test_onboarding_banner_follows_theme():
+    """The 'New to AIMless?' banner used a Gtk.InfoBar, whose theme colours made
+    it unreadable in most palettes; it must use the active palette now."""
+    for name, pal in gtkui.THEMES.items():
+        css = gtkui.build_css(pal)
+        banner = css.split(".aimless-onboarding {")[1].split("}")[0]
+        assert pal["surface"] in banner and pal["border"] in banner, name
+        label = css.split(".aimless-onboarding label {")[1].split("}")[0]
+        assert pal["text"] in label, name
+
+
 def test_theme_switch_and_env_override(gtk_app, monkeypatch):
     win = gtk_app["win"]
     gtkui.install_css_provider()

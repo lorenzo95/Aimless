@@ -394,6 +394,12 @@ menuitem:hover {{ background-color: {C['button_active']}; }}
 .aimless-route-bar {{ background-color: {C['header']}; border-top: 1px solid {C['sep']}; color: {C['muted2']}; }}
 .aimless-route-bar image {{ color: {C['muted2']}; }}
 
+.aimless-onboarding {{
+    background-color: {C['surface']};
+    border-bottom: 1px solid {C['border']};
+}}
+.aimless-onboarding label {{ color: {C['text']}; }}
+
 .aimless-contacts frame {{
     background-color: {C['surface']};
     border: 1px solid {C['border']};
@@ -2811,20 +2817,27 @@ class AimlessWindow(Gtk.Window):
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
         if not pref(self.prefs, "seen_onboarding") and not session.contacts():
-            info = Gtk.InfoBar()
-            info.set_message_type(Gtk.MessageType.INFO)
-            info.get_content_area().add(Gtk.Label(
-                label="New to AIMless? Open Contacts to copy your invite and add a buddy."))
+            info = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            info.set_border_width(8)
+            info.get_style_context().add_class("aimless-onboarding")
+            hint = Gtk.Label(
+                label="New to AIMless? Open Contacts to copy your invite and add a buddy.")
+            hint.set_xalign(0.0)
+            hint.set_line_wrap(True)
+            info.pack_start(hint, True, True, 0)
 
-            def on_info(bar, resp):
-                bar.hide()
+            def dismiss_info(*_):
+                info.hide()
                 self.prefs["seen_onboarding"] = True
                 save_prefs(self.prefs)
-                if resp == Gtk.ResponseType.OK:
-                    self.stack.set_visible_child_name("contacts")
-            info.add_button("Go to Contacts", Gtk.ResponseType.OK)
-            info.add_button("Dismiss", Gtk.ResponseType.CLOSE)
-            info.connect("response", on_info)
+
+            go_btn = Gtk.Button(label="Go to Contacts")
+            go_btn.connect("clicked", lambda *_: (dismiss_info(),
+                                                  self.stack.set_visible_child_name("contacts")))
+            dismiss_btn = Gtk.Button(label="Dismiss")
+            dismiss_btn.connect("clicked", dismiss_info)
+            info.pack_start(go_btn, False, False, 0)
+            info.pack_start(dismiss_btn, False, False, 0)
             root.pack_start(info, False, False, 0)
 
         root.pack_start(self.away_banner, False, False, 0)
